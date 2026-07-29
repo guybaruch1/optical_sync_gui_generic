@@ -8,6 +8,7 @@ module can be unit-tested with plain numpy arrays.
 
 import cv2
 import numpy as np
+import pyrealsense2 as rs
 
 
 def sample_neighborhood_brightness(image, x, y, size=5):
@@ -98,13 +99,35 @@ def detect_led_centroids(image, threshold, min_area):
     return centroids, chosen_threshold
 
 
+DECODERS = {
+    # Infrared formats
+    rs.format.y8:    lambda b, w, h: np.frombuffer(b, np.uint8).reshape((h, w)).copy(),
+    rs.format.y16:   lambda b, w, h: np.frombuffer(b, np.uint16).reshape((h, w)).copy(),
+    # Color formats — a color sensor can report any of these depending on model/driver
+    rs.format.yuyv:  lambda b, w, h: cv2.cvtColor(np.frombuffer(b, np.uint8).reshape((h, w, 2)), cv2.COLOR_YUV2BGR_YUYV),
+    rs.format.uyvy:  lambda b, w, h: cv2.cvtColor(np.frombuffer(b, np.uint8).reshape((h, w, 2)), cv2.COLOR_YUV2BGR_UYVY),
+    rs.format.bgr8:  lambda b, w, h: np.frombuffer(b, np.uint8).reshape((h, w, 3)).copy(),
+    rs.format.rgb8:  lambda b, w, h: cv2.cvtColor(np.frombuffer(b, np.uint8).reshape((h, w, 3)), cv2.COLOR_RGB2BGR),
+    rs.format.bgra8: lambda b, w, h: cv2.cvtColor(np.frombuffer(b, np.uint8).reshape((h, w, 4)), cv2.COLOR_BGRA2BGR),
+    rs.format.rgba8: lambda b, w, h: cv2.cvtColor(np.frombuffer(b, np.uint8).reshape((h, w, 4)), cv2.COLOR_RGBA2BGR),
+    rs.format.mjpeg: lambda b, w, h: cv2.imdecode(np.frombuffer(b, np.uint8), cv2.IMREAD_COLOR),
+}
+
+
+def decode_frame(raw_bytes, fmt, width, height):
+    if fmt not in DECODERS:
+        raise RuntimeError(f"No decoder for format {fmt} - pick a different format in Stream Select, or add one to DECODERS.")
+    return DECODERS[fmt](raw_bytes, width, height)
+
+
 def ir_bytes_to_image(raw_bytes, width, height):
-    return np.frombuffer(raw_bytes, dtype=np.uint8).reshape((height, width)).copy()
+    """Deprecated: use decode_frame(raw_bytes, rs.format.y8, width, height) instead."""
+    return decode_frame(raw_bytes, rs.format.y8, width, height)
 
 
 def yuyv_to_bgr(raw_bytes, width, height):
-    arr = np.frombuffer(raw_bytes, dtype=np.uint8).reshape((height, width, 2))
-    return cv2.cvtColor(arr, cv2.COLOR_YUV2BGR_YUYV)
+    """Deprecated: use decode_frame(raw_bytes, rs.format.yuyv, width, height) instead."""
+    return decode_frame(raw_bytes, rs.format.yuyv, width, height)
 
 
 def save_debug_detection_image(image, centroids, path):
@@ -130,7 +153,7 @@ def draw_led_state_overlay(image, xy_positions, on_mask):
     return debug_img
 
 
-def draw_bundle_overlay(image, bundle_index, ir_frame_number, color_frame_number, ir_ts_us, color_ts_us, delta_us):
+def draw_bundle_overlay(image, bundle_index, stream_a_frame_number, stream_b_frame_number, stream_a_ts_us, stream_b_ts_us, delta_us):
     """Burns a live pairing-quality diagnostic overlay (bundle counter,
     each stream's own HW frame number, HW timestamps, and their delta) onto
     a copy of the given frame - used by the Stream Config page's live
@@ -140,8 +163,8 @@ def draw_bundle_overlay(image, bundle_index, ir_frame_number, color_frame_number
     font = cv2.FONT_HERSHEY_SIMPLEX
     lines = [
         ("Bundle: {}".format(bundle_index), (0, 255, 0)),
-        ("IR Frame: {}  |  Color Frame: {}".format(ir_frame_number, color_frame_number), (0, 255, 255)),
-        ("IR Timestamp: {:.0f}  |  Color Timestamp: {:.0f}".format(ir_ts_us, color_ts_us), (0, 255, 255)),
+        ("Stream A Frame: {}  |  Stream B Frame: {}".format(stream_a_frame_number, stream_b_frame_number), (0, 255, 255)),
+        ("Stream A Timestamp: {:.0f}  |  Stream B Timestamp: {:.0f}".format(stream_a_ts_us, stream_b_ts_us), (0, 255, 255)),
         ("Delta: {:.1f} us".format(delta_us), (255, 255, 0)),
     ]
     y = 25

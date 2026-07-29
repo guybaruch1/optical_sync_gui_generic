@@ -1,4 +1,5 @@
 import numpy as np
+import pyrealsense2 as rs
 from domain.realsense_utils import (
     sample_neighborhood_brightness,
     sample_all_neighborhood_brightness,
@@ -11,6 +12,8 @@ from domain.realsense_utils import (
     save_debug_detection_image,
     draw_bundle_overlay,
     draw_led_state_overlay,
+    decode_frame,
+    DECODERS,
 )
 
 
@@ -125,8 +128,8 @@ def test_draw_bundle_overlay_converts_grayscale_and_draws_text():
     image = np.zeros((100, 300), dtype=np.uint8)
 
     result = draw_bundle_overlay(
-        image, bundle_index=1690, ir_frame_number=1950, color_frame_number=1958,
-        ir_ts_us=4287559946, color_ts_us=4287559980, delta_us=-34.0,
+        image, bundle_index=1690, stream_a_frame_number=1950, stream_b_frame_number=1958,
+        stream_a_ts_us=4287559946, stream_b_ts_us=4287559980, delta_us=-34.0,
     )
 
     assert result.shape == (100, 300, 3)  # grayscale input converted to BGR for drawing
@@ -160,9 +163,44 @@ def test_draw_bundle_overlay_does_not_mutate_bgr_input():
     image = np.zeros((100, 300, 3), dtype=np.uint8)
 
     result = draw_bundle_overlay(
-        image, bundle_index=0, ir_frame_number=0, color_frame_number=0,
-        ir_ts_us=0.0, color_ts_us=0.0, delta_us=0.0,
+        image, bundle_index=0, stream_a_frame_number=0, stream_b_frame_number=0,
+        stream_a_ts_us=0.0, stream_b_ts_us=0.0, delta_us=0.0,
     )
 
     assert (image == 0).all()  # original untouched
     assert (result > 0).any()  # the copy has the drawn text
+
+
+def test_decode_frame_y8_reshapes_correctly():
+    raw = bytes(range(6))  # 2x3, 1 byte/pixel
+    image = decode_frame(raw, rs.format.y8, width=3, height=2)
+    assert image.shape == (2, 3)
+    assert image[0].tolist() == [0, 1, 2]
+
+
+def test_decode_frame_bgr8_reshapes_correctly():
+    raw = bytes(range(12))  # 2x2 bgr8, 3 bytes/pixel
+    image = decode_frame(raw, rs.format.bgr8, width=2, height=2)
+    assert image.shape == (2, 2, 3)
+
+
+def test_decode_frame_yuyv_returns_bgr_shape():
+    width, height = 4, 2
+    raw = bytes([128] * (width * height * 2))
+    image = decode_frame(raw, rs.format.yuyv, width, height)
+    assert image.shape == (height, width, 3)
+
+
+def test_decode_frame_raises_for_unsupported_format():
+    import pytest
+    with pytest.raises(RuntimeError):
+        decode_frame(b"", rs.format.z16, width=4, height=4)
+
+
+def test_draw_bundle_overlay_uses_stream_a_stream_b_naming():
+    image = np.zeros((100, 300), dtype=np.uint8)
+    result = draw_bundle_overlay(
+        image, bundle_index=1, stream_a_frame_number=10, stream_b_frame_number=11,
+        stream_a_ts_us=1000.0, stream_b_ts_us=1005.0, delta_us=-5.0,
+    )
+    assert result.shape == (100, 300, 3)
