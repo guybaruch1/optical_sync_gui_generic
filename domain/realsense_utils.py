@@ -102,7 +102,14 @@ def detect_led_centroids(image, threshold, min_area):
 DECODERS = {
     # Infrared formats
     rs.format.y8:    lambda b, w, h: np.frombuffer(b, np.uint8).reshape((h, w)).copy(),
-    rs.format.y16:   lambda b, w, h: np.frombuffer(b, np.uint16).reshape((h, w)).copy(),
+    # NOTE: rs.format.y16 is deliberately NOT included, even though D400
+    # stereo modules advertise it - it decodes to a uint16 array, and
+    # nothing downstream (detect_led_centroids's cv2 calls, VideoPanel.
+    # set_frame's QImage.Format_Grayscale8 assumption) handles anything but
+    # 8-bit. engine/streams.py's list_video_stream_options_from_device
+    # filters the Stream Select picker down to formats present in this dict
+    # for exactly this reason - don't re-add y16 here without also fixing
+    # every 8-bit-only consumer downstream.
     # Color formats — a color sensor can report any of these depending on model/driver
     rs.format.yuyv:  lambda b, w, h: cv2.cvtColor(np.frombuffer(b, np.uint8).reshape((h, w, 2)), cv2.COLOR_YUV2BGR_YUYV),
     rs.format.uyvy:  lambda b, w, h: cv2.cvtColor(np.frombuffer(b, np.uint8).reshape((h, w, 2)), cv2.COLOR_YUV2BGR_UYVY),

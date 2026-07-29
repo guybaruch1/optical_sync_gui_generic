@@ -4,7 +4,7 @@ import time
 import pytest
 import pyrealsense2 as rs
 from engine.streams import (
-    list_devices, list_supported_profiles, match_profile, capture_synced_frame_pair,
+    list_devices, capture_synced_frame_pair,
     enable_auto_exposure,
     list_video_stream_options_from_device, resolve_and_group,
     set_emitter_enabled, set_manual_exposure, stream_slug,
@@ -41,70 +41,6 @@ def test_enable_auto_exposure_returns_false_when_unsupported():
     assert sensor.set_options == {}
 
 
-class FakeVideoProfile:
-    def __init__(self, width, height):
-        self._width = width
-        self._height = height
-
-    def width(self):
-        return self._width
-
-    def height(self):
-        return self._height
-
-
-class FakeProfile:
-    def __init__(self, stream_type, stream_index, fmt, width, height, fps):
-        self._stream_type = stream_type
-        self._stream_index = stream_index
-        self._fmt = fmt
-        self._fps = fps
-        self._video = FakeVideoProfile(width, height)
-
-    def stream_type(self):
-        return self._stream_type
-
-    def stream_index(self):
-        return self._stream_index
-
-    def format(self):
-        return self._fmt
-
-    def fps(self):
-        return self._fps
-
-    def as_video_stream_profile(self):
-        return self._video
-
-
-class FakeSensor:
-    def __init__(self, profiles):
-        self.profiles = profiles
-
-
-def test_list_supported_profiles_filters_by_stream_and_format():
-    sensor = FakeSensor(profiles=[
-        FakeProfile("infrared", 0, "y8", 1280, 720, 30),
-        FakeProfile("infrared", 0, "y8", 640, 480, 60),
-        FakeProfile("color", 0, "yuyv", 1280, 720, 30),
-    ])
-    result = list_supported_profiles(sensor, "infrared", "y8", 0)
-    assert set(result) == {(1280, 720, 30), (640, 480, 60)}
-
-
-def test_match_profile_finds_exact_match():
-    target = FakeProfile("infrared", 0, "y8", 1280, 720, 30)
-    sensor = FakeSensor(profiles=[FakeProfile("infrared", 0, "y8", 640, 480, 60), target])
-    matched = match_profile(sensor, "infrared", "y8", 1280, 720, 30, 0)
-    assert matched is target
-
-
-def test_match_profile_raises_when_nothing_matches():
-    sensor = FakeSensor(profiles=[FakeProfile("infrared", 0, "y8", 640, 480, 60)])
-    with pytest.raises(RuntimeError):
-        match_profile(sensor, "infrared", "y8", 1280, 720, 30, 0)
-
-
 def test_list_devices_lists_any_device_regardless_of_sensor_names():
     # A device whose sensors are named things other than "Stereo Module"/"RGB Camera"
     # (e.g. a D500-series device with different sensor naming) must still be listed.
@@ -134,22 +70,6 @@ def test_list_devices_lists_any_device_regardless_of_sensor_names():
     assert len(result) == 1
     assert result[0].name == "Custom Device"
     assert result[0].serial == "ABC123"
-
-
-def test_list_supported_profiles_filters_by_stream_index():
-    sensor = FakeSensor(profiles=[
-        FakeProfile(rs.stream.color, 1, rs.format.bgr8, 1280, 720, 30),
-        FakeProfile(rs.stream.color, 2, rs.format.bgr8, 1280, 720, 30),
-    ])
-    result = list_supported_profiles(sensor, rs.stream.color, rs.format.bgr8, stream_index=1)
-    assert result == [(1280, 720, 30)]
-
-
-def test_match_profile_finds_exact_match_for_given_stream_index():
-    target = FakeProfile(rs.stream.color, 2, rs.format.bgr8, 1280, 720, 30)
-    sensor = FakeSensor(profiles=[FakeProfile(rs.stream.color, 1, rs.format.bgr8, 1280, 720, 30), target])
-    matched = match_profile(sensor, rs.stream.color, rs.format.bgr8, 1280, 720, 30, stream_index=2)
-    assert matched is target
 
 
 class _FakeFrame:
@@ -267,14 +187,10 @@ def test_capture_synced_frame_pair_raises_on_timeout_when_no_frames_arrive():
 
 # --- list_video_stream_options / resolve_and_group ---
 #
-# Renamed from the brief's FakeVideoProfile/FakeProfile/FakeSensor to
-# FakeVideoProfile2/FakeProfile2/FakeSensor2 (with a FakeDevice added) to
-# avoid clashing with the same-named, differently-shaped fakes already
-# defined above in this file for list_supported_profiles/match_profile/
-# capture_synced_frame_pair - those are module-level class names, and a
-# later class statement redefining them would silently break the earlier
-# tests (which look up the name at call time, after the whole module has
-# finished importing).
+# Named FakeVideoProfile2/FakeProfile2/FakeSensor2 (with a FakeDevice added)
+# to avoid clashing with the differently-shaped _FakeFrame/_FakeStreamingSensor/
+# _FakeNonDeliveringSensor fakes defined above in this file for
+# capture_synced_frame_pair.
 
 class FakeVideoProfile2:
     def __init__(self, width, height):
@@ -342,6 +258,22 @@ def test_list_video_stream_options_excludes_non_video_profiles_without_crashing(
     assert options == []  # no crash from calling width()/height() on a non-video profile
 
 
+def test_list_video_stream_options_excludes_formats_not_in_decoders():
+    # y16 (or any other advertised-but-undecodable format) must never reach
+    # the Stream Select picker - only formats domain.realsense_utils.DECODERS
+    # can actually decode should be choosable.
+    sensor = FakeSensor2(profiles=[
+        FakeProfile2(rs.stream.infrared, 1, rs.format.y16, 1280, 720, 30),
+        FakeProfile2(rs.stream.infrared, 1, rs.format.y8, 1280, 720, 30),
+    ])
+    device = FakeDevice([sensor])
+
+    options = list_video_stream_options_from_device(device)
+
+    assert len(options) == 1
+    assert options[0]["format"] == rs.format.y8
+
+
 def test_resolve_and_group_two_distinct_sensors():
     ir_profile = FakeProfile2(rs.stream.infrared, 1, rs.format.y8, 1280, 720, 30)
     color_profile = FakeProfile2(rs.stream.color, 0, rs.format.bgr8, 1280, 720, 30)
@@ -378,6 +310,42 @@ def test_resolve_and_group_one_shared_sensor():
     sensor, profiles = groups[0]
     assert sensor is shared_sensor
     assert len(profiles) == 2
+
+
+def test_resolve_and_group_raises_when_picks_are_the_same_stream():
+    # Nothing anywhere else guards against Stream A and Stream B being
+    # picked as the identical (stream_type, stream_index) - this is the
+    # engine-layer backstop in case a future caller reaches resolve_and_group
+    # without going through Stream Select's own GUI-level guard.
+    profile = FakeProfile2(rs.stream.infrared, 1, rs.format.y8, 1280, 720, 30)
+    sensor = FakeSensor2(profiles=[profile])
+    device = FakeDevice([sensor])
+    pick_a = {"sensor_index": 0, "stream_type": rs.stream.infrared, "stream_index": 1,
+              "format": rs.format.y8, "width": 1280, "height": 720, "fps": 30}
+    pick_b = dict(pick_a)
+
+    with pytest.raises(RuntimeError):
+        resolve_and_group(device, pick_a, pick_b)
+
+
+def test_resolve_and_group_raises_runtime_error_not_stop_iteration_for_missing_profile():
+    # A pick whose (stream_type, stream_index, format, width, height, fps)
+    # doesn't match anything on its sensor (e.g. the device's profiles
+    # changed since the pick was made - a re-plug or firmware mode switch)
+    # must raise an informative RuntimeError, not a bare StopIteration whose
+    # str() is '' - callers stringify this directly into a user-facing
+    # message.
+    sensor = FakeSensor2(profiles=[FakeProfile2(rs.stream.infrared, 1, rs.format.y8, 1280, 720, 30)])
+    color_sensor = FakeSensor2(profiles=[FakeProfile2(rs.stream.color, 0, rs.format.bgr8, 1280, 720, 30)])
+    device = FakeDevice([sensor, color_sensor])
+    pick_a = {"sensor_index": 0, "stream_type": rs.stream.infrared, "stream_index": 1,
+              "format": rs.format.y8, "width": 1920, "height": 1080, "fps": 60}  # no matching profile
+    pick_b = {"sensor_index": 1, "stream_type": rs.stream.color, "stream_index": 0,
+              "format": rs.format.bgr8, "width": 1280, "height": 720, "fps": 30}
+
+    with pytest.raises(RuntimeError) as excinfo:
+        resolve_and_group(device, pick_a, pick_b)
+    assert str(excinfo.value)  # non-empty, informative message (not a bare StopIteration)
 
 
 def test_set_emitter_enabled_true_when_supported():

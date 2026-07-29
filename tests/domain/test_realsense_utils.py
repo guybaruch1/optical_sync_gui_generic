@@ -180,6 +180,24 @@ def test_decode_frame_raises_for_unsupported_format():
         decode_frame(b"", rs.format.z16, width=4, height=4)
 
 
+def test_y16_is_not_a_decodable_format():
+    # y16 (16-bit-per-pixel) is advertised by D400 stereo modules but
+    # nothing downstream handles anything but 8-bit - it must never be
+    # offered as a pickable Stream Select option (see
+    # engine/streams.py's list_video_stream_options_from_device, which
+    # filters against this dict).
+    assert rs.format.y16 not in DECODERS
+
+
+def test_decode_frame_raises_for_y16():
+    import pytest
+    # Defense in depth, in case y16 is ever re-added to DECODERS by mistake -
+    # decode_frame should still refuse it via its existing "not in DECODERS"
+    # RuntimeError.
+    with pytest.raises(RuntimeError):
+        decode_frame(b"", rs.format.y16, width=4, height=4)
+
+
 def test_draw_bundle_overlay_uses_stream_a_stream_b_naming():
     image = np.zeros((100, 300), dtype=np.uint8)
     result = draw_bundle_overlay(

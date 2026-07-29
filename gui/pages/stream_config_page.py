@@ -167,6 +167,7 @@ class StreamConfigPage(QWidget):
             combo.blockSignals(False)
             self._preselect(combo, preferred)
 
+        self._avoid_collision(self.combo_a, self.combo_b)
         self._refresh_camera_control_groups()
 
     def _preselect(self, combo, preferred):
@@ -176,6 +177,31 @@ class StreamConfigPage(QWidget):
             option = combo.itemData(index)
             if all(option.get(key) == value for key, value in preferred.items()):
                 combo.setCurrentIndex(index)
+                return
+
+    def _avoid_collision(self, combo_a, combo_b):
+        """Called once after both combos have been preselected: if they
+        landed on the exact same (stream_type, stream_index) - which
+        happens whenever preferred_a/preferred_b match the same single
+        option, e.g. settings.yaml's stream_a/stream_b defaults being
+        identical dicts on first launch - advance combo_b to the first
+        OTHER option that differs from combo_a's current selection, so the
+        wizard never opens on an unusable "Stream A == Stream B" state. If
+        every available option is the same stream (a single-stream device),
+        leave combo_b where it is; the explicit guards in
+        _on_next_clicked/_on_start_preview_clicked and engine.streams.
+        resolve_and_group's own check still catch that before anything bad
+        happens."""
+        option_a = combo_a.currentData()
+        option_b = combo_b.currentData()
+        if option_a is None or option_b is None:
+            return
+        if (option_a["stream_type"], option_a["stream_index"]) != (option_b["stream_type"], option_b["stream_index"]):
+            return
+        for index in range(combo_b.count()):
+            option = combo_b.itemData(index)
+            if (option["stream_type"], option["stream_index"]) != (option_a["stream_type"], option_a["stream_index"]):
+                combo_b.setCurrentIndex(index)
                 return
 
     def _refresh_camera_control_groups(self):
@@ -209,6 +235,13 @@ class StreamConfigPage(QWidget):
         emitter_checkbox = None
         if group["has_infrared"]:
             emitter_checkbox = QCheckBox("Disable IR emitter")
+            # Default to checked (emitter disabled): both prior projects this
+            # generalizes (optical_sync_gui, optical_sync_gui_d585) hardcoded
+            # the IR emitter OFF unconditionally, since the structured-light
+            # projector pattern corrupts LED blob detection and calibrated
+            # on/off thresholds if left on. Manual opt-out (unchecking) is
+            # still available for whoever needs the emitter on.
+            emitter_checkbox.setChecked(True)
             box_layout.addWidget(emitter_checkbox)
 
         auto_radio = QRadioButton("Auto exposure")
@@ -274,6 +307,11 @@ class StreamConfigPage(QWidget):
         pick_b = self.pick_b
         if pick_a is None or pick_b is None:
             return
+        if pick_a["stream_type"] == pick_b["stream_type"] and pick_a["stream_index"] == pick_b["stream_index"]:
+            self.status_label.setText(
+                "Stream A and Stream B must be different streams - pick two different combo entries."
+            )
+            return
 
         self.status_label.setText("")
         self.preview_thread = StreamPreviewThread(self.ctx, self.device_serial, pick_a, pick_b)
@@ -307,6 +345,11 @@ class StreamConfigPage(QWidget):
         pick_a = self.pick_a
         pick_b = self.pick_b
         if pick_a is None or pick_b is None:
+            return
+        if pick_a["stream_type"] == pick_b["stream_type"] and pick_a["stream_index"] == pick_b["stream_index"]:
+            self.status_label.setText(
+                "Stream A and Stream B must be different streams - pick two different combo entries."
+            )
             return
         self._stop_preview()
         camera_controls = self._read_camera_controls()

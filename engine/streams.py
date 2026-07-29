@@ -14,8 +14,9 @@ hence ContinuousCapture.
 import time
 from dataclasses import dataclass
 
-import numpy as np
 import pyrealsense2 as rs
+
+from domain.realsense_utils import DECODERS
 
 
 @dataclass
@@ -54,6 +55,14 @@ def list_video_stream_options_from_device(device):
             if not p.is_video_stream_profile():
                 continue
             if p.stream_type() not in (rs.stream.infrared, rs.stream.color):
+                continue
+            if p.format() not in DECODERS:
+                # Advertised but undecodable format (e.g. y16 - see
+                # domain/realsense_utils.py's DECODERS docstring/comment) -
+                # never offer it as a pickable option, since nothing
+                # downstream (LED-blob detection, VideoPanel's 8-bit
+                # QImage assumption) can handle anything but what DECODERS
+                # already covers.
                 continue
             vp = p.as_video_stream_profile()
             options.append({
@@ -102,11 +111,24 @@ def resolve_and_group(device, pick_a, pick_b):
     which matters because sensor.open()/.start() must be called once per
     distinct sensor object, with all of that sensor's wanted profiles passed
     together, not once per stream."""
+    if pick_a["stream_type"] == pick_b["stream_type"] and pick_a["stream_index"] == pick_b["stream_index"]:
+        raise RuntimeError(
+            "resolve_and_group: pick_a and pick_b are the same stream ({!r} index {}) - Stream "
+            "Select must choose two distinct streams.".format(pick_a["stream_type"], pick_a["stream_index"])
+        )
+
     sensors = list(device.query_sensors())
 
     def sensor_and_profile_for(pick):
         sensor = sensors[pick["sensor_index"]]
-        profile = next(p for p in sensor.profiles if _pick_matches(p, pick))
+        try:
+            profile = next(p for p in sensor.profiles if _pick_matches(p, pick))
+        except StopIteration:
+            raise RuntimeError(
+                "resolve_and_group: no matching profile found on sensor {} for pick {!r} - the "
+                "device's available profiles may have changed since this pick was made (e.g. "
+                "after a firmware mode switch or reconnect).".format(pick["sensor_index"], pick)
+            )
         return sensor, profile
 
     sensor_a, profile_a = sensor_and_profile_for(pick_a)
@@ -115,35 +137,6 @@ def resolve_and_group(device, pick_a, pick_b):
     if sensor_a is sensor_b:
         return [(sensor_a, [profile_a, profile_b])]
     return [(sensor_a, [profile_a]), (sensor_b, [profile_b])]
-
-
-def list_supported_profiles(sensor, stream_type, fmt, stream_index):
-    results = set()
-    for p in sensor.profiles:
-        if p.stream_type() != stream_type or p.format() != fmt:
-            continue
-        if p.stream_index() != stream_index:
-            continue
-        vp = p.as_video_stream_profile()
-        results.add((vp.width(), vp.height(), p.fps()))
-    return sorted(results)
-
-
-def match_profile(sensor, stream_type, fmt, width, height, fps, stream_index):
-    for p in sensor.profiles:
-        vp = p.as_video_stream_profile()
-        if (
-            p.stream_type() == stream_type
-            and p.format() == fmt
-            and vp.width() == width
-            and vp.height() == height
-            and p.fps() == fps
-            and p.stream_index() == stream_index
-        ):
-            return p
-    raise RuntimeError(
-        "No matching profile for {} {}x{}@{}fps ({})".format(stream_type, width, height, fps, fmt)
-    )
 
 
 def _try_get_stream_key(profile):
@@ -332,13 +325,21 @@ def set_manual_exposure(sensor, exposure, gain):
 
 
 class ContinuousCapture:
-    def __init__(self, pick_a, pick_b):
+    def __init__(self, device_serial, pick_a, pick_b):
+        self.device_serial = device_serial
         self.pick_a = pick_a
         self.pick_b = pick_b
         self._pipeline = None
 
     def start(self):
         config = rs.config()
+        # Bind the pipeline to the exact physical device chosen in Device
+        # Select - without this, with more than one RealSense camera
+        # attached, rs.pipeline() can silently pick a DIFFERENT device than
+        # the one the operator selected (and than capture_synced_frame_pair,
+        # which resolves via find_device_by_serial, correctly uses for
+        # ROI/calibration), producing a wrong-camera bug with no error.
+        config.enable_device(self.device_serial)
         for pick in (self.pick_a, self.pick_b):
             config.enable_stream(pick["stream_type"], pick["stream_index"], pick["width"], pick["height"], pick["format"], pick["fps"])
         self._pipeline = rs.pipeline()

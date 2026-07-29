@@ -60,7 +60,13 @@ def update_config_leds(config_path, camera_name, stream_a_slug, stream_a_positio
         yaml.safe_dump(cfg, f, sort_keys=False)
 
 
-def load_led_positions(config_path, camera_name, stream_a_slug, stream_b_slug):
+def load_led_positions(config_path, camera_name, stream_a_slug, stream_a_res, stream_b_slug, stream_b_res):
+    """stream_a_res/stream_b_res are (width, height) tuples for the
+    CURRENTLY-picked stream resolution - checked against what
+    update_config_leds stored at calibration time, since Stream Select lets
+    an operator freely pick any resolution and silently sampling calibrated
+    pixel coordinates against a differently-sized live frame produces
+    garbage position_gap_ms results with no warning otherwise."""
     with open(config_path, "r") as f:
         cfg = yaml.safe_load(f)
     leds_by_camera = cfg.get("leds", {})
@@ -70,4 +76,17 @@ def load_led_positions(config_path, camera_name, stream_a_slug, stream_b_slug):
             "No LED calibration yet for camera {!r} streams {!r}/{!r} - run calibration with "
             "this exact stream pair first.".format(camera_name, stream_a_slug, stream_b_slug)
         )
+
+    for slug, current_res in ((stream_a_slug, stream_a_res), (stream_b_slug, stream_b_res)):
+        entry = camera_entry[slug]
+        stored_res = (entry["frame_width"], entry["frame_height"])
+        if stored_res != tuple(current_res):
+            raise RuntimeError(
+                "Calibration for camera {!r} stream {!r} was done at resolution {}, but the "
+                "currently-picked resolution is {} - re-run calibration at the current "
+                "resolution before starting a live session.".format(
+                    camera_name, slug, stored_res, tuple(current_res)
+                )
+            )
+
     return camera_entry[stream_a_slug]["positions"], camera_entry[stream_b_slug]["positions"]

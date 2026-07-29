@@ -129,7 +129,7 @@ class SessionEngineThread(QThread):
                 LEDPanel.set_speed_ms(self.switch_time_ms)
                 LEDPanel.start()
 
-            self._capture = ContinuousCapture(self.pick_a, self.pick_b)
+            self._capture = ContinuousCapture(self.device_serial, self.pick_a, self.pick_b)
             self._capture.start()
             self._start_time = time.time()
 

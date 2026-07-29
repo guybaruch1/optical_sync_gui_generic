@@ -99,6 +99,23 @@ def test_populate_leaves_default_selection_when_preferred_not_found(qapp):
     assert page.combo_a.currentData() == IR1  # unchanged, first item
 
 
+def test_populate_avoids_collision_when_preferred_a_and_b_match_the_same_option(qapp):
+    # Regression test: settings.yaml's camera.stream_a/stream_b shipped as
+    # identical dicts, so on first launch both combos preselected onto the
+    # SAME stream option - nothing then stopped Stream A and Stream B from
+    # being the same stream. populate() must land combo_a/combo_b on
+    # different (stream_type, stream_index) pairs whenever at least one
+    # other distinct option is available.
+    page = StreamConfigPage()
+    same_preferred = {"width": 1280, "height": 720, "fps": 30}
+    page.populate(
+        ctx=None, device_serial="123", stream_options=[IR1, IR2, COLOR0],
+        preferred_a=same_preferred, preferred_b=same_preferred,
+    )
+    pick_a, pick_b = page.pick_a, page.pick_b
+    assert (pick_a["stream_type"], pick_a["stream_index"]) != (pick_b["stream_type"], pick_b["stream_index"])
+
+
 # --- .pick_a / .pick_b accessors (documented produced interface - Task 18's
 # main_window.py rewiring reads these to get the page's live selections) ---
 
@@ -173,7 +190,7 @@ def test_next_emits_picks_and_default_auto_exposure_camera_controls(qapp):
     assert camera_controls[0]["auto_exposure"] is True
     assert camera_controls[0]["exposure"] is None
     assert camera_controls[0]["gain"] is None
-    assert camera_controls[0]["emitter_enabled"] is True  # checkbox unchecked -> emitter left enabled
+    assert camera_controls[0]["emitter_enabled"] is False  # checkbox checked by default -> emitter disabled
     assert camera_controls[1]["emitter_enabled"] is None  # no infrared in this group -> N/A
 
 
@@ -198,18 +215,59 @@ def test_manual_exposure_selection_reports_spinbox_values(qapp):
     assert camera_controls[0]["gain"] == 32
 
 
-def test_checked_disable_emitter_checkbox_reports_emitter_disabled(qapp):
+def test_unchecking_disable_emitter_checkbox_reports_emitter_enabled(qapp):
+    # The checkbox now defaults to checked (emitter disabled - see
+    # test_next_emits_picks_and_default_auto_exposure_camera_controls above
+    # for coverage of the default itself). This test covers the OTHER
+    # state: explicitly opting OUT of the default by unchecking it.
     page = StreamConfigPage()
     page.populate(ctx=None, device_serial="123", stream_options=[IR1, COLOR0])
     page.combo_a.setCurrentIndex(0)
     page.combo_b.setCurrentIndex(1)
 
     ir_group = page._camera_control_widgets[0]
-    ir_group["emitter_checkbox"].setChecked(True)
+    ir_group["emitter_checkbox"].setChecked(False)
 
     received = []
     page.config_chosen.connect(lambda payload: received.append(payload))
     page._on_next_clicked()
 
     _, _, camera_controls = received[0]
-    assert camera_controls[0]["emitter_enabled"] is False
+    assert camera_controls[0]["emitter_enabled"] is True
+
+
+# --- Stream A / Stream B collision guard (Fix 1: nothing else stopped the
+# same stream from being picked as both Stream A and Stream B) ---
+
+def test_on_next_clicked_does_not_emit_when_picks_are_the_same_stream(qapp):
+    page = StreamConfigPage()
+    page.populate(ctx=None, device_serial="123", stream_options=[IR1, IR2, COLOR0])
+    page.combo_a.setCurrentIndex(0)
+    page.combo_b.setCurrentIndex(0)  # same option as combo_a
+
+    received = []
+    page.config_chosen.connect(lambda payload: received.append(payload))
+    page._on_next_clicked()
+
+    assert received == []
+    assert "different streams" in page.status_label.text()
+
+
+def test_on_start_preview_clicked_does_not_start_preview_when_picks_are_the_same_stream(qapp, monkeypatch):
+    page = StreamConfigPage()
+    page.populate(ctx=None, device_serial="123", stream_options=[IR1, IR2, COLOR0])
+    page.combo_a.setCurrentIndex(0)
+    page.combo_b.setCurrentIndex(0)  # same option as combo_a
+
+    constructed = []
+    import gui.pages.stream_config_page as stream_config_page_module
+    monkeypatch.setattr(
+        stream_config_page_module, "StreamPreviewThread",
+        lambda *a, **k: constructed.append((a, k)),
+    )
+
+    page._on_start_preview_clicked()
+
+    assert constructed == []
+    assert page.preview_thread is None
+    assert "different streams" in page.status_label.text()

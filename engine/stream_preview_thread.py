@@ -28,7 +28,7 @@ class StreamPreviewThread(QThread):
 
     def run(self):
         try:
-            self._capture = ContinuousCapture(self.pick_a, self.pick_b)
+            self._capture = ContinuousCapture(self.device_serial, self.pick_a, self.pick_b)
             self._capture.start()
 
             bundle_index = 0

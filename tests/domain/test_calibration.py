@@ -60,11 +60,13 @@ def test_load_led_positions_returns_slug_keyed_dicts(tmp_path):
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.safe_dump({
         "leds": {"Test Camera": {
-            "infrared1": {"positions": {"0": [1.0, 2.0, 255.0, 100.0, 177.5]}},
-            "infrared2": {"positions": {"0": [3.0, 4.0, 250.0, 90.0, 170.0]}},
+            "infrared1": {"frame_width": 1280, "frame_height": 720, "positions": {"0": [1.0, 2.0, 255.0, 100.0, 177.5]}},
+            "infrared2": {"frame_width": 1280, "frame_height": 720, "positions": {"0": [3.0, 4.0, 250.0, 90.0, 170.0]}},
         }}
     }))
-    stream_a_positions, stream_b_positions = load_led_positions(str(config_path), "Test Camera", "infrared1", "infrared2")
+    stream_a_positions, stream_b_positions = load_led_positions(
+        str(config_path), "Test Camera", "infrared1", (1280, 720), "infrared2", (1280, 720)
+    )
     assert stream_a_positions["0"] == [1.0, 2.0, 255.0, 100.0, 177.5]
     assert stream_b_positions["0"] == [3.0, 4.0, 250.0, 90.0, 170.0]
 
@@ -73,7 +75,20 @@ def test_load_led_positions_raises_for_uncalibrated_stream_pair(tmp_path):
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.safe_dump({"leds": {"Test Camera": {"color": {}}}}))
     with pytest.raises(KeyError):
-        load_led_positions(str(config_path), "Test Camera", "infrared1", "infrared2")
+        load_led_positions(str(config_path), "Test Camera", "infrared1", (1280, 720), "infrared2", (1280, 720))
+
+
+def test_load_led_positions_raises_when_stored_resolution_does_not_match_current(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump({
+        "leds": {"Test Camera": {
+            "infrared1": {"frame_width": 1280, "frame_height": 720, "positions": {"0": [1.0, 2.0, 255.0, 100.0, 177.5]}},
+            "infrared2": {"frame_width": 1280, "frame_height": 720, "positions": {"0": [3.0, 4.0, 250.0, 90.0, 170.0]}},
+        }}
+    }))
+    with pytest.raises(RuntimeError):
+        # calibrated at 1280x720, but the currently-picked resolution is 640x480
+        load_led_positions(str(config_path), "Test Camera", "infrared1", (640, 480), "infrared2", (1280, 720))
 
 
 def test_update_config_leds_preserves_other_stream_slugs_on_same_camera(tmp_path):

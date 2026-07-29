@@ -29,7 +29,13 @@ from settings import ensure_output_dir
 
 
 def _controls_for_pick(pick, camera_controls):
-    return next(c for c in camera_controls if pick["sensor_index"] in c["sensor_indices"])
+    for c in camera_controls:
+        if pick["sensor_index"] in c["sensor_indices"]:
+            return c
+    raise RuntimeError(
+        "No camera_controls entry found for sensor_index {} - camera_controls/groups may be "
+        "out of sync with the current picks.".format(pick["sensor_index"])
+    )
 
 
 class MainWindow(QMainWindow):
@@ -144,7 +150,11 @@ class MainWindow(QMainWindow):
         camera_name = self._current_device_name()
         config_path = self.settings["paths"]["config_path"]
         slug_a, slug_b = stream_slug(pick_a), stream_slug(pick_b)
-        stream_a_positions, stream_b_positions = load_led_positions(config_path, camera_name, slug_a, slug_b)
+        stream_a_positions, stream_b_positions = load_led_positions(
+            config_path, camera_name,
+            slug_a, (pick_a["width"], pick_a["height"]),
+            slug_b, (pick_b["width"], pick_b["height"]),
+        )
 
         stream_a_ids = list(stream_a_positions.keys())
         stream_b_ids = list(stream_b_positions.keys())
