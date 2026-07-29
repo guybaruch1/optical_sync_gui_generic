@@ -12,17 +12,20 @@ thread and reach the UI safely.
 from PySide6.QtCore import QThread, Signal
 
 from engine.acquisition_loop import AcquisitionLoop, AcquisitionCallbacks
-from engine.streams import ContinuousCapture, disable_ir_emitter, enable_auto_exposure, get_sensors_for_device
+from engine.streams import (
+    ContinuousCapture, find_device_by_serial, resolve_and_group,
+    set_emitter_enabled, enable_auto_exposure, set_manual_exposure,
+)
 from engine.led_panel import LEDPanel
 from domain.realsense_utils import sample_all_neighborhood_brightness
 
 
 class SessionEngineThread(QThread):
-    # 4th payload item is (ir_on_mask, rgb_on_mask) - a snapshot copy taken
+    # 4th payload item is (stream_a_on_mask, stream_b_on_mask) - a snapshot copy taken
     # synchronously on this thread at the same pair_index as the image, or
     # None if position_gap_metric wasn't provided. Bundling it into the
     # signal (rather than having the GUI thread read
-    # position_gap_metric.last_ir_on_mask/last_rgb_on_mask later) is
+    # position_gap_metric.last_stream_a_on_mask/last_stream_b_on_mask later) is
     # deliberate: those attributes are overwritten every pair by this
     # background thread, which keeps running unblocked while a queued
     # cross-thread signal waits to be processed on the GUI thread - by the
@@ -34,20 +37,19 @@ class SessionEngineThread(QThread):
     session_finished = Signal(list)
     error = Signal(str)
 
-    def __init__(self, ctx, device_serial, ir_resolution, ir_fps, color_resolution, color_fps,
-                 test_session, ir_xy=None, rgb_xy=None, neighborhood_size=5,
+    def __init__(self, ctx, device_serial, pick_a, pick_b, camera_controls,
+                 test_session, stream_a_xy=None, stream_b_xy=None, neighborhood_size=5,
                  scan_direction=None, switch_time_ms=None,
                  display_stride=10, position_gap_metric=None, parent=None):
         super().__init__(parent)
         self.ctx = ctx
         self.device_serial = device_serial
-        self.ir_resolution = ir_resolution
-        self.ir_fps = ir_fps
-        self.color_resolution = color_resolution
-        self.color_fps = color_fps
+        self.pick_a = pick_a
+        self.pick_b = pick_b
+        self.camera_controls = camera_controls
         self.test_session = test_session
-        self.ir_xy = ir_xy
-        self.rgb_xy = rgb_xy
+        self.stream_a_xy = stream_a_xy
+        self.stream_b_xy = stream_b_xy
         self.neighborhood_size = neighborhood_size
         self.scan_direction = scan_direction
         self.switch_time_ms = switch_time_ms
@@ -68,26 +70,50 @@ class SessionEngineThread(QThread):
         generic hardware-capture primitive with no notion of LED positions or
         metrics (gui/pages/calibration_page.py, a later task, consumes its raw
         4-tuple directly for exactly that reason)."""
-        for ir_image, rgb_image, ir_ts_us, rgb_ts_us in self._capture.frames():
-            ir_bright = (
-                sample_all_neighborhood_brightness(ir_image, self.ir_xy, self.neighborhood_size)
-                if self.ir_xy is not None else None
+        for stream_a_image, stream_b_image, stream_a_ts_us, stream_b_ts_us in self._capture.frames():
+            stream_a_bright = (
+                sample_all_neighborhood_brightness(stream_a_image, self.stream_a_xy, self.neighborhood_size)
+                if self.stream_a_xy is not None else None
             )
-            rgb_bright = (
-                sample_all_neighborhood_brightness(rgb_image, self.rgb_xy, self.neighborhood_size)
-                if self.rgb_xy is not None else None
+            stream_b_bright = (
+                sample_all_neighborhood_brightness(stream_b_image, self.stream_b_xy, self.neighborhood_size)
+                if self.stream_b_xy is not None else None
             )
-            yield ir_image, rgb_image, ir_ts_us, rgb_ts_us, ir_bright, rgb_bright
+            yield stream_a_image, stream_b_image, stream_a_ts_us, stream_b_ts_us, stream_a_bright, stream_b_bright
 
     def run(self):
         import time
 
         try:
-            stereo_sensor, rgb_sensor = get_sensors_for_device(self.ctx, self.device_serial)
-            if not disable_ir_emitter(stereo_sensor):
-                self.error.emit("This sensor/firmware does not expose emitter_enabled - confirm the IR projector is off manually.")
-            if not enable_auto_exposure(rgb_sensor):
-                self.error.emit("This sensor/firmware does not expose enable_auto_exposure - confirm RGB auto-exposure is on manually.")
+            device = find_device_by_serial(self.ctx, self.device_serial)
+            groups = resolve_and_group(device, self.pick_a, self.pick_b)
+            # Applies each camera_controls entry (from Stream Select) to the group at
+            # the same list position - resolve_and_group and Stream Select's
+            # group_camera_controls both build their groups in the same
+            # pick_a-then-pick_b order from the same sensor_index equality test, so
+            # groups[i] and self.camera_controls[i] always describe the same
+            # physical sensor. Mirrors gui/pages/roi_select_page.py's
+            # _apply_camera_controls - duplicated here rather than imported since
+            # this is hardware-thread code, not GUI code.
+            for (sensor, _profiles), control in zip(groups, self.camera_controls):
+                if control["emitter_enabled"] is not None:
+                    if not set_emitter_enabled(sensor, control["emitter_enabled"]):
+                        self.error.emit(
+                            "WARNING: emitter_enabled not supported on sensor(s) {} - confirm the "
+                            "emitter state manually.".format(control["sensor_indices"])
+                        )
+                if control["auto_exposure"]:
+                    if not enable_auto_exposure(sensor):
+                        self.error.emit(
+                            "WARNING: enable_auto_exposure not supported on sensor(s) {} - confirm "
+                            "auto-exposure manually.".format(control["sensor_indices"])
+                        )
+                else:
+                    if not set_manual_exposure(sensor, control["exposure"], control["gain"]):
+                        self.error.emit(
+                            "WARNING: manual exposure/gain not supported on sensor(s) {} - confirm "
+                            "exposure settings manually.".format(control["sensor_indices"])
+                        )
 
             # Puts the panel into single-LED scanning mode at the configured
             # speed/direction and actually starts it moving - ported from
@@ -103,27 +129,27 @@ class SessionEngineThread(QThread):
                 LEDPanel.set_speed_ms(self.switch_time_ms)
                 LEDPanel.start()
 
-            self._capture = ContinuousCapture(self.ir_resolution, self.ir_fps, self.color_resolution, self.color_fps)
+            self._capture = ContinuousCapture(self.pick_a, self.pick_b)
             self._capture.start()
             self._start_time = time.time()
 
-            def on_frames(ir_image, rgb_image, pair_index):
+            def on_frames(stream_a_image, stream_b_image, pair_index):
                 # Read+copy here, synchronously, still within the same
                 # acquisition-loop iteration that just processed this exact
                 # pair_index (process_pair() runs immediately before
                 # on_frames() in AcquisitionLoop.run_until_stopped) - the
                 # copy is what makes it safe to read on the GUI thread
-                # later, since last_ir_on_mask/last_rgb_on_mask will keep
+                # later, since last_stream_a_on_mask/last_stream_b_on_mask will keep
                 # changing underneath it on this thread in the meantime.
                 if self.position_gap_metric is not None:
-                    ir_mask = self.position_gap_metric.last_ir_on_mask
-                    rgb_mask = self.position_gap_metric.last_rgb_on_mask
-                    ir_mask = ir_mask.copy() if ir_mask is not None else None
-                    rgb_mask = rgb_mask.copy() if rgb_mask is not None else None
+                    stream_a_mask = self.position_gap_metric.last_stream_a_on_mask
+                    stream_b_mask = self.position_gap_metric.last_stream_b_on_mask
+                    stream_a_mask = stream_a_mask.copy() if stream_a_mask is not None else None
+                    stream_b_mask = stream_b_mask.copy() if stream_b_mask is not None else None
                 else:
-                    ir_mask = rgb_mask = None
-                self.frame_ready.emit("ir", ir_image, pair_index, ir_mask)
-                self.frame_ready.emit("rgb", rgb_image, pair_index, rgb_mask)
+                    stream_a_mask = stream_b_mask = None
+                self.frame_ready.emit("stream_a", stream_a_image, pair_index, stream_a_mask)
+                self.frame_ready.emit("stream_b", stream_b_image, pair_index, stream_b_mask)
 
             def on_row(row):
                 self.row_ready.emit(row)
