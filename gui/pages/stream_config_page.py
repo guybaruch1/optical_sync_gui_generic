@@ -38,16 +38,19 @@ _STREAM_TYPE_LABELS = {
 
 def _stream_option_label(option):
     """Formats one list_video_stream_options() entry as a combo-box label,
-    e.g. "Infrared 1 - 1280x720@30fps (y8)" / "Color - 1280x720@30fps
-    (bgr8)". Infrared entries include the stream_index (there can be two,
-    left/right) - color entries omit it since there's normally only one,
-    and when there are two (Dual RGB) the resolved sensor_index/format
-    still disambiguates them in the underlying option dict even if the
-    label doesn't spell out the index."""
+    e.g. "Infrared 1 - 1280x720@30fps (y8)" / "Color 1 - 1280x720@30fps
+    (bgr8)". stream_index is ALWAYS appended, for both infrared and color:
+    a Dual RGB device (or any device exposing two color stream indices on
+    one sensor) can otherwise produce two options that are identical in
+    every other field (same sensor, same resolution/fps/format), which
+    would render as two visually indistinguishable combo entries - the
+    operator would have no way to tell which one they were picking for
+    Stream A vs Stream B. Always including stream_index keeps every label
+    unique regardless of how many streams of a given type the device
+    exposes."""
     stream_type = option["stream_type"]
     type_label = _STREAM_TYPE_LABELS.get(stream_type, stream_type.name.capitalize())
-    if stream_type == rs.stream.infrared:
-        type_label = "{} {}".format(type_label, option["stream_index"])
+    type_label = "{} {}".format(type_label, option["stream_index"])
     return "{} - {}x{}@{}fps ({})".format(
         type_label, option["width"], option["height"], option["fps"], option["format"].name,
     )
@@ -128,6 +131,23 @@ class StreamConfigPage(QWidget):
         self.next_button.clicked.connect(self._on_next_clicked)
         layout.addWidget(self.next_button)
 
+    @property
+    def pick_a(self):
+        """The currently-selected Stream A option dict (or None before a
+        selection exists), always read live from the combo rather than
+        cached - so it can never drift out of sync with what the operator
+        actually has selected right now. Part of this page's documented
+        produced interface (alongside populate()/config_chosen) - Task 18's
+        gui/main_window.py rewiring reads this to get the live picks
+        without needing to reach into combo_a/combo_b directly."""
+        return self.combo_a.currentData()
+
+    @property
+    def pick_b(self):
+        """The currently-selected Stream B option dict (or None). See
+        pick_a's docstring."""
+        return self.combo_b.currentData()
+
     def populate(self, ctx, device_serial, stream_options, preferred_a=None, preferred_b=None):
         """preferred_a/preferred_b are optional partial-match dicts (e.g.
         {"width": 1280, "height": 720, "fps": 30} from settings.yaml's
@@ -161,8 +181,8 @@ class StreamConfigPage(QWidget):
     def _refresh_camera_control_groups(self):
         self._clear_camera_control_groups()
 
-        pick_a = self.combo_a.currentData()
-        pick_b = self.combo_b.currentData()
+        pick_a = self.pick_a
+        pick_b = self.pick_b
         if pick_a is None or pick_b is None:
             return
 
@@ -250,8 +270,8 @@ class StreamConfigPage(QWidget):
         return controls
 
     def _on_start_preview_clicked(self):
-        pick_a = self.combo_a.currentData()
-        pick_b = self.combo_b.currentData()
+        pick_a = self.pick_a
+        pick_b = self.pick_b
         if pick_a is None or pick_b is None:
             return
 
@@ -284,8 +304,8 @@ class StreamConfigPage(QWidget):
         self._stop_preview()
 
     def _on_next_clicked(self):
-        pick_a = self.combo_a.currentData()
-        pick_b = self.combo_b.currentData()
+        pick_a = self.pick_a
+        pick_b = self.pick_b
         if pick_a is None or pick_b is None:
             return
         self._stop_preview()

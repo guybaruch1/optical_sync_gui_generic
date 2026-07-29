@@ -22,7 +22,19 @@ def test_stream_option_label_formats_infrared_with_stream_index():
 
 
 def test_stream_option_label_formats_color():
-    assert _stream_option_label(COLOR0) == "Color - 1280x720@30fps (bgr8)"
+    assert _stream_option_label(COLOR0) == "Color 0 - 1280x720@30fps (bgr8)"
+
+
+def test_stream_option_label_disambiguates_same_sensor_color_options():
+    # Dual RGB (or any device exposing two color stream indices on one
+    # sensor): COLOR1/COLOR2 are identical in every field except
+    # stream_index - the labels must still differ, or the operator can't
+    # tell which one they're picking for Stream A vs Stream B.
+    label_1 = _stream_option_label(COLOR1)
+    label_2 = _stream_option_label(COLOR2)
+    assert label_1 != label_2
+    assert label_1 == "Color 1 - 1280x720@30fps (bgr8)"
+    assert label_2 == "Color 2 - 1280x720@30fps (bgr8)"
 
 
 # --- group_camera_controls (pure, no Qt/device needed) ---
@@ -85,6 +97,26 @@ def test_populate_leaves_default_selection_when_preferred_not_found(qapp):
         preferred_a={"width": 9999},
     )
     assert page.combo_a.currentData() == IR1  # unchanged, first item
+
+
+# --- .pick_a / .pick_b accessors (documented produced interface - Task 18's
+# main_window.py rewiring reads these to get the page's live selections) ---
+
+def test_pick_a_and_pick_b_return_current_combo_selections(qapp):
+    page = StreamConfigPage()
+    page.populate(ctx=None, device_serial="123", stream_options=[IR1, IR2, COLOR0])
+    page.combo_a.setCurrentIndex(1)  # IR2
+    page.combo_b.setCurrentIndex(2)  # COLOR0
+    assert page.pick_a == IR2
+    assert page.pick_b == COLOR0
+
+
+def test_pick_a_and_pick_b_track_combo_changes_live(qapp):
+    page = StreamConfigPage()
+    page.populate(ctx=None, device_serial="123", stream_options=[IR1, IR2, COLOR0])
+    assert page.pick_a == IR1  # default: first item
+    page.combo_a.setCurrentIndex(1)
+    assert page.pick_a == IR2  # updates without re-calling populate()
 
 
 # --- camera-control-group widget count, driven by group_camera_controls ---
