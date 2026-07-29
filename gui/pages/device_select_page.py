@@ -50,7 +50,15 @@ class DeviceSelectPage(QWidget):
         self._devices = list_devices(ctx)
         self.combo.clear()
         for device in self._devices:
-            mode = get_mode(find_device_by_serial(ctx, device.serial))
+            try:
+                mode = get_mode(find_device_by_serial(ctx, device.serial))
+            except Exception:
+                # The device can vanish between list_devices()'s enumeration
+                # and this per-device mode lookup (e.g. unplugged mid-
+                # refresh). This method runs from MainWindow.__init__, so a
+                # raise here would crash app startup - fall back to "no mode
+                # suffix" for this entry instead.
+                mode = None
             self.combo.addItem(_device_label(device, mode), userData=device.serial)
 
     def _on_next_clicked(self):
@@ -66,8 +74,18 @@ class DeviceSelectPage(QWidget):
         # camera was unplugged mid-wizard).
         name = device_info.name
 
-        device = find_device_by_serial(self.ctx, serial)
-        mode = get_mode(device)
+        try:
+            device = find_device_by_serial(self.ctx, serial)
+            mode = get_mode(device)
+        except Exception as exc:
+            # The device may have vanished (unplugged mid-wizard) between the
+            # last refresh_devices() and this click - fail the same way an
+            # ensure_dual_rgb_mode failure below does, instead of raising
+            # uncaught out of a Qt slot.
+            self.status_label.setText("Failed to read device: {}".format(exc))
+            self.next_button.setEnabled(True)
+            self.combo.setEnabled(True)
+            return
 
         if mode == "dedicated":
             self.status_label.setText("Switching to Dual RGB mode - this takes a few seconds...")
