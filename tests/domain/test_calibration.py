@@ -1,3 +1,4 @@
+import pytest
 import numpy as np
 import yaml
 from domain.calibration import (
@@ -39,45 +40,37 @@ def test_build_positions_with_thresholds_computes_midpoint():
     assert threshold == 150.0
 
 
-def test_update_config_leds_writes_camera_subblock(tmp_path):
+def test_update_config_leds_writes_per_stream_slugs(tmp_path):
     config_path = tmp_path / "config.yaml"
-    config_path.write_text(yaml.safe_dump({"leds": {"Other Camera": {"ir": {}, "rgb": {}}}}))
+    config_path.write_text(yaml.safe_dump({"leds": {"Other Camera": {"color": {}}}}))
 
     update_config_leds(
-        str(config_path),
-        camera_name="Test Camera",
-        ir_positions={"0": [1.0, 2.0, 255.0, 100.0, 177.5]},
-        ir_res=(1280, 720),
-        rgb_positions={"0": [3.0, 4.0, 250.0, 90.0, 170.0]},
-        rgb_res=(1280, 720),
+        str(config_path), camera_name="Test Camera",
+        stream_a_slug="infrared1", stream_a_positions={"0": [1.0, 2.0, 255.0, 100.0, 177.5]}, stream_a_res=(1280, 720),
+        stream_b_slug="color", stream_b_positions={"0": [3.0, 4.0, 250.0, 90.0, 170.0]}, stream_b_res=(1280, 720),
     )
 
     written = yaml.safe_load(config_path.read_text())
     assert "Other Camera" in written["leds"]  # untouched sibling block preserved
-    assert written["leds"]["Test Camera"]["ir"]["positions"]["0"] == [1.0, 2.0, 255.0, 100.0, 177.5]
-    assert written["leds"]["Test Camera"]["rgb"]["frame_width"] == 1280
+    assert written["leds"]["Test Camera"]["infrared1"]["positions"]["0"] == [1.0, 2.0, 255.0, 100.0, 177.5]
+    assert written["leds"]["Test Camera"]["color"]["frame_width"] == 1280
 
 
-def test_load_led_positions_returns_ir_and_rgb_dicts(tmp_path):
+def test_load_led_positions_returns_slug_keyed_dicts(tmp_path):
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.safe_dump({
-        "leds": {
-            "Test Camera": {
-                "ir": {"positions": {"0": [1.0, 2.0, 255.0, 100.0, 177.5]}},
-                "rgb": {"positions": {"0": [3.0, 4.0, 250.0, 90.0, 170.0]}},
-            }
-        }
+        "leds": {"Test Camera": {
+            "infrared1": {"positions": {"0": [1.0, 2.0, 255.0, 100.0, 177.5]}},
+            "infrared2": {"positions": {"0": [3.0, 4.0, 250.0, 90.0, 170.0]}},
+        }}
     }))
-    ir_positions, rgb_positions = load_led_positions(str(config_path), "Test Camera")
-    assert ir_positions["0"] == [1.0, 2.0, 255.0, 100.0, 177.5]
-    assert rgb_positions["0"] == [3.0, 4.0, 250.0, 90.0, 170.0]
+    stream_a_positions, stream_b_positions = load_led_positions(str(config_path), "Test Camera", "infrared1", "infrared2")
+    assert stream_a_positions["0"] == [1.0, 2.0, 255.0, 100.0, 177.5]
+    assert stream_b_positions["0"] == [3.0, 4.0, 250.0, 90.0, 170.0]
 
 
-def test_load_led_positions_raises_for_uncalibrated_camera(tmp_path):
+def test_load_led_positions_raises_for_uncalibrated_stream_pair(tmp_path):
     config_path = tmp_path / "config.yaml"
-    config_path.write_text(yaml.safe_dump({"leds": {"Other Camera": {"ir": {}, "rgb": {}}}}))
-    try:
-        load_led_positions(str(config_path), "Never Calibrated Camera")
-        assert False, "expected KeyError"
-    except KeyError:
-        pass
+    config_path.write_text(yaml.safe_dump({"leds": {"Test Camera": {"color": {}}}}))
+    with pytest.raises(KeyError):
+        load_led_positions(str(config_path), "Test Camera", "infrared1", "infrared2")

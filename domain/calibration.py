@@ -44,37 +44,30 @@ def build_positions_with_thresholds(xy_positions, on_frame, off_frame, neighborh
     return result
 
 
-def update_config_leds(config_path, camera_name, ir_positions, ir_res, rgb_positions, rgb_res):
+def update_config_leds(config_path, camera_name, stream_a_slug, stream_a_positions, stream_a_res,
+                        stream_b_slug, stream_b_positions, stream_b_res):
     with open(config_path, "r") as f:
         cfg = yaml.safe_load(f) or {}
-
     cfg.setdefault("leds", {})
-    cfg["leds"][camera_name] = {
-        "ir": {
-            "frame_width": ir_res[0],
-            "frame_height": ir_res[1],
-            "positions": ir_positions,
-        },
-        "rgb": {
-            "frame_width": rgb_res[0],
-            "frame_height": rgb_res[1],
-            "positions": rgb_positions,
-        },
+    cfg["leds"].setdefault(camera_name, {})
+    cfg["leds"][camera_name][stream_a_slug] = {
+        "frame_width": stream_a_res[0], "frame_height": stream_a_res[1], "positions": stream_a_positions,
     }
-
+    cfg["leds"][camera_name][stream_b_slug] = {
+        "frame_width": stream_b_res[0], "frame_height": stream_b_res[1], "positions": stream_b_positions,
+    }
     with open(config_path, "w") as f:
         yaml.safe_dump(cfg, f, sort_keys=False)
 
 
-def load_led_positions(config_path, camera_name):
+def load_led_positions(config_path, camera_name, stream_a_slug, stream_b_slug):
     with open(config_path, "r") as f:
         cfg = yaml.safe_load(f)
     leds_by_camera = cfg.get("leds", {})
-    if camera_name not in leds_by_camera:
+    camera_entry = leds_by_camera.get(camera_name, {})
+    if stream_a_slug not in camera_entry or stream_b_slug not in camera_entry:
         raise KeyError(
-            "No LED calibration yet for camera {!r} - run calibration with this "
-            "camera connected first. Known cameras in {}: {}".format(
-                camera_name, config_path, list(leds_by_camera.keys())
-            )
+            "No LED calibration yet for camera {!r} streams {!r}/{!r} - run calibration with "
+            "this exact stream pair first.".format(camera_name, stream_a_slug, stream_b_slug)
         )
-    return leds_by_camera[camera_name]["ir"]["positions"], leds_by_camera[camera_name]["rgb"]["positions"]
+    return camera_entry[stream_a_slug]["positions"], camera_entry[stream_b_slug]["positions"]
