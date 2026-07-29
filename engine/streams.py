@@ -37,6 +37,78 @@ def list_devices(ctx):
     return devices
 
 
+def find_device_by_serial(ctx, serial):
+    for d in ctx.query_devices():
+        if d.get_info(rs.camera_info.serial_number) == serial:
+            return d
+    raise RuntimeError("No connected device with serial {!r}".format(serial))
+
+
+def list_video_stream_options_from_device(device):
+    """List every infrared/color video-stream profile a device offers, as
+    plain dicts (sensor_index/stream_type/stream_index/format/width/height/
+    fps) - the picker data the Stream Config page needs to let the operator
+    choose ANY two streams instead of a hardcoded IR+RGB pair. Split out from
+    list_video_stream_options so it's directly testable against a fake
+    device without needing a fake rs.context too."""
+    options = []
+    for sensor_index, sensor in enumerate(device.query_sensors()):
+        for p in sensor.profiles:
+            if not p.is_video_stream_profile():
+                continue
+            if p.stream_type() not in (rs.stream.infrared, rs.stream.color):
+                continue
+            vp = p.as_video_stream_profile()
+            options.append({
+                "sensor_index": sensor_index,
+                "stream_type": p.stream_type(),
+                "stream_index": p.stream_index(),
+                "format": p.format(),
+                "width": vp.width(),
+                "height": vp.height(),
+                "fps": p.fps(),
+            })
+    return options
+
+
+def list_video_stream_options(ctx, serial):
+    device = find_device_by_serial(ctx, serial)
+    return list_video_stream_options_from_device(device)
+
+
+def _pick_matches(profile, pick):
+    if profile.stream_type() != pick["stream_type"] or profile.stream_index() != pick["stream_index"]:
+        return False
+    if profile.format() != pick["format"] or profile.fps() != pick["fps"]:
+        return False
+    vp = profile.as_video_stream_profile()
+    return vp.width() == pick["width"] and vp.height() == pick["height"]
+
+
+def resolve_and_group(device, pick_a, pick_b):
+    """Group two picked stream profiles by which physical sensor object they
+    live on. This is the key insight that unifies two different camera
+    topologies: some devices have IR and RGB on two separate sensor objects
+    (two groups, one profile each), others have two color streams sharing
+    ONE sensor object at different stream indices (one group, two profiles) -
+    which matters because sensor.open()/.start() must be called once per
+    distinct sensor object, with all of that sensor's wanted profiles passed
+    together, not once per stream."""
+    sensors = list(device.query_sensors())
+
+    def sensor_and_profile_for(pick):
+        sensor = sensors[pick["sensor_index"]]
+        profile = next(p for p in sensor.profiles if _pick_matches(p, pick))
+        return sensor, profile
+
+    sensor_a, profile_a = sensor_and_profile_for(pick_a)
+    sensor_b, profile_b = sensor_and_profile_for(pick_b)
+
+    if sensor_a is sensor_b:
+        return [(sensor_a, [profile_a, profile_b])]
+    return [(sensor_a, [profile_a]), (sensor_b, [profile_b])]
+
+
 def get_sensors_for_device(ctx, serial):
     for d in ctx.query_devices():
         if d.get_info(rs.camera_info.serial_number) != serial:
