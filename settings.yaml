@@ -1,0 +1,79 @@
+# Hand-edited settings for the RGB/IR sync POC.
+#
+# This is the ONE file meant to be edited by hand between runs - camera
+# params and detection/test tuning all live here. Unlike config.yaml
+# (which led_calibration.py overwrites wholesale every run and must never be
+# hand-edited), nothing auto-rewrites this file, so comments and formatting
+# are safe to rely on.
+
+camera:
+  # Used as the PRE-SELECTED default in the Stream Config wizard page's
+  # dropdowns, if the connected camera actually reports this exact combo -
+  # you can still pick a different one there if this rig/camera doesn't
+  # support it (e.g. no HD@30fps on some models). Not a hard requirement.
+  ir: {width: 1280, height: 720, fps: 30}
+  color: {width: 1280, height: 720, fps: 30}
+
+calibration:
+  # Frames to let each stream settle on before treating a frame as "good".
+  settle_frames: 15
+  # y-gap (pixels) larger than this starts a new row when sorting detected
+  # LED centroids into grid order.
+  row_gap_px: 15
+  # Minimum contour area (px^2) to count as a real LED blob, not noise.
+  min_blob_area: 20
+  # NxN pixel window averaged per LED position, for noise resilience.
+  neighborhood_size: 5
+  # Warn if any LED's on-minus-off brightness gap is smaller than this -
+  # its threshold may be unreliable.
+  min_acceptable_contrast: 20
+
+test:
+  # LEDPanel.set_direction_single() mode - this project always uses 1
+  # (start top-left, scan left-to-right, wrapping row to row).
+  scan_direction: 1
+  # Per-LED dwell time in ms. Deliberately can be set FASTER than the
+  # camera's own frame interval - that's the point of pipeline_sync_test_diff.py.
+  switch_time_ms: 1
+  # Plain wall-clock capture duration - sweep-counting doesn't mean anything
+  # at fast switch speeds (many sweeps per second).
+  duration_s: 10.0
+  num_leds: 100
+  neighborhood_size: 5
+  # Calibration's stored threshold assumes an LED held steady for a full
+  # exposure. At fast switch times only a fraction of that brightness is
+  # achievable, so the runtime threshold is recomputed as
+  # off + threshold_fraction*(on-off). Tune this per your own testing -
+  # below the calibration default of 0.5 for fast speeds.
+  threshold_fraction: 0.25
+  # Save a full-image on/off overlay snapshot every N frame-pairs, up to a cap.
+  # Snapshot filenames use the same pair_index as the CSV's pair_index column,
+  # so you can cross-check the algorithm's on/off calls against the real image.
+  snapshot_every_n_pairs: 20
+  max_snapshots: 15
+  # Per-stream frame-drop detection: a stream's consecutive HW frame_timestamp
+  # delta must exceed (1_000_000/fps) * frame_drop_threshold_factor (or be
+  # negative) to be flagged as a probable dropped frame - same style of check
+  # as print_frame_drops.py.
+  frame_drop_threshold_factor: 1.5
+  # Cap on FD-triggered on/off overlay snapshots per run (separate bucket
+  # from the periodic snapshot_every_n_pairs sampling above).
+  max_fd_snapshots: 10
+  # analyze_pairing_gap's cross-stream sanity-check threshold, in
+  # MICROSECONDS (ir_ts/rgb_ts are HW frame_timestamp, µs-scale). 100_000us
+  # is the same real-world cutoff as an old 100ms default would have been.
+  pairing_gap_outlier_threshold_us: 100000
+  # Ignore this many frame-pairs at the START of the run when computing the
+  # metrics (position gap / frame-drop stats) - everything is still captured
+  # and written to the CSV (flagged via is_warmup), just excluded from the
+  # stats, same as a miss/outlier/frame-drop exclusion. Covers auto-exposure
+  # convergence / an initial buffered-frame burst right after the pipeline
+  # starts, which can otherwise look like real drops or real gaps.
+  warmup_pairs_to_skip: 15
+
+paths:
+  config_path: config.yaml
+  raw_csv_path: pipeline_sync_raw.csv
+  frame_drop_csv_path: pipeline_sync_frame_drops.csv
+  # Debug images/CSV/plots all get written under this directory.
+  output_dir: output

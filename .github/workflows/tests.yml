@@ -1,0 +1,32 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    # Windows, not ubuntu-latest, to match this app's stated platform
+    # requirement (README: "Windows, Python 3.10+") and avoid any uncertainty
+    # about pyrealsense2 wheel availability on other OSes.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests
+        env:
+          # Widget/window creation in the gui/ tests needs a Qt platform
+          # plugin; there's no display on a CI runner, so render offscreen.
+          QT_QPA_PLATFORM: offscreen
+        run: pytest -v
