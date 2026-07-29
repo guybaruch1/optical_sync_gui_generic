@@ -7,7 +7,7 @@ from engine.streams import (
     list_devices, list_supported_profiles, match_profile, capture_synced_frame_pair,
     disable_ir_emitter, enable_auto_exposure,
     list_video_stream_options_from_device, resolve_and_group,
-    set_emitter_enabled, set_manual_exposure,
+    set_emitter_enabled, set_manual_exposure, stream_slug,
 )
 
 
@@ -429,3 +429,32 @@ def test_set_manual_exposure_returns_false_when_partially_unsupported():
     sensor = FakeOptionSensor(supported_options={rs.option.exposure})
     assert set_manual_exposure(sensor, exposure=150, gain=16) is False
     assert sensor.set_options == {}  # nothing should be set if guard fails
+
+
+# --- stream_slug ---
+#
+# Only the two fields stream_slug actually reads (stream_type/stream_index)
+# are needed - a plain pick dict, same shape list_video_stream_options_from_device
+# produces, is enough; no fake profile/sensor/device required.
+
+def test_stream_slug_appends_index_for_infrared():
+    pick = {"stream_type": rs.stream.infrared, "stream_index": 1}
+    assert stream_slug(pick) == "infrared1"
+
+
+def test_stream_slug_appends_index_for_second_infrared():
+    pick = {"stream_type": rs.stream.infrared, "stream_index": 2}
+    assert stream_slug(pick) == "infrared2"
+
+
+def test_stream_slug_omits_index_when_zero_for_color():
+    # A single-RGB camera's color stream is stream_index 0 - this must slug to
+    # "color", not "color0", to match domain/calibration.py's/config.yaml's
+    # established slug scheme (tests/domain/test_calibration.py).
+    pick = {"stream_type": rs.stream.color, "stream_index": 0}
+    assert stream_slug(pick) == "color"
+
+
+def test_stream_slug_appends_index_for_color_when_nonzero():
+    pick = {"stream_type": rs.stream.color, "stream_index": 2}
+    assert stream_slug(pick) == "color2"
