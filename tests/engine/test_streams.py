@@ -416,3 +416,16 @@ def test_set_manual_exposure_sets_exposure_and_gain_and_disables_auto():
     assert sensor.set_options[rs.option.enable_auto_exposure] == 0
     assert sensor.set_options[rs.option.exposure] == 150
     assert sensor.set_options[rs.option.gain] == 16
+
+
+def test_set_manual_exposure_returns_false_when_fully_unsupported():
+    sensor = FakeOptionSensor(supported_options=set())
+    assert set_manual_exposure(sensor, exposure=150, gain=16) is False
+    assert sensor.set_options == {}
+
+
+def test_set_manual_exposure_returns_false_when_partially_unsupported():
+    # exposure is supported but enable_auto_exposure and gain are not
+    sensor = FakeOptionSensor(supported_options={rs.option.exposure})
+    assert set_manual_exposure(sensor, exposure=150, gain=16) is False
+    assert sensor.set_options == {}  # nothing should be set if guard fails
