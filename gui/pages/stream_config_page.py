@@ -1,17 +1,86 @@
-"""Wizard step 2: pick FPS/resolution for the IR and RGB streams, and
-preview live pairing quality (bundle/frame-number/timestamp/delta overlay,
-plus matching console logging) for the currently selected combo before
-committing to it."""
+"""Wizard step 2: pick any two streams the connected device offers (IR, RGB,
+or two of the same type sharing one sensor), configure per-sensor camera
+controls (IR emitter, auto/manual exposure+gain), and preview live pairing
+quality (bundle/frame-number/timestamp/delta overlay, plus matching console
+logging) for the currently selected pair before committing to it.
+
+Generalized from the old hardcoded IR-combo/RGB-combo pair: engine.streams.
+list_video_stream_options already returns fully-specified stream options -
+sensor_index/stream_type/stream_index/format/width/height/fps all bundled
+into one dict per profile - so a SINGLE combo per side, listing every
+fully-specified option as one label (e.g. "Infrared 1 - 1280x720@30fps
+(y8)"), is enough. A second resolution/fps combo per side would only be
+useful if stream *identity* (stream_type/stream_index) and stream
+*resolution/fps* needed independent narrowing - they don't here, since
+picking a different resolution/fps for the same stream identity is just
+picking a different entry in the same combo. Two combos per side would add
+a layer of "first narrow identity, then narrow resolution" indirection for
+no real benefit given the option list is already small and fully expanded.
+"""
 
 import pyrealsense2 as rs
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLabel, QComboBox, QPushButton,
+    QGroupBox, QCheckBox, QRadioButton, QButtonGroup, QSpinBox,
 )
 
-from engine.streams import list_supported_profiles
+from engine.streams import list_video_stream_options
 from engine.stream_preview_thread import StreamPreviewThread
 from gui.widgets.video_panel import VideoPanel
+
+
+_STREAM_TYPE_LABELS = {
+    rs.stream.infrared: "Infrared",
+    rs.stream.color: "Color",
+}
+
+
+def _stream_option_label(option):
+    """Formats one list_video_stream_options() entry as a combo-box label,
+    e.g. "Infrared 1 - 1280x720@30fps (y8)" / "Color - 1280x720@30fps
+    (bgr8)". Infrared entries include the stream_index (there can be two,
+    left/right) - color entries omit it since there's normally only one,
+    and when there are two (Dual RGB) the resolved sensor_index/format
+    still disambiguates them in the underlying option dict even if the
+    label doesn't spell out the index."""
+    stream_type = option["stream_type"]
+    type_label = _STREAM_TYPE_LABELS.get(stream_type, stream_type.name.capitalize())
+    if stream_type == rs.stream.infrared:
+        type_label = "{} {}".format(type_label, option["stream_index"])
+    return "{} - {}x{}@{}fps ({})".format(
+        type_label, option["width"], option["height"], option["fps"], option["format"].name,
+    )
+
+
+def group_camera_controls(pick_a, pick_b):
+    """Device-independent mirror of engine.streams.resolve_and_group's
+    grouping decision, for UI layout purposes only: decides how many
+    emitter/exposure control groups Stream Select should show, purely from
+    the two picks' own sensor_index fields - no live `device` handle
+    needed. Same sensor_index -> the two picks will end up opened on one
+    physical sensor object at capture time (resolve_and_group returns one
+    group for them), so show ONE control group; different sensor_index ->
+    two sensor objects, so show TWO. The real resolve_and_group (which
+    needs a live device to map sensor_index -> actual sensor object) is
+    only called later, at capture time in gui/main_window.py.
+
+    Returns a list of {"sensor_indices": [...], "has_infrared": bool}
+    dicts, one per group - "has_infrared" is True if ANY pick folded into
+    that group is an infrared stream (determines whether the group's
+    "Disable IR emitter" checkbox should be shown at all)."""
+    if pick_a["sensor_index"] == pick_b["sensor_index"]:
+        picks_per_group = [[pick_a, pick_b]]
+    else:
+        picks_per_group = [[pick_a], [pick_b]]
+
+    groups = []
+    for picks in picks_per_group:
+        groups.append({
+            "sensor_indices": sorted({p["sensor_index"] for p in picks}),
+            "has_infrared": any(p["stream_type"] == rs.stream.infrared for p in picks),
+        })
+    return groups
 
 
 class StreamConfigPage(QWidget):
@@ -22,14 +91,22 @@ class StreamConfigPage(QWidget):
         self.ctx = None
         self.device_serial = None
         self.preview_thread = None
+        self._stream_options = []
+        self._camera_control_widgets = []  # list of per-group widget dicts, see _build_camera_control_group
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
-        self.ir_combo = QComboBox()
-        self.rgb_combo = QComboBox()
-        form.addRow(QLabel("IR resolution/fps:"), self.ir_combo)
-        form.addRow(QLabel("RGB resolution/fps:"), self.rgb_combo)
+        self.combo_a = QComboBox()
+        self.combo_b = QComboBox()
+        form.addRow(QLabel("Stream A:"), self.combo_a)
+        form.addRow(QLabel("Stream B:"), self.combo_b)
         layout.addLayout(form)
+
+        self.combo_a.currentIndexChanged.connect(self._refresh_camera_control_groups)
+        self.combo_b.currentIndexChanged.connect(self._refresh_camera_control_groups)
+
+        self.camera_controls_layout = QVBoxLayout()
+        layout.addLayout(self.camera_controls_layout)
 
         preview_row = QHBoxLayout()
         self.start_preview_button = QPushButton("Start Preview")
@@ -51,61 +128,143 @@ class StreamConfigPage(QWidget):
         self.next_button.clicked.connect(self._on_next_clicked)
         layout.addWidget(self.next_button)
 
-    def populate(self, ctx, device_serial, stereo_sensor, rgb_sensor, preferred_ir=None, preferred_rgb=None):
-        """preferred_ir/preferred_rgb are optional (width, height, fps) tuples
-        (e.g. from settings.yaml's camera.ir/camera.color) - if the connected
-        camera actually reports that exact combo, it's pre-selected in the
-        dropdown instead of leaving it at whatever comes first; the user can
-        still pick something else if it doesn't suit this rig/camera."""
+    def populate(self, ctx, device_serial, stream_options, preferred_a=None, preferred_b=None):
+        """preferred_a/preferred_b are optional partial-match dicts (e.g.
+        {"width": 1280, "height": 720, "fps": 30} from settings.yaml's
+        camera.stream_a/stream_b) - the first option matching every key
+        given is pre-selected in the combo instead of leaving it at
+        whatever comes first; the user can still pick something else if it
+        doesn't suit this rig/camera."""
         self.ctx = ctx
         self.device_serial = device_serial
+        self._stream_options = list(stream_options)
 
-        ir_profiles = list_supported_profiles(stereo_sensor, rs.stream.infrared, rs.format.y8)
-        rgb_profiles = list_supported_profiles(rgb_sensor, rs.stream.color, rs.format.yuyv)
+        for combo, preferred in ((self.combo_a, preferred_a), (self.combo_b, preferred_b)):
+            combo.blockSignals(True)
+            combo.clear()
+            for option in self._stream_options:
+                combo.addItem(_stream_option_label(option), userData=option)
+            combo.blockSignals(False)
+            self._preselect(combo, preferred)
 
-        self.ir_combo.clear()
-        for width, height, fps in ir_profiles:
-            self.ir_combo.addItem("{}x{}@{}fps".format(width, height, fps), userData=(width, height, fps))
-        self._preselect(self.ir_combo, preferred_ir)
-
-        self.rgb_combo.clear()
-        for width, height, fps in rgb_profiles:
-            self.rgb_combo.addItem("{}x{}@{}fps".format(width, height, fps), userData=(width, height, fps))
-        self._preselect(self.rgb_combo, preferred_rgb)
+        self._refresh_camera_control_groups()
 
     def _preselect(self, combo, preferred):
-        """Uses findText() rather than findData(): PySide6's findData() is
-        unreliable for tuple userData (returns -1 even for an exact match
-        once the combo has more than a couple of entries), which silently
-        defeated settings.yaml's preferred resolution/fps and left the combo
-        on whatever sorted first."""
-        if preferred is None:
+        if not preferred:
             return
-        width, height, fps = preferred
-        index = combo.findText("{}x{}@{}fps".format(width, height, fps))
-        if index != -1:
-            combo.setCurrentIndex(index)
+        for index in range(combo.count()):
+            option = combo.itemData(index)
+            if all(option.get(key) == value for key, value in preferred.items()):
+                combo.setCurrentIndex(index)
+                return
+
+    def _refresh_camera_control_groups(self):
+        self._clear_camera_control_groups()
+
+        pick_a = self.combo_a.currentData()
+        pick_b = self.combo_b.currentData()
+        if pick_a is None or pick_b is None:
+            return
+
+        groups = group_camera_controls(pick_a, pick_b)
+        multiple = len(groups) > 1
+        for group in groups:
+            self._camera_control_widgets.append(self._build_camera_control_group(group, multiple))
+
+    def _clear_camera_control_groups(self):
+        while self.camera_controls_layout.count():
+            item = self.camera_controls_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._camera_control_widgets = []
+
+    def _build_camera_control_group(self, group, multiple):
+        title = "Camera Controls"
+        if multiple:
+            title = "{} - Sensor {}".format(title, group["sensor_indices"][0])
+        box = QGroupBox(title)
+        box_layout = QVBoxLayout(box)
+
+        emitter_checkbox = None
+        if group["has_infrared"]:
+            emitter_checkbox = QCheckBox("Disable IR emitter")
+            box_layout.addWidget(emitter_checkbox)
+
+        auto_radio = QRadioButton("Auto exposure")
+        manual_radio = QRadioButton("Manual exposure")
+        auto_radio.setChecked(True)
+        exposure_mode_group = QButtonGroup(box)
+        exposure_mode_group.addButton(auto_radio)
+        exposure_mode_group.addButton(manual_radio)
+        box_layout.addWidget(auto_radio)
+        box_layout.addWidget(manual_radio)
+
+        exposure_row = QHBoxLayout()
+        exposure_row.addWidget(QLabel("Exposure:"))
+        exposure_spin = QSpinBox()
+        exposure_spin.setRange(1, 1000000)
+        exposure_spin.setValue(8500)
+        exposure_spin.setEnabled(False)
+        exposure_row.addWidget(exposure_spin)
+        exposure_row.addWidget(QLabel("Gain:"))
+        gain_spin = QSpinBox()
+        gain_spin.setRange(0, 128)
+        gain_spin.setValue(16)
+        gain_spin.setEnabled(False)
+        exposure_row.addWidget(gain_spin)
+        box_layout.addLayout(exposure_row)
+
+        manual_radio.toggled.connect(exposure_spin.setEnabled)
+        manual_radio.toggled.connect(gain_spin.setEnabled)
+
+        self.camera_controls_layout.addWidget(box)
+
+        return {
+            "sensor_indices": group["sensor_indices"],
+            "group_box": box,
+            "emitter_checkbox": emitter_checkbox,
+            "auto_radio": auto_radio,
+            "manual_radio": manual_radio,
+            "exposure_spin": exposure_spin,
+            "gain_spin": gain_spin,
+        }
+
+    def camera_control_group_count(self):
+        return len(self._camera_control_widgets)
+
+    def _read_camera_controls(self):
+        controls = []
+        for group in self._camera_control_widgets:
+            auto_exposure = group["auto_radio"].isChecked()
+            emitter_checkbox = group["emitter_checkbox"]
+            controls.append({
+                "sensor_indices": group["sensor_indices"],
+                "emitter_enabled": (
+                    None if emitter_checkbox is None else not emitter_checkbox.isChecked()
+                ),
+                "auto_exposure": auto_exposure,
+                "exposure": None if auto_exposure else group["exposure_spin"].value(),
+                "gain": None if auto_exposure else group["gain_spin"].value(),
+            })
+        return controls
 
     def _on_start_preview_clicked(self):
-        ir_choice = self.ir_combo.currentData()
-        rgb_choice = self.rgb_combo.currentData()
-        if ir_choice is None or rgb_choice is None:
+        pick_a = self.combo_a.currentData()
+        pick_b = self.combo_b.currentData()
+        if pick_a is None or pick_b is None:
             return
-        ir_width, ir_height, ir_fps = ir_choice
-        rgb_width, rgb_height, rgb_fps = rgb_choice
 
         self.status_label.setText("")
-        self.preview_thread = StreamPreviewThread(
-            self.ctx, self.device_serial, (ir_width, ir_height), ir_fps, (rgb_width, rgb_height), rgb_fps,
-        )
+        self.preview_thread = StreamPreviewThread(self.ctx, self.device_serial, pick_a, pick_b)
         self.preview_thread.frame_ready.connect(self.preview_panel.set_frame)
         self.preview_thread.error.connect(self._on_preview_error)
         self.preview_thread.start()
 
         self.start_preview_button.setEnabled(False)
         self.stop_preview_button.setEnabled(True)
-        self.ir_combo.setEnabled(False)
-        self.rgb_combo.setEnabled(False)
+        self.combo_a.setEnabled(False)
+        self.combo_b.setEnabled(False)
 
     def _on_stop_preview_clicked(self):
         self._stop_preview()
@@ -117,18 +276,18 @@ class StreamConfigPage(QWidget):
             self.preview_thread = None
         self.start_preview_button.setEnabled(True)
         self.stop_preview_button.setEnabled(False)
-        self.ir_combo.setEnabled(True)
-        self.rgb_combo.setEnabled(True)
+        self.combo_a.setEnabled(True)
+        self.combo_b.setEnabled(True)
 
     def _on_preview_error(self, message):
         self.status_label.setText("Error: {}".format(message))
         self._stop_preview()
 
     def _on_next_clicked(self):
-        ir_choice = self.ir_combo.currentData()
-        rgb_choice = self.rgb_combo.currentData()
-        if ir_choice is not None and rgb_choice is not None:
-            self._stop_preview()
-            ir_width, ir_height, ir_fps = ir_choice
-            rgb_width, rgb_height, rgb_fps = rgb_choice
-            self.config_chosen.emit((ir_width, ir_height, ir_fps, rgb_width, rgb_height, rgb_fps))
+        pick_a = self.combo_a.currentData()
+        pick_b = self.combo_b.currentData()
+        if pick_a is None or pick_b is None:
+            return
+        self._stop_preview()
+        camera_controls = self._read_camera_controls()
+        self.config_chosen.emit((pick_a, pick_b, camera_controls))
