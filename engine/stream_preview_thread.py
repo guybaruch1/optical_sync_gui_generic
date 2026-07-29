@@ -1,16 +1,11 @@
-"""QThread wrapper for the Stream Config page's live pairing-quality
-preview: streams IR+RGB continuously via ContinuousCapture, burns a
-bundle/frame-number/timestamp/delta overlay onto the IR frame, and prints
-the same information to the console - lets you sanity-check pairing
-quality for a chosen resolution/fps before committing to it in the wizard.
-Deliberately separate from engine.session_engine.SessionEngineThread: this
-has nothing to do with metrics/TestSession, it's a lightweight, read-only
-preview.
-"""
+"""QThread wrapper for Stream Select's live pairing-quality preview:
+streams the two picked streams continuously via ContinuousCapture, burns
+a bundle/frame-number/timestamp/delta overlay onto Stream A's frame, and
+prints the same info to the console."""
 
 from PySide6.QtCore import QThread, Signal
 
-from engine.streams import ContinuousCapture, disable_ir_emitter, enable_auto_exposure, get_sensors_for_device
+from engine.streams import ContinuousCapture
 from domain.realsense_utils import draw_bundle_overlay
 
 
@@ -18,15 +13,12 @@ class StreamPreviewThread(QThread):
     frame_ready = Signal(object)
     error = Signal(str)
 
-    def __init__(self, ctx, device_serial, ir_resolution, ir_fps, color_resolution, color_fps,
-                 display_stride=10, parent=None):
+    def __init__(self, ctx, device_serial, pick_a, pick_b, display_stride=10, parent=None):
         super().__init__(parent)
         self.ctx = ctx
         self.device_serial = device_serial
-        self.ir_resolution = ir_resolution
-        self.ir_fps = ir_fps
-        self.color_resolution = color_resolution
-        self.color_fps = color_fps
+        self.pick_a = pick_a
+        self.pick_b = pick_b
         self.display_stride = display_stride
         self._stop_requested = False
         self._capture = None
@@ -36,41 +28,27 @@ class StreamPreviewThread(QThread):
 
     def run(self):
         try:
-            stereo_sensor, rgb_sensor = get_sensors_for_device(self.ctx, self.device_serial)
-            if not disable_ir_emitter(stereo_sensor):
-                self.error.emit(
-                    "This sensor/firmware does not expose emitter_enabled - confirm the IR projector is off manually."
-                )
-            if not enable_auto_exposure(rgb_sensor):
-                self.error.emit(
-                    "This sensor/firmware does not expose enable_auto_exposure - confirm RGB auto-exposure is on manually."
-                )
-
-            self._capture = ContinuousCapture(self.ir_resolution, self.ir_fps, self.color_resolution, self.color_fps)
+            self._capture = ContinuousCapture(self.pick_a, self.pick_b)
             self._capture.start()
 
             bundle_index = 0
-            for ir_image, rgb_image, ir_ts_us, rgb_ts_us, ir_frame_number, color_frame_number \
-                    in self._capture.frames_with_diagnostics():
+            for image_a, image_b, ts_a, ts_b, num_a, num_b in self._capture.frames_with_diagnostics():
                 if self._stop_requested:
                     break
 
                 if bundle_index % self.display_stride == 0:
-                    delta_us = ir_ts_us - rgb_ts_us
+                    delta_us = ts_a - ts_b
                     print(
-                        "Bundle {:>6} | IR Frame {:>6} | Color Frame {:>6} | "
-                        "IR Timestamp {:>14.0f} | Color Timestamp {:>14.0f} | Delta {:>7.1f} us".format(
-                            bundle_index, ir_frame_number, color_frame_number, ir_ts_us, rgb_ts_us, delta_us,
+                        "Bundle {:>6} | Stream A Frame {:>6} | Stream B Frame {:>6} | "
+                        "Stream A Timestamp {:>14.0f} | Stream B Timestamp {:>14.0f} | Delta {:>7.1f} us".format(
+                            bundle_index, num_a, num_b, ts_a, ts_b, delta_us,
                         )
                     )
-                    overlay_image = draw_bundle_overlay(
-                        ir_image, bundle_index, ir_frame_number, color_frame_number,
-                        ir_ts_us, rgb_ts_us, delta_us,
-                    )
+                    overlay_image = draw_bundle_overlay(image_a, bundle_index, num_a, num_b, ts_a, ts_b, delta_us)
                     self.frame_ready.emit(overlay_image)
 
                 bundle_index += 1
-        except Exception as exc:  # surfaced to the UI rather than crashing the worker thread silently
+        except Exception as exc:
             self.error.emit(str(exc))
         finally:
             if self._capture is not None:
