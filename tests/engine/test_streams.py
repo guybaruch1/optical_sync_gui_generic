@@ -4,7 +4,7 @@ import time
 import pytest
 import pyrealsense2 as rs
 from engine.streams import (
-    list_supported_profiles, match_profile, capture_synced_frame_pair,
+    list_devices, list_supported_profiles, match_profile, capture_synced_frame_pair,
     disable_ir_emitter, enable_auto_exposure,
     list_video_stream_options_from_device, resolve_and_group,
 )
@@ -66,14 +66,18 @@ class FakeVideoProfile:
 
 
 class FakeProfile:
-    def __init__(self, stream_type, fmt, width, height, fps):
+    def __init__(self, stream_type, stream_index, fmt, width, height, fps):
         self._stream_type = stream_type
+        self._stream_index = stream_index
         self._fmt = fmt
         self._fps = fps
         self._video = FakeVideoProfile(width, height)
 
     def stream_type(self):
         return self._stream_type
+
+    def stream_index(self):
+        return self._stream_index
 
     def format(self):
         return self._fmt
@@ -92,25 +96,72 @@ class FakeSensor:
 
 def test_list_supported_profiles_filters_by_stream_and_format():
     sensor = FakeSensor(profiles=[
-        FakeProfile("infrared", "y8", 1280, 720, 30),
-        FakeProfile("infrared", "y8", 640, 480, 60),
-        FakeProfile("color", "yuyv", 1280, 720, 30),
+        FakeProfile("infrared", 0, "y8", 1280, 720, 30),
+        FakeProfile("infrared", 0, "y8", 640, 480, 60),
+        FakeProfile("color", 0, "yuyv", 1280, 720, 30),
     ])
     result = list_supported_profiles(sensor, "infrared", "y8")
     assert set(result) == {(1280, 720, 30), (640, 480, 60)}
 
 
 def test_match_profile_finds_exact_match():
-    target = FakeProfile("infrared", "y8", 1280, 720, 30)
-    sensor = FakeSensor(profiles=[FakeProfile("infrared", "y8", 640, 480, 60), target])
+    target = FakeProfile("infrared", 0, "y8", 1280, 720, 30)
+    sensor = FakeSensor(profiles=[FakeProfile("infrared", 0, "y8", 640, 480, 60), target])
     matched = match_profile(sensor, "infrared", "y8", 1280, 720, 30)
     assert matched is target
 
 
 def test_match_profile_raises_when_nothing_matches():
-    sensor = FakeSensor(profiles=[FakeProfile("infrared", "y8", 640, 480, 60)])
+    sensor = FakeSensor(profiles=[FakeProfile("infrared", 0, "y8", 640, 480, 60)])
     with pytest.raises(RuntimeError):
         match_profile(sensor, "infrared", "y8", 1280, 720, 30)
+
+
+def test_list_devices_lists_any_device_regardless_of_sensor_names():
+    # A device whose sensors are named things other than "Stereo Module"/"RGB Camera"
+    # (e.g. a D500-series device with different sensor naming) must still be listed.
+    class FakeSensorWithCustomName:
+        def get_info(self, info_type):
+            if info_type == rs.camera_info.name:
+                return "Custom Sensor Name"
+            return None
+
+    class FakeDeviceWithCustomSensors:
+        def query_sensors(self):
+            return [FakeSensorWithCustomName()]
+
+        def get_info(self, info_type):
+            if info_type == rs.camera_info.name:
+                return "Custom Device"
+            elif info_type == rs.camera_info.serial_number:
+                return "ABC123"
+            return None
+
+    class FakeContext:
+        def query_devices(self):
+            return [FakeDeviceWithCustomSensors()]
+
+    ctx = FakeContext()
+    result = list_devices(ctx)
+    assert len(result) == 1
+    assert result[0].name == "Custom Device"
+    assert result[0].serial == "ABC123"
+
+
+def test_list_supported_profiles_filters_by_stream_index():
+    sensor = FakeSensor(profiles=[
+        FakeProfile(rs.stream.color, 1, rs.format.bgr8, 1280, 720, 30),
+        FakeProfile(rs.stream.color, 2, rs.format.bgr8, 1280, 720, 30),
+    ])
+    result = list_supported_profiles(sensor, rs.stream.color, rs.format.bgr8, stream_index=1)
+    assert result == [(1280, 720, 30)]
+
+
+def test_match_profile_finds_exact_match_for_given_stream_index():
+    target = FakeProfile(rs.stream.color, 2, rs.format.bgr8, 1280, 720, 30)
+    sensor = FakeSensor(profiles=[FakeProfile(rs.stream.color, 1, rs.format.bgr8, 1280, 720, 30), target])
+    matched = match_profile(sensor, rs.stream.color, rs.format.bgr8, 1280, 720, 30, stream_index=2)
+    assert matched is target
 
 
 class _FakeFrame:
