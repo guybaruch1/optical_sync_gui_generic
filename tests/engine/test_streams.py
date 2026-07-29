@@ -100,21 +100,21 @@ def test_list_supported_profiles_filters_by_stream_and_format():
         FakeProfile("infrared", 0, "y8", 640, 480, 60),
         FakeProfile("color", 0, "yuyv", 1280, 720, 30),
     ])
-    result = list_supported_profiles(sensor, "infrared", "y8")
+    result = list_supported_profiles(sensor, "infrared", "y8", 0)
     assert set(result) == {(1280, 720, 30), (640, 480, 60)}
 
 
 def test_match_profile_finds_exact_match():
     target = FakeProfile("infrared", 0, "y8", 1280, 720, 30)
     sensor = FakeSensor(profiles=[FakeProfile("infrared", 0, "y8", 640, 480, 60), target])
-    matched = match_profile(sensor, "infrared", "y8", 1280, 720, 30)
+    matched = match_profile(sensor, "infrared", "y8", 1280, 720, 30, 0)
     assert matched is target
 
 
 def test_match_profile_raises_when_nothing_matches():
     sensor = FakeSensor(profiles=[FakeProfile("infrared", 0, "y8", 640, 480, 60)])
     with pytest.raises(RuntimeError):
-        match_profile(sensor, "infrared", "y8", 1280, 720, 30)
+        match_profile(sensor, "infrared", "y8", 1280, 720, 30, 0)
 
 
 def test_list_devices_lists_any_device_regardless_of_sensor_names():

@@ -117,19 +117,19 @@ def get_sensors_for_device(ctx, serial):
     raise RuntimeError("No connected device with serial {!r}".format(serial))
 
 
-def list_supported_profiles(sensor, stream_type, fmt, stream_index=None):
+def list_supported_profiles(sensor, stream_type, fmt, stream_index):
     results = set()
     for p in sensor.profiles:
         if p.stream_type() != stream_type or p.format() != fmt:
             continue
-        if stream_index is not None and p.stream_index() != stream_index:
+        if p.stream_index() != stream_index:
             continue
         vp = p.as_video_stream_profile()
         results.add((vp.width(), vp.height(), p.fps()))
     return sorted(results)
 
 
-def match_profile(sensor, stream_type, fmt, width, height, fps, stream_index=None):
+def match_profile(sensor, stream_type, fmt, width, height, fps, stream_index):
     for p in sensor.profiles:
         vp = p.as_video_stream_profile()
         if (
@@ -138,9 +138,8 @@ def match_profile(sensor, stream_type, fmt, width, height, fps, stream_index=Non
             and vp.width() == width
             and vp.height() == height
             and p.fps() == fps
+            and p.stream_index() == stream_index
         ):
-            if stream_index is not None and p.stream_index() != stream_index:
-                continue
             return p
     raise RuntimeError(
         "No matching profile for {} {}x{}@{}fps ({})".format(stream_type, width, height, fps, fmt)
