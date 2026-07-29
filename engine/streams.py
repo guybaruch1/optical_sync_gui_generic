@@ -322,48 +322,56 @@ def enable_auto_exposure(sensor):
     return False
 
 
-class ContinuousCapture:
-    """Open-ended IR+RGB capture via rs.pipeline(), same mechanism as
-    optical_sync_poc_/pipeline_sync_test_diff.py's run_pipeline_capture,
-    restructured as start/frames()/stop() so it can back both the live
-    ROI-selection preview and the live sync-test session."""
+def set_emitter_enabled(sensor, enabled):
+    if sensor.supports(rs.option.emitter_enabled):
+        sensor.set_option(rs.option.emitter_enabled, 1 if enabled else 0)
+        return True
+    return False
 
-    def __init__(self, ir_resolution, ir_fps, color_resolution, color_fps):
-        self.ir_resolution = ir_resolution
-        self.ir_fps = ir_fps
-        self.color_resolution = color_resolution
-        self.color_fps = color_fps
+
+def set_manual_exposure(sensor, exposure, gain):
+    if not (sensor.supports(rs.option.enable_auto_exposure) and sensor.supports(rs.option.exposure) and sensor.supports(rs.option.gain)):
+        return False
+    sensor.set_option(rs.option.enable_auto_exposure, 0)
+    sensor.set_option(rs.option.exposure, exposure)
+    sensor.set_option(rs.option.gain, gain)
+    return True
+
+
+class ContinuousCapture:
+    def __init__(self, pick_a, pick_b):
+        self.pick_a = pick_a
+        self.pick_b = pick_b
         self._pipeline = None
 
     def start(self):
         config = rs.config()
-        config.enable_stream(rs.stream.infrared, 1, *self.ir_resolution, rs.format.y8, self.ir_fps)
-        config.enable_stream(rs.stream.color, *self.color_resolution, rs.format.yuyv, self.color_fps)
+        for pick in (self.pick_a, self.pick_b):
+            config.enable_stream(pick["stream_type"], pick["stream_index"], pick["width"], pick["height"], pick["format"], pick["fps"])
         self._pipeline = rs.pipeline()
         self._pipeline.start(config)
 
+    def _get_frame(self, frameset, pick):
+        if pick["stream_type"] == rs.stream.infrared:
+            return frameset.get_infrared_frame(pick["stream_index"])
+        return frameset.get_color_frame(pick["stream_index"])
+
     def frames(self):
-        for ir_image, rgb_image, ir_ts_us, rgb_ts_us, _, _ in self.frames_with_diagnostics():
-            yield ir_image, rgb_image, ir_ts_us, rgb_ts_us
+        for stream_a_image, stream_b_image, stream_a_ts_us, stream_b_ts_us, _, _ in self.frames_with_diagnostics():
+            yield stream_a_image, stream_b_image, stream_a_ts_us, stream_b_ts_us
 
     def frames_with_diagnostics(self):
-        """Like frames(), but also yields each stream's own HW frame-number
-        counter (frame.get_frame_number()) - not needed by the metrics
-        pipeline frames() serves, but useful for the Stream Config page's
-        live pairing-quality preview, which shows these numbers directly to
-        the operator to sanity-check pairing before committing to a
-        resolution/fps."""
-        from domain.realsense_utils import ir_bytes_to_image, yuyv_to_bgr
+        from domain.realsense_utils import decode_frame
 
         while True:
             frameset = self._pipeline.wait_for_frames()
-            ir_frame = frameset.get_infrared_frame()
-            color_frame = frameset.get_color_frame()
-            if not ir_frame or not color_frame:
+            frame_a = self._get_frame(frameset, self.pick_a)
+            frame_b = self._get_frame(frameset, self.pick_b)
+            if not frame_a or not frame_b:
                 continue
 
             metadata = rs.frame_metadata_value.frame_timestamp
-            if not (ir_frame.supports_frame_metadata(metadata) and color_frame.supports_frame_metadata(metadata)):
+            if not (frame_a.supports_frame_metadata(metadata) and frame_b.supports_frame_metadata(metadata)):
                 raise RuntimeError(
                     "This camera/driver does not expose per-frame HW timestamp metadata "
                     "(frame_metadata_value.frame_timestamp), which the sync metrics require. "
@@ -373,14 +381,14 @@ class ContinuousCapture:
                     "camera after enabling it and retry."
                 )
 
-            ir_image = ir_bytes_to_image(bytes(ir_frame.get_data()), *self.ir_resolution)
-            rgb_image = yuyv_to_bgr(bytes(color_frame.get_data()), *self.color_resolution)
-            ir_ts_us = ir_frame.get_frame_metadata(metadata)
-            rgb_ts_us = color_frame.get_frame_metadata(metadata)
-            ir_frame_number = ir_frame.get_frame_number()
-            color_frame_number = color_frame.get_frame_number()
+            image_a = decode_frame(bytes(frame_a.get_data()), self.pick_a["format"], self.pick_a["width"], self.pick_a["height"])
+            image_b = decode_frame(bytes(frame_b.get_data()), self.pick_b["format"], self.pick_b["width"], self.pick_b["height"])
+            ts_a = frame_a.get_frame_metadata(metadata)
+            ts_b = frame_b.get_frame_metadata(metadata)
+            num_a = frame_a.get_frame_number()
+            num_b = frame_b.get_frame_number()
 
-            yield ir_image, rgb_image, ir_ts_us, rgb_ts_us, ir_frame_number, color_frame_number
+            yield image_a, image_b, ts_a, ts_b, num_a, num_b
 
     def stop(self):
         if self._pipeline is not None:

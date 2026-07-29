@@ -7,6 +7,7 @@ from engine.streams import (
     list_devices, list_supported_profiles, match_profile, capture_synced_frame_pair,
     disable_ir_emitter, enable_auto_exposure,
     list_video_stream_options_from_device, resolve_and_group,
+    set_emitter_enabled, set_manual_exposure,
 )
 
 
@@ -390,3 +391,28 @@ def test_resolve_and_group_one_shared_sensor():
     sensor, profiles = groups[0]
     assert sensor is shared_sensor
     assert len(profiles) == 2
+
+
+def test_set_emitter_enabled_true_when_supported():
+    sensor = FakeOptionSensor(supported_options={rs.option.emitter_enabled})
+    assert set_emitter_enabled(sensor, True) is True
+    assert sensor.set_options[rs.option.emitter_enabled] == 1
+
+
+def test_set_emitter_enabled_false_when_supported():
+    sensor = FakeOptionSensor(supported_options={rs.option.emitter_enabled})
+    assert set_emitter_enabled(sensor, False) is True
+    assert sensor.set_options[rs.option.emitter_enabled] == 0
+
+
+def test_set_emitter_enabled_returns_false_when_unsupported():
+    sensor = FakeOptionSensor(supported_options=set())
+    assert set_emitter_enabled(sensor, False) is False
+
+
+def test_set_manual_exposure_sets_exposure_and_gain_and_disables_auto():
+    sensor = FakeOptionSensor(supported_options={rs.option.enable_auto_exposure, rs.option.exposure, rs.option.gain})
+    assert set_manual_exposure(sensor, exposure=150, gain=16) is True
+    assert sensor.set_options[rs.option.enable_auto_exposure] == 0
+    assert sensor.set_options[rs.option.exposure] == 150
+    assert sensor.set_options[rs.option.gain] == 16
