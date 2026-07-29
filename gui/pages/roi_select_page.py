@@ -1,7 +1,16 @@
 """Wizard step 3: same ROI-selection approach as
-optical_sync_poc_/roi_picker.py - capture one settled frame per sensor
+optical_sync_poc_/roi_picker.py - capture one settled frame per stream
 with all LEDs lit (for visibility), then use cv2.selectROI's native popup
 window to draw each box directly in image pixel space.
+
+Generalized from the old hardcoded IR-sensor/RGB-sensor version to the
+generic pick_a/pick_b picks the Stream Select page now produces:
+resolve_and_group figures out whether the two picks live on one shared
+sensor object or two distinct ones, camera_controls (also from Stream
+Select) carries whatever emitter/exposure settings each of those groups
+needs applied before capturing, and capture_synced_frame_pair itself now
+takes that groups list directly instead of a hardcoded 4-arg
+(stereo_sensor, ir_profile, rgb_sensor, color_profile) signature.
 
 Chosen over an embedded Qt drag-and-drop over a live QLabel preview: that
 approach required converting a rubber-band selection from on-screen widget
@@ -20,12 +29,29 @@ import pyrealsense2 as rs
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QPushButton
 
-from domain.realsense_utils import ir_bytes_to_image, yuyv_to_bgr
+from domain.realsense_utils import decode_frame
 from engine.streams import (
-    match_profile, disable_ir_emitter, enable_auto_exposure, get_sensors_for_device,
-    capture_synced_frame_pair,
+    find_device_by_serial, resolve_and_group, capture_synced_frame_pair,
+    set_emitter_enabled, enable_auto_exposure, set_manual_exposure,
 )
 from engine.led_panel import LEDPanel
+
+
+_STREAM_TYPE_LABELS = {
+    rs.stream.infrared: "Infrared",
+    rs.stream.color: "Color",
+}
+
+
+def stream_label(pick):
+    """Human-readable label for a stream pick, e.g. "Infrared 1" / "Color 2"
+    - mirrors gui/pages/stream_config_page.py's _stream_option_label naming
+    so the same pick reads the same way across both pages, just without the
+    resolution/fps/format suffix that page's combo entries need but a
+    cv2.selectROI window title doesn't."""
+    stream_type = pick["stream_type"]
+    type_label = _STREAM_TYPE_LABELS.get(stream_type, stream_type.name.capitalize())
+    return "{} {}".format(type_label, pick["stream_index"])
 
 
 def _select_roi(image, window_title):
@@ -41,6 +67,38 @@ def _select_roi(image, window_title):
     if w == 0 or h == 0:
         return None
     return x, y, w, h
+
+
+def _apply_camera_controls(groups, camera_controls):
+    """Applies each camera_controls entry (from Stream Select's
+    _read_camera_controls) to the group at the same list position -
+    resolve_and_group and Stream Select's group_camera_controls both build
+    their groups in the same pick_a-then-pick_b order from the same
+    sensor_index equality test, so groups[i] and camera_controls[i] always
+    describe the same physical sensor. Returns a list of warning strings for
+    any setting the sensor doesn't support, so the caller can surface them
+    without silently proceeding."""
+    warnings = []
+    for (sensor, _profiles), control in zip(groups, camera_controls):
+        if control["emitter_enabled"] is not None:
+            if not set_emitter_enabled(sensor, control["emitter_enabled"]):
+                warnings.append(
+                    "WARNING: emitter_enabled not supported on sensor(s) {} - confirm the "
+                    "emitter state manually.".format(control["sensor_indices"])
+                )
+        if control["auto_exposure"]:
+            if not enable_auto_exposure(sensor):
+                warnings.append(
+                    "WARNING: enable_auto_exposure not supported on sensor(s) {} - confirm "
+                    "auto-exposure manually.".format(control["sensor_indices"])
+                )
+        else:
+            if not set_manual_exposure(sensor, control["exposure"], control["gain"]):
+                warnings.append(
+                    "WARNING: manual exposure/gain not supported on sensor(s) {} - confirm "
+                    "exposure settings manually.".format(control["sensor_indices"])
+                )
+    return warnings
 
 
 class RoiSelectPage(QWidget):
@@ -61,11 +119,10 @@ class RoiSelectPage(QWidget):
         self.status_label = QLabel("")
         layout.addWidget(self.status_label)
 
-    def set_context(self, ctx, device_serial, ir_resolution, ir_fps, color_resolution, color_fps,
-                    settle_frames=15):
+    def set_context(self, ctx, device_serial, pick_a, pick_b, camera_controls, settle_frames=15):
         self._pending_args = dict(
-            ctx=ctx, device_serial=device_serial, ir_resolution=ir_resolution, ir_fps=ir_fps,
-            color_resolution=color_resolution, color_fps=color_fps, settle_frames=settle_frames,
+            ctx=ctx, device_serial=device_serial, pick_a=pick_a, pick_b=pick_b,
+            camera_controls=camera_controls, settle_frames=settle_frames,
         )
         self.status_label.setText("")
 
@@ -80,20 +137,13 @@ class RoiSelectPage(QWidget):
         finally:
             self.capture_button.setEnabled(True)
 
-    def _capture_and_select(self, ctx, device_serial, ir_resolution, ir_fps, color_resolution, color_fps,
-                            settle_frames):
-        stereo_sensor, rgb_sensor = get_sensors_for_device(ctx, device_serial)
-        ir_profile = match_profile(stereo_sensor, rs.stream.infrared, rs.format.y8, *ir_resolution, ir_fps)
-        color_profile = match_profile(rgb_sensor, rs.stream.color, rs.format.yuyv, *color_resolution, color_fps)
+    def _capture_and_select(self, ctx, device_serial, pick_a, pick_b, camera_controls, settle_frames):
+        device = find_device_by_serial(ctx, device_serial)
+        groups = resolve_and_group(device, pick_a, pick_b)
 
-        if not disable_ir_emitter(stereo_sensor):
-            self.status_label.setText(
-                "WARNING: emitter_enabled not supported - confirm the IR projector is off manually."
-            )
-        if not enable_auto_exposure(rgb_sensor):
-            self.status_label.setText(
-                "WARNING: enable_auto_exposure not supported - confirm RGB auto-exposure is on manually."
-            )
+        warnings = _apply_camera_controls(groups, camera_controls)
+        if warnings:
+            self.status_label.setText("\n".join(warnings))
 
         def turn_on_all_leds():
             LEDPanel.stop()
@@ -104,8 +154,8 @@ class RoiSelectPage(QWidget):
         # calibration_page.py's matching comment for why this replaced the
         # rs.pipeline()-based ContinuousCapture that was here before.
         try:
-            ir_raw, rgb_raw = capture_synced_frame_pair(
-                stereo_sensor, ir_profile, rgb_sensor, color_profile,
+            frames = capture_synced_frame_pair(
+                groups,
                 on_both_streaming=turn_on_all_leds,
                 settle_frames=settle_frames,
             )
@@ -121,18 +171,27 @@ class RoiSelectPage(QWidget):
             except Exception as exc:
                 self.status_label.setText("Warning: failed to turn LEDs off during cleanup: {}".format(exc))
 
-        ir_image = ir_bytes_to_image(ir_raw, *ir_resolution)
-        rgb_image = yuyv_to_bgr(rgb_raw, *color_resolution)
+        image_a = decode_frame(
+            frames[(pick_a["stream_type"], pick_a["stream_index"])],
+            pick_a["format"], pick_a["width"], pick_a["height"],
+        )
+        image_b = decode_frame(
+            frames[(pick_b["stream_type"], pick_b["stream_index"])],
+            pick_b["format"], pick_b["width"], pick_b["height"],
+        )
 
-        ir_roi = _select_roi(ir_image, "IR - drag ROI, Enter=OK, C=Cancel")
-        if ir_roi is None:
-            self.status_label.setText("IR ROI selection cancelled - try again.")
+        label_a = stream_label(pick_a)
+        label_b = stream_label(pick_b)
+
+        roi_a = _select_roi(image_a, "{} - drag ROI, Enter=OK, C=Cancel".format(label_a))
+        if roi_a is None:
+            self.status_label.setText("{} ROI selection cancelled - try again.".format(label_a))
             return
 
-        rgb_roi = _select_roi(rgb_image, "RGB - drag ROI, Enter=OK, C=Cancel")
-        if rgb_roi is None:
-            self.status_label.setText("RGB ROI selection cancelled - try again.")
+        roi_b = _select_roi(image_b, "{} - drag ROI, Enter=OK, C=Cancel".format(label_b))
+        if roi_b is None:
+            self.status_label.setText("{} ROI selection cancelled - try again.".format(label_b))
             return
 
-        self.status_label.setText("ROI selected: IR={} RGB={}".format(ir_roi, rgb_roi))
-        self.roi_chosen.emit((ir_roi, rgb_roi))
+        self.status_label.setText("ROI selected: {}={} {}={}".format(label_a, roi_a, label_b, roi_b))
+        self.roi_chosen.emit((roi_a, roi_b))
