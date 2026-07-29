@@ -33,8 +33,8 @@ class TestSession:
     def process_pair(self, sample: FramePairSample) -> dict:
         row = {
             "pair_index": sample.pair_index,
-            "ir_ts_us": sample.ir_ts_us,
-            "rgb_ts_us": sample.rgb_ts_us,
+            "stream_a_ts_us": sample.stream_a_ts_us,
+            "stream_b_ts_us": sample.stream_b_ts_us,
         }
         for metric in self.config.metrics:
             result = metric.update(sample)

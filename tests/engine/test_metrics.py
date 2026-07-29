@@ -47,14 +47,13 @@ def test_find_last_on_led_nothing_on():
 
 
 def test_compute_position_gap_wraps_to_shortest_path():
-    # n=100: ir=2, rgb=98 -> raw diff -96, wrapped should be +4 (2 is 4 steps past 98's wrap)
-    diff = compute_position_gap(ir_last=2, rgb_last=98, n=100)
+    diff = compute_position_gap(stream_a_last=2, stream_b_last=98, n=100)
     assert diff == 4
 
 
 def test_pairing_gap_metric_flags_outlier():
     metric = PairingGapMetric(outlier_threshold_us=100_000)
-    sample = FramePairSample(pair_index=0, ir_ts_us=1_000_000.0, rgb_ts_us=1_500_000.0)
+    sample = FramePairSample(pair_index=0, stream_a_ts_us=1_000_000.0, stream_b_ts_us=1_500_000.0)
     result = metric.update(sample)
     assert result.name == "pairing_gap_us"
     assert result.value == -500_000.0
@@ -64,23 +63,22 @@ def test_pairing_gap_metric_flags_outlier():
 
 def test_pairing_gap_metric_accepts_close_pair():
     metric = PairingGapMetric(outlier_threshold_us=100_000)
-    sample = FramePairSample(pair_index=0, ir_ts_us=1_000_000.0, rgb_ts_us=1_000_050.0)
+    sample = FramePairSample(pair_index=0, stream_a_ts_us=1_000_000.0, stream_b_ts_us=1_000_050.0)
     result = metric.update(sample)
     assert result.excluded is False
     assert result.exclude_reason is None
 
 
 def test_position_gap_metric_reports_miss_when_nothing_on():
-    ir_threshold = np.full(10, 150.0)
-    rgb_threshold = np.full(10, 150.0)
+    threshold = np.full(10, 150.0)
     metric = PositionGapMetric(
-        ir_threshold=ir_threshold, rgb_threshold=rgb_threshold, num_leds=10,
-        switch_time_ms=1.0, ir_fps=30, rgb_fps=30,
+        stream_a_threshold=threshold, stream_b_threshold=threshold, num_leds=10,
+        switch_time_ms=1.0, stream_a_fps=30, stream_b_fps=30,
         frame_drop_threshold_factor=1.5, warmup_pairs_to_skip=0,
     )
     sample = FramePairSample(
-        pair_index=0, ir_ts_us=0.0, rgb_ts_us=0.0,
-        ir_bright=np.full(10, 50.0), rgb_bright=np.full(10, 50.0),
+        pair_index=0, stream_a_ts_us=0.0, stream_b_ts_us=0.0,
+        stream_a_bright=np.full(10, 50.0), stream_b_bright=np.full(10, 50.0),
     )
     result = metric.update(sample)
     assert result.excluded is True
@@ -88,117 +86,105 @@ def test_position_gap_metric_reports_miss_when_nothing_on():
 
 
 def test_position_gap_metric_computes_gap_ms():
-    ir_threshold = np.full(10, 150.0)
-    rgb_threshold = np.full(10, 150.0)
+    threshold = np.full(10, 150.0)
     metric = PositionGapMetric(
-        ir_threshold=ir_threshold, rgb_threshold=rgb_threshold, num_leds=10,
-        switch_time_ms=2.0, ir_fps=30, rgb_fps=30,
+        stream_a_threshold=threshold, stream_b_threshold=threshold, num_leds=10,
+        switch_time_ms=2.0, stream_a_fps=30, stream_b_fps=30,
         frame_drop_threshold_factor=1.5, warmup_pairs_to_skip=0,
     )
-    ir_bright = np.full(10, 50.0); ir_bright[5] = 200.0
-    rgb_bright = np.full(10, 50.0); rgb_bright[3] = 200.0
-    sample = FramePairSample(pair_index=0, ir_ts_us=0.0, rgb_ts_us=0.0, ir_bright=ir_bright, rgb_bright=rgb_bright)
+    stream_a_bright = np.full(10, 50.0); stream_a_bright[5] = 200.0
+    stream_b_bright = np.full(10, 50.0); stream_b_bright[3] = 200.0
+    sample = FramePairSample(pair_index=0, stream_a_ts_us=0.0, stream_b_ts_us=0.0, stream_a_bright=stream_a_bright, stream_b_bright=stream_b_bright)
     result = metric.update(sample)
     assert result.excluded is False
     assert result.value == 4.0  # (5 - 3) LED steps * 2.0 ms
 
 
 def test_position_gap_metric_flags_warmup_pairs():
-    ir_threshold = np.full(10, 150.0)
-    rgb_threshold = np.full(10, 150.0)
+    threshold = np.full(10, 150.0)
     metric = PositionGapMetric(
-        ir_threshold=ir_threshold, rgb_threshold=rgb_threshold, num_leds=10,
-        switch_time_ms=1.0, ir_fps=30, rgb_fps=30,
+        stream_a_threshold=threshold, stream_b_threshold=threshold, num_leds=10,
+        switch_time_ms=1.0, stream_a_fps=30, stream_b_fps=30,
         frame_drop_threshold_factor=1.5, warmup_pairs_to_skip=2,
     )
-    ir_bright = np.full(10, 200.0)
-    rgb_bright = np.full(10, 200.0)
-    first = metric.update(FramePairSample(0, 0.0, 0.0, ir_bright, rgb_bright))
-    second = metric.update(FramePairSample(1, 33333.0, 33333.0, ir_bright, rgb_bright))
-    third = metric.update(FramePairSample(2, 66666.0, 66666.0, ir_bright, rgb_bright))
+    bright = np.full(10, 200.0)
+    first = metric.update(FramePairSample(0, 0.0, 0.0, bright, bright))
+    second = metric.update(FramePairSample(1, 33333.0, 33333.0, bright, bright))
+    third = metric.update(FramePairSample(2, 66666.0, 66666.0, bright, bright))
     assert first.exclude_reason == "warmup"
     assert second.exclude_reason == "warmup"
     assert third.exclude_reason is None
 
 
 def test_position_gap_metric_flags_frame_drop():
-    ir_threshold = np.full(10, 150.0)
-    rgb_threshold = np.full(10, 150.0)
+    threshold = np.full(10, 150.0)
     metric = PositionGapMetric(
-        ir_threshold=ir_threshold, rgb_threshold=rgb_threshold, num_leds=10,
-        switch_time_ms=1.0, ir_fps=30, rgb_fps=30,
+        stream_a_threshold=threshold, stream_b_threshold=threshold, num_leds=10,
+        switch_time_ms=1.0, stream_a_fps=30, stream_b_fps=30,
         frame_drop_threshold_factor=1.5, warmup_pairs_to_skip=0,
     )
-    ir_bright = np.full(10, 200.0)
-    rgb_bright = np.full(10, 200.0)
-    metric.update(FramePairSample(0, 0.0, 0.0, ir_bright, rgb_bright))
-    # Expected delta at 30fps is ~33333us; jump to 500_000us should trip the drop check.
-    result = metric.update(FramePairSample(1, 500_000.0, 33333.0, ir_bright, rgb_bright))
+    bright = np.full(10, 200.0)
+    metric.update(FramePairSample(0, 0.0, 0.0, bright, bright))
+    result = metric.update(FramePairSample(1, 500_000.0, 33333.0, bright, bright))
     assert result.exclude_reason == "frame_drop"
 
 
 def test_position_gap_metric_extra_reports_no_drop_when_clean():
-    ir_threshold = np.full(10, 150.0)
-    rgb_threshold = np.full(10, 150.0)
+    threshold = np.full(10, 150.0)
     metric = PositionGapMetric(
-        ir_threshold=ir_threshold, rgb_threshold=rgb_threshold, num_leds=10,
-        switch_time_ms=1.0, ir_fps=30, rgb_fps=30,
+        stream_a_threshold=threshold, stream_b_threshold=threshold, num_leds=10,
+        switch_time_ms=1.0, stream_a_fps=30, stream_b_fps=30,
         frame_drop_threshold_factor=1.5, warmup_pairs_to_skip=0,
     )
-    ir_bright = np.full(10, 50.0); ir_bright[5] = 200.0
-    rgb_bright = np.full(10, 50.0); rgb_bright[3] = 200.0
-    metric.update(FramePairSample(0, 0.0, 0.0, ir_bright, rgb_bright))
-    result = metric.update(FramePairSample(1, 33333.0, 33333.0, ir_bright, rgb_bright))
-    assert result.extra == {"ir_frame_drop": False, "rgb_frame_drop": False}
+    stream_a_bright = np.full(10, 50.0); stream_a_bright[5] = 200.0
+    stream_b_bright = np.full(10, 50.0); stream_b_bright[3] = 200.0
+    metric.update(FramePairSample(0, 0.0, 0.0, stream_a_bright, stream_b_bright))
+    result = metric.update(FramePairSample(1, 33333.0, 33333.0, stream_a_bright, stream_b_bright))
+    assert result.extra == {"stream_a_frame_drop": False, "stream_b_frame_drop": False}
 
 
 def test_position_gap_metric_extra_flags_which_stream_dropped():
-    ir_threshold = np.full(10, 150.0)
-    rgb_threshold = np.full(10, 150.0)
+    threshold = np.full(10, 150.0)
     metric = PositionGapMetric(
-        ir_threshold=ir_threshold, rgb_threshold=rgb_threshold, num_leds=10,
-        switch_time_ms=1.0, ir_fps=30, rgb_fps=30,
+        stream_a_threshold=threshold, stream_b_threshold=threshold, num_leds=10,
+        switch_time_ms=1.0, stream_a_fps=30, stream_b_fps=30,
         frame_drop_threshold_factor=1.5, warmup_pairs_to_skip=0,
     )
-    ir_bright = np.full(10, 200.0)
-    rgb_bright = np.full(10, 200.0)
-    metric.update(FramePairSample(0, 0.0, 0.0, ir_bright, rgb_bright))
-    # IR jumps (drop), RGB stays on schedule.
-    result = metric.update(FramePairSample(1, 500_000.0, 33333.0, ir_bright, rgb_bright))
-    assert result.extra == {"ir_frame_drop": True, "rgb_frame_drop": False}
+    bright = np.full(10, 200.0)
+    metric.update(FramePairSample(0, 0.0, 0.0, bright, bright))
+    result = metric.update(FramePairSample(1, 500_000.0, 33333.0, bright, bright))
+    assert result.extra == {"stream_a_frame_drop": True, "stream_b_frame_drop": False}
 
 
 def test_position_gap_metric_extra_present_even_when_miss():
-    ir_threshold = np.full(10, 150.0)
-    rgb_threshold = np.full(10, 150.0)
+    threshold = np.full(10, 150.0)
     metric = PositionGapMetric(
-        ir_threshold=ir_threshold, rgb_threshold=rgb_threshold, num_leds=10,
-        switch_time_ms=1.0, ir_fps=30, rgb_fps=30,
+        stream_a_threshold=threshold, stream_b_threshold=threshold, num_leds=10,
+        switch_time_ms=1.0, stream_a_fps=30, stream_b_fps=30,
         frame_drop_threshold_factor=1.5, warmup_pairs_to_skip=0,
     )
     sample = FramePairSample(
-        pair_index=0, ir_ts_us=0.0, rgb_ts_us=0.0,
-        ir_bright=np.full(10, 50.0), rgb_bright=np.full(10, 50.0),
+        pair_index=0, stream_a_ts_us=0.0, stream_b_ts_us=0.0,
+        stream_a_bright=np.full(10, 50.0), stream_b_bright=np.full(10, 50.0),
     )
     result = metric.update(sample)
     assert result.exclude_reason == "miss"
-    assert result.extra == {"ir_frame_drop": False, "rgb_frame_drop": False}
+    assert result.extra == {"stream_a_frame_drop": False, "stream_b_frame_drop": False}
 
 
 def test_position_gap_metric_tracks_last_on_masks_for_debug_snapshots():
-    ir_threshold = np.full(4, 150.0)
-    rgb_threshold = np.full(4, 150.0)
+    threshold = np.full(4, 150.0)
     metric = PositionGapMetric(
-        ir_threshold=ir_threshold, rgb_threshold=rgb_threshold, num_leds=4,
-        switch_time_ms=1.0, ir_fps=30, rgb_fps=30,
+        stream_a_threshold=threshold, stream_b_threshold=threshold, num_leds=4,
+        switch_time_ms=1.0, stream_a_fps=30, stream_b_fps=30,
         frame_drop_threshold_factor=1.5, warmup_pairs_to_skip=0,
     )
-    assert metric.last_ir_on_mask is None
-    assert metric.last_rgb_on_mask is None
+    assert metric.last_stream_a_on_mask is None
+    assert metric.last_stream_b_on_mask is None
 
-    ir_bright = np.array([50.0, 200.0, 50.0, 50.0])
-    rgb_bright = np.array([200.0, 50.0, 50.0, 50.0])
-    metric.update(FramePairSample(0, 0.0, 0.0, ir_bright, rgb_bright))
+    stream_a_bright = np.array([50.0, 200.0, 50.0, 50.0])
+    stream_b_bright = np.array([200.0, 50.0, 50.0, 50.0])
+    metric.update(FramePairSample(0, 0.0, 0.0, stream_a_bright, stream_b_bright))
 
-    assert metric.last_ir_on_mask.tolist() == [False, True, False, False]
-    assert metric.last_rgb_on_mask.tolist() == [True, False, False, False]
+    assert metric.last_stream_a_on_mask.tolist() == [False, True, False, False]
+    assert metric.last_stream_b_on_mask.tolist() == [True, False, False, False]

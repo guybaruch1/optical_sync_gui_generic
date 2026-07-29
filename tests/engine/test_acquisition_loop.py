@@ -13,9 +13,9 @@ class CountingMetric(Metric):
 
 def fake_frame_source(n_pairs):
     for i in range(n_pairs):
-        ir_image = np.full((4, 4), i, dtype=np.uint8)
-        rgb_image = np.full((4, 4, 3), i, dtype=np.uint8)
-        yield ir_image, rgb_image, float(i), float(i), None, None
+        stream_a_image = np.full((4, 4, 3), i, dtype=np.uint8)
+        stream_b_image = np.full((4, 4, 3), i, dtype=np.uint8)
+        yield stream_a_image, stream_b_image, float(i), float(i), None, None
 
 
 def test_run_until_stopped_processes_every_frame_and_calls_on_row():
@@ -25,7 +25,7 @@ def test_run_until_stopped_processes_every_frame_and_calls_on_row():
     frames_seen = []
     stats_seen = []
     callbacks = AcquisitionCallbacks(
-        on_frames=lambda ir, rgb, idx: frames_seen.append(idx),
+        on_frames=lambda stream_a, stream_b, idx: frames_seen.append(idx),
         on_row=lambda row: rows_seen.append(row),
         on_stats=lambda stats: stats_seen.append(stats),
     )
@@ -49,7 +49,7 @@ def test_run_until_stopped_throttles_frame_display_by_stride():
     session.start()
     frames_seen = []
     callbacks = AcquisitionCallbacks(
-        on_frames=lambda ir, rgb, idx: frames_seen.append(idx),
+        on_frames=lambda stream_a, stream_b, idx: frames_seen.append(idx),
         on_row=lambda row: None,
         on_stats=lambda stats: None,
     )

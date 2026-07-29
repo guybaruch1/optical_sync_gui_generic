@@ -28,7 +28,7 @@ class AcquisitionLoop:
 
     def run_until_stopped(self, is_stop_requested, elapsed_s_fn) -> "list[dict]":
         pair_index = 0
-        for ir_image, rgb_image, ir_ts_us, rgb_ts_us, ir_bright, rgb_bright in self.frame_source:
+        for stream_a_image, stream_b_image, stream_a_ts_us, stream_b_ts_us, stream_a_bright, stream_b_bright in self.frame_source:
             if is_stop_requested():
                 break
             if self.test_session.should_auto_stop(elapsed_s_fn()):
@@ -36,16 +36,16 @@ class AcquisitionLoop:
 
             sample = FramePairSample(
                 pair_index=pair_index,
-                ir_ts_us=ir_ts_us,
-                rgb_ts_us=rgb_ts_us,
-                ir_bright=ir_bright,
-                rgb_bright=rgb_bright,
+                stream_a_ts_us=stream_a_ts_us,
+                stream_b_ts_us=stream_b_ts_us,
+                stream_a_bright=stream_a_bright,
+                stream_b_bright=stream_b_bright,
             )
             row = self.test_session.process_pair(sample)
             self.callbacks.on_row(row)
 
             if pair_index % self.display_stride == 0:
-                self.callbacks.on_frames(ir_image, rgb_image, pair_index)
+                self.callbacks.on_frames(stream_a_image, stream_b_image, pair_index)
                 self.callbacks.on_stats(row)
 
             pair_index += 1

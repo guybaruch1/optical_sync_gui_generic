@@ -29,9 +29,9 @@ def test_start_sets_running_true():
 def test_process_pair_returns_flat_row_and_buffers_it():
     session = TestSession(TestSessionConfig(metrics=[FakeMetric()]))
     session.start()
-    row = session.process_pair(FramePairSample(pair_index=0, ir_ts_us=100.0, rgb_ts_us=100.0))
+    row = session.process_pair(FramePairSample(pair_index=0, stream_a_ts_us=100.0, stream_b_ts_us=100.0))
     assert row["pair_index"] == 0
-    assert row["ir_ts_us"] == 100.0
+    assert row["stream_a_ts_us"] == 100.0
     assert row["fake_metric"] == 0.0
     assert row["fake_metric_excluded"] is False
     assert row["fake_metric_exclude_reason"] is None
@@ -40,7 +40,7 @@ def test_process_pair_returns_flat_row_and_buffers_it():
 def test_process_pair_folds_extra_dict_into_row():
     session = TestSession(TestSessionConfig(metrics=[FakeMetricWithExtra()]))
     session.start()
-    row = session.process_pair(FramePairSample(pair_index=0, ir_ts_us=0.0, rgb_ts_us=0.0))
+    row = session.process_pair(FramePairSample(pair_index=0, stream_a_ts_us=0.0, stream_b_ts_us=0.0))
     assert row["custom_flag"] is True
 
 
