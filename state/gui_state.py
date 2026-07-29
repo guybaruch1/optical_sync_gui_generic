@@ -14,14 +14,26 @@ from dataclasses import dataclass
 @dataclass
 class GuiState:
     device_serial: "str | None" = None
-    ir_fps: "int | None" = None
-    ir_width: "int | None" = None
-    ir_height: "int | None" = None
-    rgb_fps: "int | None" = None
-    rgb_width: "int | None" = None
-    rgb_height: "int | None" = None
-    ir_roi: "list[int] | None" = None
-    rgb_roi: "list[int] | None" = None
+    stream_a_type: "str | None" = None
+    stream_a_index: "int | None" = None
+    stream_a_width: "int | None" = None
+    stream_a_height: "int | None" = None
+    stream_a_fps: "int | None" = None
+    stream_a_roi: "list[int] | None" = None
+    stream_a_emitter_enabled: "bool | None" = None
+    stream_a_auto_exposure: "bool | None" = None
+    stream_a_exposure: "int | None" = None
+    stream_a_gain: "int | None" = None
+    stream_b_type: "str | None" = None
+    stream_b_index: "int | None" = None
+    stream_b_width: "int | None" = None
+    stream_b_height: "int | None" = None
+    stream_b_fps: "int | None" = None
+    stream_b_roi: "list[int] | None" = None
+    stream_b_emitter_enabled: "bool | None" = None
+    stream_b_auto_exposure: "bool | None" = None
+    stream_b_exposure: "int | None" = None
+    stream_b_gain: "int | None" = None
 
 
 def load_gui_state(path="gui_state.json"):

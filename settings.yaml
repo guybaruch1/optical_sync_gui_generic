@@ -11,8 +11,8 @@ camera:
   # dropdowns, if the connected camera actually reports this exact combo -
   # you can still pick a different one there if this rig/camera doesn't
   # support it (e.g. no HD@30fps on some models). Not a hard requirement.
-  ir: {width: 1280, height: 720, fps: 30}
-  color: {width: 1280, height: 720, fps: 30}
+  stream_a: {width: 1280, height: 720, fps: 30}
+  stream_b: {width: 1280, height: 720, fps: 30}
 
 calibration:
   # Frames to let each stream settle on before treating a frame as "good".
