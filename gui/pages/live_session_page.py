@@ -49,7 +49,14 @@ domain.running_stats.RunningStats, updated every pair (same cadence as the
 frame-drop counters) and pushed to the table on the same throttled cadence
 the live plots update on. The frame-drops checkbox reuses
 LivePlot.set_series_visible - the same mechanism the other two checkboxes
-use."""
+use.
+
+This page is stream-agnostic: "stream_a"/"stream_b" refer to whichever
+two (stream_type, stream_index) picks the wizard's earlier pages resolved
+(e.g. an infrared stream and a color stream, or two infrared streams) -
+nothing here assumes a specific RealSense stream type. Panel titles use
+stream_a_label/stream_b_label (human-readable strings computed by the
+caller, e.g. "Infrared 1"/"Color") rather than a hardcoded "IR"/"RGB"."""
 
 import glob
 import os
@@ -122,14 +129,14 @@ class LiveSessionPage(QWidget):
         super().__init__(parent)
         self.engine_thread = None
         self._context = None
-        self._ir_drop_count = 0
-        self._rgb_drop_count = 0
-        self._ir_drop_since_last_plot = False
-        self._rgb_drop_since_last_plot = False
-        self._last_ir_image = None
-        self._last_rgb_image = None
-        self._last_ir_on_mask = None
-        self._last_rgb_on_mask = None
+        self._stream_a_drop_count = 0
+        self._stream_b_drop_count = 0
+        self._stream_a_drop_since_last_plot = False
+        self._stream_b_drop_since_last_plot = False
+        self._last_stream_a_image = None
+        self._last_stream_b_image = None
+        self._last_stream_a_on_mask = None
+        self._last_stream_b_on_mask = None
         self._periodic_snapshot_count = 0
         self._hw_ts_latency_stats = RunningStats()
         self._optical_sync_stats = RunningStats()
@@ -139,28 +146,28 @@ class LiveSessionPage(QWidget):
         layout = QVBoxLayout(self)
 
         video_row = QHBoxLayout()
-        self.ir_panel = VideoPanel(force_square=True)
-        self.rgb_panel = VideoPanel(force_square=True)
-        for panel in (self.ir_panel, self.rgb_panel):
+        self.stream_a_panel = VideoPanel(force_square=True)
+        self.stream_b_panel = VideoPanel(force_square=True)
+        for panel in (self.stream_a_panel, self.stream_b_panel):
             panel.setStyleSheet("background-color: #3a3a3a; border-radius: 4px;")
         # Placeholder text until set_context() fills in the actual camera
-        # model name (e.g. "D455 - IR") - device identity isn't known until
-        # then.
-        self.ir_title_label = QLabel("IR Camera")
-        self.rgb_title_label = QLabel("RGB Camera")
-        for title_label in (self.ir_title_label, self.rgb_title_label):
+        # model name + stream label (e.g. "D455 - Infrared 1") - stream
+        # identity isn't known until then.
+        self.stream_a_title_label = QLabel("Stream A")
+        self.stream_b_title_label = QLabel("Stream B")
+        for title_label in (self.stream_a_title_label, self.stream_b_title_label):
             title_label.setStyleSheet(
                 "color: #555555; font-weight: 600; font-size: 9pt;"
                 "text-transform: uppercase; letter-spacing: 1px; border: none; background: transparent;"
             )
-        ir_column = QVBoxLayout()
-        ir_column.addWidget(self.ir_title_label)
-        ir_column.addWidget(self.ir_panel)
-        rgb_column = QVBoxLayout()
-        rgb_column.addWidget(self.rgb_title_label)
-        rgb_column.addWidget(self.rgb_panel)
-        video_row.addLayout(ir_column)
-        video_row.addLayout(rgb_column)
+        stream_a_column = QVBoxLayout()
+        stream_a_column.addWidget(self.stream_a_title_label)
+        stream_a_column.addWidget(self.stream_a_panel)
+        stream_b_column = QVBoxLayout()
+        stream_b_column.addWidget(self.stream_b_title_label)
+        stream_b_column.addWidget(self.stream_b_panel)
+        video_row.addLayout(stream_a_column)
+        video_row.addLayout(stream_b_column)
         video_row.addStretch(1)
         layout.addLayout(video_row)
 
@@ -174,15 +181,15 @@ class LiveSessionPage(QWidget):
         self.position_gap_checkbox.toggled.connect(
             lambda checked: self.position_plot.set_series_visible("position_gap_ms", checked)
         )
-        self.frame_drops_checkbox = QCheckBox("Frame drops (IR/RGB)")
+        self.frame_drops_checkbox = QCheckBox("Frame drops (A/B)")
         self.frame_drops_checkbox.setChecked(True)
         self.frame_drops_checkbox.toggled.connect(self._set_frame_drops_visible)
 
         # Colors match the design mockup's chart lines (blue/aqua/orange).
-        # rgb_frame_drops' color is my own choice - the mockup simplifies
-        # frame drops to one line, but this app genuinely tracks IR/RGB
-        # separately (see the module docstring), so it still needs two
-        # distinct, harmonious colors.
+        # stream_b_frame_drops' color is my own choice - the mockup
+        # simplifies frame drops to one line, but this app genuinely tracks
+        # the two streams separately (see the module docstring), so it
+        # still needs two distinct, harmonious colors.
         self.pairing_plot = LivePlot()
         self.pairing_plot.setLabel("left", "HW TS Latency (us)")
         self.pairing_plot.setLabel("bottom", "Pair Index")
@@ -194,14 +201,14 @@ class LiveSessionPage(QWidget):
         self.position_plot.add_series("position_gap_ms", color="#3fbf9e", display_name="Optical Sync (ms)")
 
         self.drop_plot = LivePlot()
-        self.drop_plot.setLabel("left", "Frame Drops (IR up / RGB down)")
+        self.drop_plot.setLabel("left", "Frame Drops (A up / B down)")
         self.drop_plot.setLabel("bottom", "Pair Index")
         # Split by stream (not one combined flag) so you can see which
-        # camera is actually dropping frames, not just that one recently
-        # did - the data was already split (ir_frame_drop/rgb_frame_drop),
-        # only the graph collapsed it into one series.
-        self.drop_plot.add_series("ir_frame_drops", color="#e08a3f")
-        self.drop_plot.add_series("rgb_frame_drops", color="#c0587a")
+        # stream is actually dropping frames, not just that one recently
+        # did - the data was already split (stream_a_frame_drop/
+        # stream_b_frame_drop), only the graph collapsed it into one series.
+        self.drop_plot.add_series("stream_a_frame_drops", color="#e08a3f")
+        self.drop_plot.add_series("stream_b_frame_drops", color="#c0587a")
 
         # Each graph gets its own header row (checkbox + Copy/Export CSV)
         # directly above it, all three in one column with equal width, but
@@ -216,7 +223,7 @@ class LiveSessionPage(QWidget):
                                                           ["position_gap_ms"]))
         graphs_column.addWidget(self.position_plot, stretch=2)
         graphs_column.addLayout(self._make_chart_header(self.frame_drops_checkbox, self.drop_plot,
-                                                          ["ir_frame_drops", "rgb_frame_drops"]))
+                                                          ["stream_a_frame_drops", "stream_b_frame_drops"]))
         graphs_column.addWidget(self.drop_plot, stretch=1)
 
         self.stats_panel = StatsPanel()
@@ -226,8 +233,8 @@ class LiveSessionPage(QWidget):
         self.stats_panel.add_field("pairing_gap_us", "HW TS Latency (us)")
         self.stats_panel.add_field("position_gap_ms", "Optical Sync (ms)")
         self.stats_panel.add_field("switch_time_ms", "LED Switch Time (ms)")
-        self.stats_panel.add_field("ir_frame_drops", "IR Frame Drops")
-        self.stats_panel.add_field("rgb_frame_drops", "RGB Frame Drops")
+        self.stats_panel.add_field("stream_a_frame_drops", "Stream A Frame Drops")
+        self.stats_panel.add_field("stream_b_frame_drops", "Stream B Frame Drops")
         self.stats_panel.add_section_header("Stats")
         self.stats_panel.add_stats_table([
             ("hw_ts_latency", "HW TS Latency"),
@@ -346,27 +353,27 @@ class LiveSessionPage(QWidget):
         )
 
     def _set_frame_drops_visible(self, checked):
-        self.drop_plot.set_series_visible("ir_frame_drops", checked)
-        self.drop_plot.set_series_visible("rgb_frame_drops", checked)
+        self.drop_plot.set_series_visible("stream_a_frame_drops", checked)
+        self.drop_plot.set_series_visible("stream_b_frame_drops", checked)
 
-    def set_context(self, ctx, device_serial, ir_resolution, ir_fps, color_resolution, color_fps,
-                    switch_time_ms, scan_direction, ir_threshold, rgb_threshold, ir_xy, rgb_xy, num_leds,
-                    neighborhood_size,
-                    frame_drop_threshold_factor, warmup_pairs_to_skip, pairing_gap_outlier_threshold_us,
-                    kept_csv_path, dropped_csv_path, output_dir,
-                    snapshot_every_n_pairs, max_snapshots, ir_roi, rgb_roi, camera_name):
+    def set_context(self, ctx, device_serial, pick_a, pick_b, camera_controls, switch_time_ms, scan_direction,
+                     stream_a_threshold, stream_b_threshold, stream_a_xy, stream_b_xy, num_leds, neighborhood_size,
+                     frame_drop_threshold_factor, warmup_pairs_to_skip, pairing_gap_outlier_threshold_us,
+                     kept_csv_path, dropped_csv_path, output_dir, snapshot_every_n_pairs, max_snapshots,
+                     stream_a_roi, stream_b_roi, camera_name, stream_a_label, stream_b_label):
         self._context = dict(
-            ctx=ctx, device_serial=device_serial, ir_resolution=ir_resolution, ir_fps=ir_fps,
-            color_resolution=color_resolution, color_fps=color_fps, switch_time_ms=switch_time_ms,
-            scan_direction=scan_direction,
-            ir_threshold=ir_threshold, rgb_threshold=rgb_threshold, ir_xy=ir_xy, rgb_xy=rgb_xy,
+            ctx=ctx, device_serial=device_serial, pick_a=pick_a, pick_b=pick_b, camera_controls=camera_controls,
+            switch_time_ms=switch_time_ms, scan_direction=scan_direction,
+            stream_a_threshold=stream_a_threshold, stream_b_threshold=stream_b_threshold,
+            stream_a_xy=stream_a_xy, stream_b_xy=stream_b_xy,
             num_leds=num_leds, neighborhood_size=neighborhood_size,
             frame_drop_threshold_factor=frame_drop_threshold_factor,
             warmup_pairs_to_skip=warmup_pairs_to_skip,
             pairing_gap_outlier_threshold_us=pairing_gap_outlier_threshold_us,
             kept_csv_path=kept_csv_path, dropped_csv_path=dropped_csv_path, output_dir=output_dir,
             snapshot_every_n_pairs=snapshot_every_n_pairs, max_snapshots=max_snapshots,
-            ir_roi=ir_roi, rgb_roi=rgb_roi,
+            stream_a_roi=stream_a_roi, stream_b_roi=stream_b_roi,
+            stream_a_label=stream_a_label, stream_b_label=stream_b_label,
         )
         self.stats_panel.set_value("switch_time_ms", switch_time_ms)
         # settings.yaml's value is only the starting point shown in the
@@ -377,8 +384,8 @@ class LiveSessionPage(QWidget):
         # settings.yaml default, not whatever was last typed.
         self.switch_time_spinbox.setValue(int(round(switch_time_ms)))
         short_name = _short_camera_name(camera_name)
-        self.ir_title_label.setText("{} - IR".format(short_name))
-        self.rgb_title_label.setText("{} - RGB".format(short_name))
+        self.stream_a_title_label.setText("{} - {}".format(short_name, stream_a_label))
+        self.stream_b_title_label.setText("{} - {}".format(short_name, stream_b_label))
 
     def start_session(self):
         ctx = self._context
@@ -391,8 +398,9 @@ class LiveSessionPage(QWidget):
         switch_time_ms = self.switch_time_spinbox.value()
         display_stride = self.frame_sample_interval_spinbox.value()
         position_gap_metric = PositionGapMetric(
-            ir_threshold=ctx["ir_threshold"], rgb_threshold=ctx["rgb_threshold"], num_leds=ctx["num_leds"],
-            switch_time_ms=switch_time_ms, ir_fps=ctx["ir_fps"], rgb_fps=ctx["color_fps"],
+            stream_a_threshold=ctx["stream_a_threshold"], stream_b_threshold=ctx["stream_b_threshold"],
+            num_leds=ctx["num_leds"], switch_time_ms=switch_time_ms,
+            stream_a_fps=ctx["pick_a"]["fps"], stream_b_fps=ctx["pick_b"]["fps"],
             frame_drop_threshold_factor=ctx["frame_drop_threshold_factor"],
             warmup_pairs_to_skip=ctx["warmup_pairs_to_skip"],
         )
@@ -412,14 +420,14 @@ class LiveSessionPage(QWidget):
         self.position_plot.clear_data()
         self.drop_plot.clear_data()
 
-        self._ir_drop_count = 0
-        self._rgb_drop_count = 0
-        self._ir_drop_since_last_plot = False
-        self._rgb_drop_since_last_plot = False
-        self._last_ir_image = None
-        self._last_rgb_image = None
-        self._last_ir_on_mask = None
-        self._last_rgb_on_mask = None
+        self._stream_a_drop_count = 0
+        self._stream_b_drop_count = 0
+        self._stream_a_drop_since_last_plot = False
+        self._stream_b_drop_since_last_plot = False
+        self._last_stream_a_image = None
+        self._last_stream_b_image = None
+        self._last_stream_a_on_mask = None
+        self._last_stream_b_on_mask = None
         self._periodic_snapshot_count = 0
         self._hw_ts_latency_stats = RunningStats()
         self._optical_sync_stats = RunningStats()
@@ -437,9 +445,8 @@ class LiveSessionPage(QWidget):
             self.engine_thread.wait()
 
         self.engine_thread = SessionEngineThread(
-            ctx["ctx"], ctx["device_serial"], ctx["ir_resolution"], ctx["ir_fps"],
-            ctx["color_resolution"], ctx["color_fps"], test_session,
-            ir_xy=ctx["ir_xy"], rgb_xy=ctx["rgb_xy"], neighborhood_size=ctx["neighborhood_size"],
+            ctx["ctx"], ctx["device_serial"], ctx["pick_a"], ctx["pick_b"], ctx["camera_controls"], test_session,
+            stream_a_xy=ctx["stream_a_xy"], stream_b_xy=ctx["stream_b_xy"], neighborhood_size=ctx["neighborhood_size"],
             scan_direction=ctx["scan_direction"], switch_time_ms=switch_time_ms,
             display_stride=display_stride, position_gap_metric=position_gap_metric,
         )
@@ -480,43 +487,44 @@ class LiveSessionPage(QWidget):
         # thread at this exact pair_index) - this method must not read any
         # live/mutable state to recover the mask itself, only use what was
         # handed to it, or the same stale-read bug comes right back.
-        if stream_name == "ir":
-            self._last_ir_image = image
-            self._last_ir_on_mask = on_mask
+        if stream_name == "stream_a":
+            self._last_stream_a_image = image
+            self._last_stream_a_on_mask = on_mask
         else:
-            self._last_rgb_image = image
-            self._last_rgb_on_mask = on_mask
+            self._last_stream_b_image = image
+            self._last_stream_b_on_mask = on_mask
 
         display_image = draw_led_state_overlay(image, self._overlay_xy(stream_name), on_mask) \
             if on_mask is not None and self._context is not None else image
         # Cropped AFTER the overlay is drawn, not before - the overlay's
         # circles are positioned in full-frame coordinates (matching
-        # ir_xy/rgb_xy), so cropping first would misplace them relative to
-        # the now-smaller image.
+        # stream_a_xy/stream_b_xy), so cropping first would misplace them
+        # relative to the now-smaller image.
         display_image = self._crop_to_roi_if_available(display_image, stream_name)
-        if stream_name == "ir":
-            self.ir_panel.set_frame(display_image)
+        if stream_name == "stream_a":
+            self.stream_a_panel.set_frame(display_image)
         else:
-            self.rgb_panel.set_frame(display_image)
-            # "rgb" is always the second of the pair emitted per iteration
-            # (see SessionEngineThread.on_frames), so by this point
-            # _last_ir_image/_last_ir_on_mask have already been updated too.
+            self.stream_b_panel.set_frame(display_image)
+            # "stream_b" is always the second of the pair emitted per
+            # iteration (see SessionEngineThread.on_frames), so by this
+            # point _last_stream_a_image/_last_stream_a_on_mask have already
+            # been updated too.
             self._maybe_save_periodic_snapshot(pair_index)
 
     def _crop_to_roi_if_available(self, image, stream_name):
-        # Only affects the live preview - _last_ir_image/_last_rgb_image
-        # (used for the saved debug snapshots) stay full-frame, since
-        # seeing the ROI's placement in context is more useful there than
-        # a tightly-cropped view.
+        # Only affects the live preview - _last_stream_a_image/
+        # _last_stream_b_image (used for the saved debug snapshots) stay
+        # full-frame, since seeing the ROI's placement in context is more
+        # useful there than a tightly-cropped view.
         if self._context is None:
             return image
-        roi = self._context["ir_roi"] if stream_name == "ir" else self._context["rgb_roi"]
+        roi = self._context["stream_a_roi"] if stream_name == "stream_a" else self._context["stream_b_roi"]
         if roi is None or roi[2] <= 0 or roi[3] <= 0:
             return image
         return crop_to_roi(image, roi)
 
     def _overlay_xy(self, stream_name):
-        return self._context["ir_xy"] if stream_name == "ir" else self._context["rgb_xy"]
+        return self._context["stream_a_xy"] if stream_name == "stream_a" else self._context["stream_b_xy"]
 
     def _maybe_save_periodic_snapshot(self, pair_index):
         if self._context is None:
@@ -527,9 +535,9 @@ class LiveSessionPage(QWidget):
             return
         if self._periodic_snapshot_count >= max_snapshots:
             return
-        if self._last_ir_on_mask is None or self._last_rgb_on_mask is None:
+        if self._last_stream_a_on_mask is None or self._last_stream_b_on_mask is None:
             return
-        if self._last_ir_image is None or self._last_rgb_image is None:
+        if self._last_stream_a_image is None or self._last_stream_b_image is None:
             return
 
         output_dir = self._context["output_dir"]
@@ -537,12 +545,16 @@ class LiveSessionPage(QWidget):
         # detection picture matches the frame that was on screen at that
         # exact moment - the same number the live display and the CSV's
         # pair_index column both use.
-        ir_path = os.path.join(output_dir, "periodic_led_state_ir_pair{:05d}.png".format(pair_index))
-        rgb_path = os.path.join(output_dir, "periodic_led_state_rgb_pair{:05d}.png".format(pair_index))
-        ir_debug = draw_led_state_overlay(self._last_ir_image, self._context["ir_xy"], self._last_ir_on_mask)
-        rgb_debug = draw_led_state_overlay(self._last_rgb_image, self._context["rgb_xy"], self._last_rgb_on_mask)
-        cv2.imwrite(ir_path, ir_debug)
-        cv2.imwrite(rgb_path, rgb_debug)
+        stream_a_path = os.path.join(output_dir, "periodic_led_state_stream_a_pair{:05d}.png".format(pair_index))
+        stream_b_path = os.path.join(output_dir, "periodic_led_state_stream_b_pair{:05d}.png".format(pair_index))
+        stream_a_debug = draw_led_state_overlay(
+            self._last_stream_a_image, self._context["stream_a_xy"], self._last_stream_a_on_mask
+        )
+        stream_b_debug = draw_led_state_overlay(
+            self._last_stream_b_image, self._context["stream_b_xy"], self._last_stream_b_on_mask
+        )
+        cv2.imwrite(stream_a_path, stream_a_debug)
+        cv2.imwrite(stream_b_path, stream_b_debug)
         self._periodic_snapshot_count += 1
 
     def _clear_periodic_snapshots(self, output_dir):
@@ -566,12 +578,12 @@ class LiveSessionPage(QWidget):
         # every display_stride pairs. Only cheap counter bookkeeping stays
         # here, so the drop counts remain exact even though the plots don't
         # sample every single pair.
-        if row.get("ir_frame_drop"):
-            self._ir_drop_count += 1
-            self._ir_drop_since_last_plot = True
-        if row.get("rgb_frame_drop"):
-            self._rgb_drop_count += 1
-            self._rgb_drop_since_last_plot = True
+        if row.get("stream_a_frame_drop"):
+            self._stream_a_drop_count += 1
+            self._stream_a_drop_since_last_plot = True
+        if row.get("stream_b_frame_drop"):
+            self._stream_b_drop_count += 1
+            self._stream_b_drop_since_last_plot = True
 
         # Every pair, like the drop counters above - RunningStats.update()
         # is an O(1) Welford step, cheap enough to sustain unthrottled
@@ -607,20 +619,25 @@ class LiveSessionPage(QWidget):
             position_value = stats["position_gap_ms"] if not stats.get("position_gap_ms_excluded") else float("nan")
             self.position_plot.add_point("position_gap_ms", pair_index, position_value)
 
-        self.stats_panel.set_value("ir_frame_drops", self._ir_drop_count)
-        self.stats_panel.set_value("rgb_frame_drops", self._rgb_drop_count)
+        self.stats_panel.set_value("stream_a_frame_drops", self._stream_a_drop_count)
+        self.stats_panel.set_value("stream_b_frame_drops", self._stream_b_drop_count)
         # Whether THIS stream dropped since the last plotted point, not just
         # this exact pair's own value - otherwise an isolated drop on one of
         # the ~9 skipped pairs between throttled samples would silently
         # never show up as a spike. Plotted as two series (not one combined
-        # flag) so you can see which stream is actually the problem. RGB is
-        # mirrored to -1 (not +1) so a simultaneous IR+RGB drop never draws
-        # one line exactly on top of the other, hiding it - IR spikes up,
-        # RGB spikes down, and they can never occlude each other.
-        self.drop_plot.add_point("ir_frame_drops", pair_index, 1 if self._ir_drop_since_last_plot else 0)
-        self.drop_plot.add_point("rgb_frame_drops", pair_index, -1 if self._rgb_drop_since_last_plot else 0)
-        self._ir_drop_since_last_plot = False
-        self._rgb_drop_since_last_plot = False
+        # flag) so you can see which stream is actually the problem. Stream
+        # B is mirrored to -1 (not +1) so a simultaneous stream_a+stream_b
+        # drop never draws one line exactly on top of the other, hiding it -
+        # stream A spikes up, stream B spikes down, and they can never
+        # occlude each other.
+        self.drop_plot.add_point(
+            "stream_a_frame_drops", pair_index, 1 if self._stream_a_drop_since_last_plot else 0
+        )
+        self.drop_plot.add_point(
+            "stream_b_frame_drops", pair_index, -1 if self._stream_b_drop_since_last_plot else 0
+        )
+        self._stream_a_drop_since_last_plot = False
+        self._stream_b_drop_since_last_plot = False
 
         self._push_running_stats("hw_ts_latency", self._hw_ts_latency_stats)
         self._push_running_stats("optical_sync", self._optical_sync_stats)
@@ -656,37 +673,42 @@ class LiveSessionPage(QWidget):
         # Also wired to the "Save Debug Snapshot" button for an on-demand
         # check mid-session, not just the automatic one at Stop. Uses the
         # cached masks populated by _on_frame_ready from the signal payload
-        # (already correctly paired to _last_ir_image/_last_rgb_image at
-        # the moment they arrived) - never reads a live metric object,
-        # which was the source of the frame/detection offset bug. Always
-        # reports what happened via status_label - previously this
-        # returned silently on every path (not-ready, success, and failure
-        # all looked identical), which is why the button appeared "not
-        # working" even when it may have been succeeding.
+        # (already correctly paired to _last_stream_a_image/
+        # _last_stream_b_image at the moment they arrived) - never reads a
+        # live metric object, which was the source of the frame/detection
+        # offset bug. Always reports what happened via status_label -
+        # previously this returned silently on every path (not-ready,
+        # success, and failure all looked identical), which is why the
+        # button appeared "not working" even when it may have been
+        # succeeding.
         if self._context is None:
             self.status_label.setText("No active session - click Start first.")
             return
-        if self._last_ir_on_mask is None or self._last_rgb_on_mask is None:
+        if self._last_stream_a_on_mask is None or self._last_stream_b_on_mask is None:
             self.status_label.setText("No frame data yet - wait a moment after Start and try again.")
             return
-        if self._last_ir_image is None or self._last_rgb_image is None:
+        if self._last_stream_a_image is None or self._last_stream_b_image is None:
             self.status_label.setText("No frame data yet - wait a moment after Start and try again.")
             return
 
         output_dir = self._context["output_dir"]
-        ir_path = os.path.join(output_dir, "live_led_state_ir.png")
-        rgb_path = os.path.join(output_dir, "live_led_state_rgb.png")
+        stream_a_path = os.path.join(output_dir, "live_led_state_stream_a.png")
+        stream_b_path = os.path.join(output_dir, "live_led_state_stream_b.png")
         try:
-            ir_debug = draw_led_state_overlay(self._last_ir_image, self._context["ir_xy"], self._last_ir_on_mask)
-            rgb_debug = draw_led_state_overlay(self._last_rgb_image, self._context["rgb_xy"], self._last_rgb_on_mask)
-            ir_ok = cv2.imwrite(ir_path, ir_debug)
-            rgb_ok = cv2.imwrite(rgb_path, rgb_debug)
+            stream_a_debug = draw_led_state_overlay(
+                self._last_stream_a_image, self._context["stream_a_xy"], self._last_stream_a_on_mask
+            )
+            stream_b_debug = draw_led_state_overlay(
+                self._last_stream_b_image, self._context["stream_b_xy"], self._last_stream_b_on_mask
+            )
+            stream_a_ok = cv2.imwrite(stream_a_path, stream_a_debug)
+            stream_b_ok = cv2.imwrite(stream_b_path, stream_b_debug)
         except Exception as exc:
             self.status_label.setText("Failed to save debug snapshot: {}".format(exc))
             return
 
-        if ir_ok and rgb_ok:
-            self.status_label.setText("Saved debug snapshot: {}, {}".format(ir_path, rgb_path))
+        if stream_a_ok and stream_b_ok:
+            self.status_label.setText("Saved debug snapshot: {}, {}".format(stream_a_path, stream_b_path))
         else:
             self.status_label.setText("Failed to write one or both debug snapshot files to {}".format(output_dir))
 
