@@ -165,8 +165,9 @@ def test_match_profile_finds_exact_match_for_given_stream_index():
 
 
 class _FakeFrame:
-    def __init__(self, stream_type, data):
+    def __init__(self, stream_type, stream_index, data):
         self._stream_type = stream_type
+        self._stream_index = stream_index
         self._data = data
 
     def get_profile(self):
@@ -175,19 +176,26 @@ class _FakeFrame:
     def stream_type(self):
         return self._stream_type
 
+    def stream_index(self):
+        return self._stream_index
+
     def get_data(self):
         return self._data
 
 
 class _FakeStreamingSensor:
     """Delivers frames continuously on a background thread once started,
-    like a real sensor's callback - unlike a synchronous fake, this doesn't
-    deliver everything before capture_synced_frame_pair's counter reset
-    happens, so it actually exercises the reset-then-wait-for-fresh-frames
-    control flow instead of trivially satisfying it."""
+    cycling through all of this sensor's (stream_type, stream_index) keys -
+    like a real sensor's callback delivering interleaved frames for however
+    many streams it was opened/started with (one sensor can carry more than
+    one stream, e.g. two color stream indices). Unlike a synchronous fake,
+    this doesn't deliver everything before capture_synced_frame_pair's
+    counter reset happens, so it actually exercises the
+    reset-then-wait-for-fresh-frames control flow instead of trivially
+    satisfying it."""
 
-    def __init__(self, stream_type):
-        self.stream_type = stream_type
+    def __init__(self, keys):
+        self.keys = keys
         self._running = False
         self._thread = None
 
@@ -198,10 +206,14 @@ class _FakeStreamingSensor:
         self._running = True
 
         def deliver_loop():
-            counter = 0
+            counters = {key: 0 for key in self.keys}
             while self._running:
-                counter += 1
-                callback(_FakeFrame(self.stream_type, "frame-{}".format(counter).encode()))
+                for stream_type, stream_index in self.keys:
+                    counters[(stream_type, stream_index)] += 1
+                    data = "frame-{}-{}-{}".format(
+                        stream_type, stream_index, counters[(stream_type, stream_index)]
+                    ).encode()
+                    callback(_FakeFrame(stream_type, stream_index, data))
                 time.sleep(0.001)
 
         self._thread = threading.Thread(target=deliver_loop, daemon=True)
@@ -230,45 +242,39 @@ class _FakeNonDeliveringSensor:
         pass
 
 
-def test_capture_synced_frame_pair_calls_trigger_once_and_returns_frames():
-    ir_sensor = _FakeStreamingSensor(rs.stream.infrared)
-    color_sensor = _FakeStreamingSensor(rs.stream.color)
+def test_capture_synced_frame_pair_with_two_distinct_sensors():
+    ir_sensor = _FakeStreamingSensor(keys=[(rs.stream.infrared, 1)])
+    color_sensor = _FakeStreamingSensor(keys=[(rs.stream.color, 0)])
+    groups = [(ir_sensor, ["ir_profile"]), (color_sensor, ["color_profile"])]
     triggered = {"count": 0}
 
-    def on_both_streaming():
-        triggered["count"] += 1
-
-    ir_frame, rgb_frame = capture_synced_frame_pair(
-        ir_sensor, None, color_sensor, None,
-        on_both_streaming=on_both_streaming, settle_frames=5, timeout_s=5.0,
+    frames = capture_synced_frame_pair(
+        groups,
+        on_both_streaming=lambda: triggered.__setitem__("count", triggered["count"] + 1),
+        settle_frames=5, timeout_s=5.0,
     )
 
     assert triggered["count"] == 1
-    assert ir_frame is not None
-    assert rgb_frame is not None
+    assert (rs.stream.infrared, 1) in frames
+    assert (rs.stream.color, 0) in frames
 
 
-def test_capture_synced_frame_pair_works_without_a_trigger_callback():
-    ir_sensor = _FakeStreamingSensor(rs.stream.infrared)
-    color_sensor = _FakeStreamingSensor(rs.stream.color)
+def test_capture_synced_frame_pair_with_one_shared_sensor_two_stream_indices():
+    shared_sensor = _FakeStreamingSensor(keys=[(rs.stream.color, 1), (rs.stream.color, 2)])
+    groups = [(shared_sensor, ["left_profile", "right_profile"])]
 
-    ir_frame, rgb_frame = capture_synced_frame_pair(
-        ir_sensor, None, color_sensor, None,
-        on_both_streaming=None, settle_frames=5, timeout_s=5.0,
-    )
+    frames = capture_synced_frame_pair(groups, settle_frames=5, timeout_s=5.0)
 
-    assert ir_frame is not None
-    assert rgb_frame is not None
+    assert (rs.stream.color, 1) in frames
+    assert (rs.stream.color, 2) in frames
+    assert frames[(rs.stream.color, 1)] != frames[(rs.stream.color, 2)]  # distinguishable, not accidentally aliased
 
 
 def test_capture_synced_frame_pair_raises_on_timeout_when_no_frames_arrive():
-    ir_sensor = _FakeNonDeliveringSensor()
-    color_sensor = _FakeNonDeliveringSensor()
-
+    sensor = _FakeNonDeliveringSensor()
+    groups = [(sensor, ["profile"])]
     with pytest.raises(RuntimeError):
-        capture_synced_frame_pair(
-            ir_sensor, None, color_sensor, None, settle_frames=5, timeout_s=0.2,
-        )
+        capture_synced_frame_pair(groups, settle_frames=5, timeout_s=0.2)
 
 
 # --- list_video_stream_options / resolve_and_group ---

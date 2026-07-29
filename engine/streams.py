@@ -146,94 +146,95 @@ def match_profile(sensor, stream_type, fmt, width, height, fps, stream_index):
     )
 
 
-def capture_synced_frame_pair(
-    stereo_sensor, ir_profile, rgb_sensor, color_profile,
-    on_both_streaming=None, settle_frames=15, timeout_s=10.0,
-):
+def capture_synced_frame_pair(groups, on_both_streaming=None, settle_frames=15, timeout_s=10.0):
     """
-    Ported verbatim from optical_sync_poc_/realsense_utils.py - the exact
-    mechanism led_calibration.py and roi_picker.py actually used (NOT the
-    rs.pipeline()-based ContinuousCapture below, which only ever backed
-    pipeline_sync_test_diff.py's continuous capture). An earlier version of
-    this GUI ran calibration/ROI capture through ContinuousCapture instead
-    and produced spurious zero-LEDs-detected results; this restores the
-    proven capture path for those one-shot settled-frame use cases.
+    Generalized from the original two-sensor (stereo IR + RGB) version -
+    ported verbatim from optical_sync_poc_/realsense_utils.py - to an
+    arbitrary list of (sensor, profiles) `groups`, as produced by
+    resolve_and_group. This is the same proven capture mechanism
+    led_calibration.py/roi_picker.py actually used (NOT the rs.pipeline()-
+    based ContinuousCapture below), now covering any two picked streams:
+    two distinct sensors (e.g. IR + RGB), or one shared sensor exposing two
+    stream indices (e.g. two color picks, or two infrared picks). State is
+    keyed by (stream_type, stream_index) instead of stream_type() alone,
+    since two picks can share a stream_type.
 
-    Open + start BOTH sensors concurrently (matches the pattern used in the
+    Open + start every sensor concurrently (matches the pattern used in the
     working IMU test script - open everything, then start everything, rather
     than sequential open/close per sensor, which can stall on some devices).
 
     Flow:
-      1. Open both sensors.
-      2. Start both with a shared callback tracking counts/latest frame per stream.
-      3. Wait until both are confirmed actually streaming (a few frames each).
+      1. Open every sensor's wanted profiles.
+      2. Start every sensor with a shared callback tracking counts/latest
+         frame per (stream_type, stream_index).
+      3. Wait until every stream is confirmed actually streaming (a few
+         frames each).
       4. Call on_both_streaming() if given (e.g. turn the LED panel on now).
       5. Reset counters and wait for `settle_frames` fresh frames per stream
          (so the captured frame reflects state AFTER on_both_streaming ran).
-      6. Stop + close both sensors.
+      6. Stop + close every sensor.
 
-    Returns (ir_frame, rgb_frame) as raw bytes (IR: y8, RGB: raw yuyv -
-    caller converts with domain.realsense_utils.ir_bytes_to_image/yuyv_to_bgr).
+    Returns {(stream_type, stream_index): bytes} - raw frame bytes (safe
+    regardless of pixel format/size; caller converts with
+    domain.realsense_utils per stream's actual format).
+
+    Note: the expected number of distinct streams is derived from
+    len(profiles) per group, not by calling stream_type()/stream_index() on
+    the profile objects passed in - those are only ever handed to
+    sensor.open() here. The actual (stream_type, stream_index) keys are
+    discovered from the frames the callback receives, same as the original
+    two-sensor version discovered rs.stream.infrared/rs.stream.color from
+    incoming frames rather than from the profiles it opened with.
     """
-    state = {
-        rs.stream.infrared: {"count": 0, "frame": None},
-        rs.stream.color: {"count": 0, "frame": None},
-    }
+    state = {}
+    expected_stream_count = sum(len(profiles) for _, profiles in groups)
 
     def callback(frame):
-        stream_type = frame.get_profile().stream_type()
-        if stream_type not in state:
-            return
-        s = state[stream_type]
+        key = (frame.get_profile().stream_type(), frame.get_profile().stream_index())
+        s = state.setdefault(key, {"count": 0, "frame": None})
         s["count"] += 1
         s["frame"] = bytes(frame.get_data())  # raw bytes - safe regardless of pixel format/size
 
-    stereo_sensor.open([ir_profile])
-    rgb_sensor.open([color_profile])
-    stereo_sensor.start(callback)
-    rgb_sensor.start(callback)
+    for sensor, profiles in groups:
+        sensor.open(profiles)
+    try:
+        for sensor, _ in groups:
+            sensor.start(callback)
 
-    def wait_until(predicate, label):
-        start = time.time()
-        while not predicate():
-            elapsed = time.time() - start
-            if elapsed > timeout_s:
-                stereo_sensor.stop(); stereo_sensor.close()
-                rgb_sensor.stop(); rgb_sensor.close()
-                raise RuntimeError(
-                    "Timed out ({}) - ir={} rgb={} frames received in {}s".format(
-                        label, state[rs.stream.infrared]["count"],
-                        state[rs.stream.color]["count"], timeout_s,
+        def wait_until(predicate, label):
+            start = time.time()
+            while not predicate():
+                if time.time() - start > timeout_s:
+                    raise RuntimeError(
+                        "Timed out ({}) - {} of {} expected streams delivering frames".format(
+                            label, len(state), expected_stream_count,
+                        )
                     )
-                )
-            time.sleep(0.05)
+                time.sleep(0.05)
 
-    # step 3: confirm both are actually streaming before doing anything else
-    wait_until(
-        lambda: state[rs.stream.infrared]["count"] >= 1 and state[rs.stream.color]["count"] >= 1,
-        "waiting for initial frames",
-    )
+        # step 3: confirm every stream is actually streaming before doing anything else
+        wait_until(
+            lambda: len(state) >= expected_stream_count and all(s["count"] >= 1 for s in state.values()),
+            "waiting for initial frames",
+        )
 
-    # step 4: trigger whatever should happen now that both are live (e.g. LEDs on)
-    if on_both_streaming is not None:
-        on_both_streaming()
+        # step 4: trigger whatever should happen now that everything is live (e.g. LEDs on)
+        if on_both_streaming is not None:
+            on_both_streaming()
 
-    # step 5: reset counters so we only accept frames captured AFTER the trigger
-    state[rs.stream.infrared]["count"] = 0
-    state[rs.stream.color]["count"] = 0
-    wait_until(
-        lambda: state[rs.stream.infrared]["count"] >= settle_frames
-        and state[rs.stream.color]["count"] >= settle_frames,
-        "waiting for post-trigger settled frames",
-    )
+        # step 5: reset counters so we only accept frames captured AFTER the trigger
+        for s in state.values():
+            s["count"] = 0
+        wait_until(
+            lambda: all(s["count"] >= settle_frames for s in state.values()),
+            "waiting for post-trigger settled frames",
+        )
 
-    ir_frame = state[rs.stream.infrared]["frame"]
-    rgb_frame = state[rs.stream.color]["frame"]
-
-    stereo_sensor.stop(); stereo_sensor.close()
-    rgb_sensor.stop(); rgb_sensor.close()
-
-    return ir_frame, rgb_frame
+        return {key: s["frame"] for key, s in state.items()}
+    finally:
+        for sensor, _ in groups:
+            sensor.stop()
+            sensor.close()
 
 
 def disable_ir_emitter(stereo_sensor):
