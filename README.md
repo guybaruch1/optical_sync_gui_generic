@@ -14,9 +14,9 @@ real-time video feed and graphs.
 - **Device selection** — lists every connected RealSense device (no
   Stereo-Module/RGB-Camera requirement — `engine.streams.list_devices` has
   no PID/sensor restriction). For D535/D585-family devices running in
-  "Dedicated RGB" mode, offers to switch to "Dual RGB" mode before
-  proceeding (devices that aren't a recognized D535/D585 variant skip this
-  step entirely).
+  "Dedicated RGB" mode, automatically switches the device to "Dual RGB"
+  mode before proceeding, with no confirmation prompt (devices that aren't
+  a recognized D535/D585 variant skip this step entirely).
 - **Stream configuration** — two independent pickers, Stream A and Stream
   B, each listing every fully-specified stream option the device actually
   reports (any infrared or color stream, any resolution/fps/format) as one
@@ -91,8 +91,9 @@ design — see [Project structure](#project-structure)).
 The window opens maximized. Walk through the wizard:
 
 1. **Device Select** — pick your connected RealSense device. If it's a
-   D535/D585-family device currently in "Dedicated RGB" mode, you'll be
-   offered a one-time switch to "Dual RGB" mode before continuing.
+   D535/D585-family device currently in "Dedicated RGB" mode, it will
+   automatically be switched to "Dual RGB" mode before continuing (no
+   confirmation prompt).
 2. **Stream Config** — pick Stream A and Stream B independently from every
    stream the device reports, and set each resolved sensor's camera
    controls (IR emitter disable, auto/manual exposure+gain). Optionally
