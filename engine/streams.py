@@ -73,6 +73,17 @@ def list_video_stream_options(ctx, serial):
     return list_video_stream_options_from_device(device)
 
 
+def stream_slug(pick):
+    """Slug key for a stream pick, e.g. "infrared1" / "color" - matches the
+    slug scheme domain/calibration.py's update_config_leds/load_led_positions
+    key config.yaml's per-camera LED blocks with (see tests/domain/
+    test_calibration.py), and the filenames calibration_page.py's debug
+    detection images use. stream_index 0 (the common case for a lone color
+    sensor) is omitted rather than rendered as "color0", so a single-RGB
+    camera's slug reads the same as it always has."""
+    return "{}{}".format(pick["stream_type"].name, pick["stream_index"] or "")
+
+
 def _pick_matches(profile, pick):
     if profile.stream_type() != pick["stream_type"] or profile.stream_index() != pick["stream_index"]:
         return False

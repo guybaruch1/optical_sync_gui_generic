@@ -1,24 +1,32 @@
 """Wizard step 4: runs LED calibration in-app (same steps as
 optical_sync_poc_/led_calibration.py's main()), logging progress into a
-QPlainTextEdit instead of print()."""
+QPlainTextEdit instead of print().
+
+Generalized from the old hardcoded IR-sensor/RGB-sensor version to the
+generic pick_a/pick_b picks the Stream Select page now produces - same
+capture/decode adaptation as gui/pages/roi_select_page.py (see that file's
+module docstring for why capture_synced_frame_pair over the groups list
+replaces the old raw stereo/rgb-sensor signature). Debug detection image
+filenames and log/warning text now use each pick's own slug/label (e.g.
+"infrared1"/"Infrared 1") instead of the old hardcoded "ir"/"rgb", so two
+different stream-pair calibration runs on the same camera don't clobber
+each other's debug PNGs, and update_config_leds writes per-stream-pair
+slug-keyed blocks into config.yaml (domain/calibration.py, Task 10)."""
 
 import os
 import time
 
-import pyrealsense2 as rs
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QPlainTextEdit, QPushButton, QApplication
 
 from domain.calibration import assign_grid_ids, build_positions_with_thresholds, update_config_leds
 from domain.realsense_utils import (
     detect_led_centroids, merge_close_centroids, apply_roi_mask, save_debug_detection_image,
-    ir_bytes_to_image, yuyv_to_bgr,
+    decode_frame,
 )
-from engine.streams import (
-    match_profile, disable_ir_emitter, enable_auto_exposure, get_sensors_for_device,
-    capture_synced_frame_pair,
-)
+from engine.streams import find_device_by_serial, resolve_and_group, capture_synced_frame_pair, stream_slug
 from engine.led_panel import LEDPanel
+from gui.pages.roi_select_page import stream_label, _apply_camera_controls
 
 
 class CalibrationPage(QWidget):
@@ -43,13 +51,13 @@ class CalibrationPage(QWidget):
         # steps instead of the whole log appearing at once when it returns.
         QApplication.processEvents()
 
-    def set_context(self, ctx, device_serial, ir_resolution, ir_fps, color_resolution, color_fps,
-                    ir_roi, rgb_roi, config_path, camera_name, output_dir,
-                    settle_frames=15, min_blob_area=20, neighborhood_size=5, row_gap_px=15,
-                    min_acceptable_contrast=20):
+    def set_context(self, ctx, device_serial, pick_a, pick_b, camera_controls, stream_a_roi, stream_b_roi,
+                     config_path, camera_name, output_dir,
+                     settle_frames=15, min_blob_area=20, neighborhood_size=5, row_gap_px=15,
+                     min_acceptable_contrast=20):
         self._pending_args = dict(
-            ctx=ctx, device_serial=device_serial, ir_resolution=ir_resolution, ir_fps=ir_fps,
-            color_resolution=color_resolution, color_fps=color_fps, ir_roi=ir_roi, rgb_roi=rgb_roi,
+            ctx=ctx, device_serial=device_serial, pick_a=pick_a, pick_b=pick_b,
+            camera_controls=camera_controls, stream_a_roi=stream_a_roi, stream_b_roi=stream_b_roi,
             config_path=config_path, camera_name=camera_name, output_dir=output_dir,
             settle_frames=settle_frames, min_blob_area=min_blob_area,
             neighborhood_size=neighborhood_size, row_gap_px=row_gap_px,
@@ -67,17 +75,14 @@ class CalibrationPage(QWidget):
         finally:
             self.run_button.setEnabled(True)
 
-    def _run_calibration(self, ctx, device_serial, ir_resolution, ir_fps, color_resolution, color_fps,
-                          ir_roi, rgb_roi, config_path, camera_name, output_dir, settle_frames,
+    def _run_calibration(self, ctx, device_serial, pick_a, pick_b, camera_controls, stream_a_roi, stream_b_roi,
+                          config_path, camera_name, output_dir, settle_frames,
                           min_blob_area, neighborhood_size, row_gap_px, min_acceptable_contrast):
-        stereo_sensor, rgb_sensor = get_sensors_for_device(ctx, device_serial)
-        ir_profile = match_profile(stereo_sensor, rs.stream.infrared, rs.format.y8, *ir_resolution, ir_fps)
-        color_profile = match_profile(rgb_sensor, rs.stream.color, rs.format.yuyv, *color_resolution, color_fps)
+        device = find_device_by_serial(ctx, device_serial)
+        groups = resolve_and_group(device, pick_a, pick_b)
 
-        if not disable_ir_emitter(stereo_sensor):
-            self._log("WARNING: emitter_enabled not supported - confirm the IR projector is off manually.")
-        if not enable_auto_exposure(rgb_sensor):
-            self._log("WARNING: enable_auto_exposure not supported - confirm RGB auto-exposure is on manually.")
+        for warning in _apply_camera_controls(groups, camera_controls):
+            self._log(warning)
 
         def turn_on_all_leds():
             self._log("Turning on all LEDs...")
@@ -89,10 +94,11 @@ class CalibrationPage(QWidget):
         # per-sensor open/start, counting real callback deliveries to confirm
         # settling) - NOT the rs.pipeline()-based ContinuousCapture used
         # elsewhere in this app for continuous streaming, which produced
-        # spurious zero-LEDs-detected results when substituted in here.
+        # spurious zero-LEDs-detected results when substituted in here. See
+        # roi_select_page.py's matching comment.
         try:
-            ir_on_raw, rgb_on_raw = capture_synced_frame_pair(
-                stereo_sensor, ir_profile, rgb_sensor, color_profile,
+            frames_on = capture_synced_frame_pair(
+                groups,
                 on_both_streaming=turn_on_all_leds,
                 settle_frames=settle_frames,
             )
@@ -109,52 +115,62 @@ class CalibrationPage(QWidget):
                 self._log("WARNING: failed to turn LEDs off during cleanup: {}".format(exc))
 
         self._log("Turning LED panel off, capturing OFF-state frames...")
-        ir_off_raw, rgb_off_raw = capture_synced_frame_pair(
-            stereo_sensor, ir_profile, rgb_sensor, color_profile,
+        frames_off = capture_synced_frame_pair(
+            groups,
             on_both_streaming=None,
             settle_frames=settle_frames,
         )
 
-        ir_on_image = ir_bytes_to_image(ir_on_raw, *ir_resolution)
-        rgb_on_image = yuyv_to_bgr(rgb_on_raw, *color_resolution)
-        ir_off_image = ir_bytes_to_image(ir_off_raw, *ir_resolution)
-        rgb_off_image = yuyv_to_bgr(rgb_off_raw, *color_resolution)
+        def decode(frames, pick):
+            return decode_frame(
+                frames[(pick["stream_type"], pick["stream_index"])],
+                pick["format"], pick["width"], pick["height"],
+            )
 
-        ir_masked = apply_roi_mask(ir_on_image, ir_roi)
-        rgb_masked = apply_roi_mask(rgb_on_image, rgb_roi)
+        image_a_on = decode(frames_on, pick_a)
+        image_b_on = decode(frames_on, pick_b)
+        image_a_off = decode(frames_off, pick_a)
+        image_b_off = decode(frames_off, pick_b)
 
-        self._log("Detecting LEDs in IR frame...")
-        ir_centroids, ir_otsu = detect_led_centroids(ir_masked, None, min_blob_area)
-        ir_centroids = merge_close_centroids(ir_centroids)
-        self._log("Detected {} LED(s) in IR (Otsu threshold {}).".format(len(ir_centroids), ir_otsu))
+        label_a, label_b = stream_label(pick_a), stream_label(pick_b)
+        slug_a, slug_b = stream_slug(pick_a), stream_slug(pick_b)
+        res_a, res_b = (pick_a["width"], pick_a["height"]), (pick_b["width"], pick_b["height"])
+
+        masked_a = apply_roi_mask(image_a_on, stream_a_roi)
+        masked_b = apply_roi_mask(image_b_on, stream_b_roi)
+
+        self._log("Detecting LEDs in {} frame...".format(label_a))
+        centroids_a, otsu_a = detect_led_centroids(masked_a, None, min_blob_area)
+        centroids_a = merge_close_centroids(centroids_a)
+        self._log("Detected {} LED(s) in {} (Otsu threshold {}).".format(len(centroids_a), label_a, otsu_a))
         # Saved BEFORE assign_grid_ids, which raises on zero detections - this
         # is exactly the case where seeing the masked crop matters most, so it
         # must not be skipped by that exception.
-        ir_debug_path = os.path.join(output_dir, "debug_ir_detection.png")
-        save_debug_detection_image(ir_masked, ir_centroids, ir_debug_path)
-        self._log("Saved debug image (masked frame + detected LEDs circled): {}".format(ir_debug_path))
-        ir_positions, ir_row_layout = assign_grid_ids(ir_centroids, row_gap_px)
+        debug_path_a = os.path.join(output_dir, "debug_{}_detection.png".format(slug_a))
+        save_debug_detection_image(masked_a, centroids_a, debug_path_a)
+        self._log("Saved debug image (masked frame + detected LEDs circled): {}".format(debug_path_a))
+        positions_a, row_layout_a = assign_grid_ids(centroids_a, row_gap_px)
 
-        self._log("Detecting LEDs in RGB frame...")
-        rgb_centroids, rgb_otsu = detect_led_centroids(rgb_masked, None, min_blob_area)
-        rgb_centroids = merge_close_centroids(rgb_centroids)
-        self._log("Detected {} LED(s) in RGB (Otsu threshold {}).".format(len(rgb_centroids), rgb_otsu))
-        rgb_debug_path = os.path.join(output_dir, "debug_rgb_detection.png")
-        save_debug_detection_image(rgb_masked, rgb_centroids, rgb_debug_path)
-        self._log("Saved debug image (masked frame + detected LEDs circled): {}".format(rgb_debug_path))
-        rgb_positions, rgb_row_layout = assign_grid_ids(rgb_centroids, row_gap_px)
+        self._log("Detecting LEDs in {} frame...".format(label_b))
+        centroids_b, otsu_b = detect_led_centroids(masked_b, None, min_blob_area)
+        centroids_b = merge_close_centroids(centroids_b)
+        self._log("Detected {} LED(s) in {} (Otsu threshold {}).".format(len(centroids_b), label_b, otsu_b))
+        debug_path_b = os.path.join(output_dir, "debug_{}_detection.png".format(slug_b))
+        save_debug_detection_image(masked_b, centroids_b, debug_path_b)
+        self._log("Saved debug image (masked frame + detected LEDs circled): {}".format(debug_path_b))
+        positions_b, row_layout_b = assign_grid_ids(centroids_b, row_gap_px)
 
-        if ir_row_layout != rgb_row_layout:
+        if row_layout_a != row_layout_b:
             self._log(
-                "WARNING: IR row layout {} != RGB row layout {} - led_id may not match the same "
-                "physical LED in both dicts.".format(ir_row_layout, rgb_row_layout)
+                "WARNING: {} row layout {} != {} row layout {} - led_id may not match the same "
+                "physical LED in both dicts.".format(label_a, row_layout_a, label_b, row_layout_b)
             )
 
         self._log("Computing per-LED on/off/threshold values...")
-        ir_positions = build_positions_with_thresholds(ir_positions, ir_on_image, ir_off_image, neighborhood_size)
-        rgb_positions = build_positions_with_thresholds(rgb_positions, rgb_on_image, rgb_off_image, neighborhood_size)
+        positions_a = build_positions_with_thresholds(positions_a, image_a_on, image_a_off, neighborhood_size)
+        positions_b = build_positions_with_thresholds(positions_b, image_b_on, image_b_off, neighborhood_size)
 
-        for label, positions in (("IR", ir_positions), ("RGB", rgb_positions)):
+        for label, positions in ((label_a, positions_a), (label_b, positions_b)):
             weakest_id, weakest_contrast = min(
                 ((led_id, vals[2] - vals[3]) for led_id, vals in positions.items()),
                 key=lambda pair: pair[1],
@@ -163,6 +179,8 @@ class CalibrationPage(QWidget):
             if weakest_contrast < min_acceptable_contrast:
                 self._log("  WARNING: this LED's on/off gap is small - its threshold may be unreliable.")
 
-        update_config_leds(config_path, camera_name, ir_positions, ir_resolution, rgb_positions, color_resolution)
-        self._log("Saved {} LED positions per sensor to {}".format(len(ir_positions), config_path))
+        update_config_leds(config_path, camera_name, slug_a, positions_a, res_a, slug_b, positions_b, res_b)
+        self._log("Saved {} LED positions per stream ({}={}, {}={}) to {}".format(
+            len(positions_a), label_a, slug_a, label_b, slug_b, config_path
+        ))
         self.calibration_done.emit()
