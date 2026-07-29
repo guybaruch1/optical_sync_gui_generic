@@ -120,16 +120,6 @@ def decode_frame(raw_bytes, fmt, width, height):
     return DECODERS[fmt](raw_bytes, width, height)
 
 
-def ir_bytes_to_image(raw_bytes, width, height):
-    """Deprecated: use decode_frame(raw_bytes, rs.format.y8, width, height) instead."""
-    return decode_frame(raw_bytes, rs.format.y8, width, height)
-
-
-def yuyv_to_bgr(raw_bytes, width, height):
-    """Deprecated: use decode_frame(raw_bytes, rs.format.yuyv, width, height) instead."""
-    return decode_frame(raw_bytes, rs.format.yuyv, width, height)
-
-
 def save_debug_detection_image(image, centroids, path):
     debug_img = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR) if len(image.shape) == 2 else image.copy()
     for i, (x, y) in enumerate(centroids):

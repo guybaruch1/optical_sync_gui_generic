@@ -7,8 +7,6 @@ from domain.realsense_utils import (
     crop_to_roi,
     merge_close_centroids,
     detect_led_centroids,
-    ir_bytes_to_image,
-    yuyv_to_bgr,
     save_debug_detection_image,
     draw_bundle_overlay,
     draw_led_state_overlay,
@@ -89,21 +87,6 @@ def test_detect_led_centroids_finds_bright_blob():
     cx, cy = centroids[0]
     assert 20 <= cx <= 30
     assert 20 <= cy <= 30
-
-
-def test_ir_bytes_to_image_reshapes_correctly():
-    raw = bytes(range(6))  # 2x3 image, 1 byte/pixel
-    image = ir_bytes_to_image(raw, width=3, height=2)
-    assert image.shape == (2, 3)
-    assert image[0].tolist() == [0, 1, 2]
-    assert image[1].tolist() == [3, 4, 5]
-
-
-def test_yuyv_to_bgr_returns_correct_shape():
-    width, height = 4, 2
-    raw = bytes([128] * (width * height * 2))
-    bgr = yuyv_to_bgr(raw, width, height)
-    assert bgr.shape == (height, width, 3)
 
 
 def test_save_debug_detection_image_writes_file_and_marks_centroids(tmp_path):
