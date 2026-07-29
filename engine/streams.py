@@ -146,6 +146,37 @@ def match_profile(sensor, stream_type, fmt, width, height, fps, stream_index):
     )
 
 
+def _try_get_stream_key(profile):
+    """Return (stream_type, stream_index) for a real profile object, or None
+    if `profile` doesn't support those calls (e.g. a plain-string test-fake
+    placeholder that's only ever handed opaquely to sensor.open()). Used by
+    capture_synced_frame_pair to derive the *exact expected key set* when
+    possible, not just a count, so that a phantom/unrequested stream
+    delivering frames can't silently swap in for a genuinely missing
+    expected one and still satisfy a count-only check."""
+    stream_type = getattr(profile, "stream_type", None)
+    stream_index = getattr(profile, "stream_index", None)
+    if not callable(stream_type) or not callable(stream_index):
+        return None
+    return (stream_type(), stream_index())
+
+
+def _try_derive_expected_keys(groups):
+    """Best-effort exact (stream_type, stream_index) set for every profile
+    across `groups`. Returns None (meaning "can't verify, fall back to a
+    count-only check") if any profile isn't introspectable this way - this
+    is only expected with opaque test-fake profiles; real rs profile objects
+    always support stream_type()/stream_index()."""
+    keys = set()
+    for _, profiles in groups:
+        for p in profiles:
+            key = _try_get_stream_key(p)
+            if key is None:
+                return None
+            keys.add(key)
+    return keys
+
+
 def capture_synced_frame_pair(groups, on_both_streaming=None, settle_frames=15, timeout_s=10.0):
     """
     Generalized from the original two-sensor (stereo IR + RGB) version -
@@ -168,7 +199,13 @@ def capture_synced_frame_pair(groups, on_both_streaming=None, settle_frames=15, 
       2. Start every sensor with a shared callback tracking counts/latest
          frame per (stream_type, stream_index).
       3. Wait until every stream is confirmed actually streaming (a few
-         frames each).
+         frames each) AND, whenever the exact expected key set can be
+         derived from `groups` (real rs profiles - see
+         _try_derive_expected_keys), that the set of streams delivering
+         frames is exactly the requested set - not just the right count.
+         This closes a narrow gap where a phantom/unrequested stream
+         delivering frames alongside a genuinely missing expected one could
+         otherwise reach the right COUNT while capturing the wrong SET.
       4. Call on_both_streaming() if given (e.g. turn the LED panel on now).
       5. Reset counters and wait for `settle_frames` fresh frames per stream
          (so the captured frame reflects state AFTER on_both_streaming ran).
@@ -179,21 +216,31 @@ def capture_synced_frame_pair(groups, on_both_streaming=None, settle_frames=15, 
     domain.realsense_utils per stream's actual format).
 
     Note: the expected number of distinct streams is derived from
-    len(profiles) per group, not by calling stream_type()/stream_index() on
-    the profile objects passed in - those are only ever handed to
-    sensor.open() here. The actual (stream_type, stream_index) keys are
-    discovered from the frames the callback receives, same as the original
-    two-sensor version discovered rs.stream.infrared/rs.stream.color from
-    incoming frames rather than from the profiles it opened with.
+    len(profiles) per group, not (only) by calling stream_type()/
+    stream_index() on the profile objects passed in. The actual
+    (stream_type, stream_index) keys are discovered from the frames the
+    callback receives, same as the original two-sensor version discovered
+    rs.stream.infrared/rs.stream.color from incoming frames rather than from
+    the profiles it opened with. Where the profiles ARE introspectable (real
+    rs profiles), the exact expected key set is cross-checked as a defensive
+    belt-and-braces measure (see _try_derive_expected_keys) - test fakes in
+    this project's own test suite use opaque string placeholders for
+    profiles (they're never called, only passed to sensor.open()), so that
+    cross-check is a known no-op under test and only actually engages
+    against real hardware/profiles.
     """
     state = {}
     expected_stream_count = sum(len(profiles) for _, profiles in groups)
+    expected_keys = _try_derive_expected_keys(groups)
 
     def callback(frame):
         key = (frame.get_profile().stream_type(), frame.get_profile().stream_index())
         s = state.setdefault(key, {"count": 0, "frame": None})
         s["count"] += 1
         s["frame"] = bytes(frame.get_data())  # raw bytes - safe regardless of pixel format/size
+
+    def keys_match_expected():
+        return expected_keys is None or set(state.keys()) == expected_keys
 
     for sensor, profiles in groups:
         sensor.open(profiles)
@@ -206,15 +253,24 @@ def capture_synced_frame_pair(groups, on_both_streaming=None, settle_frames=15, 
             while not predicate():
                 if time.time() - start > timeout_s:
                     raise RuntimeError(
-                        "Timed out ({}) - {} of {} expected streams delivering frames".format(
+                        "Timed out ({}) - {} of {} expected streams delivering frames "
+                        "(keys seen: {}, expected: {})".format(
                             label, len(state), expected_stream_count,
+                            sorted(state.keys(), key=repr),
+                            sorted(expected_keys, key=repr) if expected_keys is not None else "<unverifiable>",
                         )
                     )
                 time.sleep(0.05)
 
-        # step 3: confirm every stream is actually streaming before doing anything else
+        # step 3: confirm every stream is actually streaming before doing anything else -
+        # and, when verifiable, that it's exactly the requested set of streams (not a
+        # phantom/unrequested one standing in for a missing expected one).
         wait_until(
-            lambda: len(state) >= expected_stream_count and all(s["count"] >= 1 for s in state.values()),
+            lambda: (
+                len(state) >= expected_stream_count
+                and all(s["count"] >= 1 for s in state.values())
+                and keys_match_expected()
+            ),
             "waiting for initial frames",
         )
 
@@ -226,9 +282,21 @@ def capture_synced_frame_pair(groups, on_both_streaming=None, settle_frames=15, 
         for s in state.values():
             s["count"] = 0
         wait_until(
-            lambda: all(s["count"] >= settle_frames for s in state.values()),
+            lambda: all(s["count"] >= settle_frames for s in state.values()) and keys_match_expected(),
             "waiting for post-trigger settled frames",
         )
+
+        # Final defensive check: guards against a phantom key sneaking into
+        # `state` between the initial wait succeeding and here (e.g. during
+        # the settle phase) - fail loudly rather than silently return a
+        # mismatched stream set to the caller.
+        if expected_keys is not None and set(state.keys()) != expected_keys:
+            raise RuntimeError(
+                "capture_synced_frame_pair: captured stream set does not match what was "
+                "requested - expected {}, got {}".format(
+                    sorted(expected_keys, key=repr), sorted(state.keys(), key=repr)
+                )
+            )
 
         return {key: s["frame"] for key, s in state.items()}
     finally:
