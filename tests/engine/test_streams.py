@@ -5,7 +5,7 @@ import pytest
 import pyrealsense2 as rs
 from engine.streams import (
     list_devices, list_supported_profiles, match_profile, capture_synced_frame_pair,
-    disable_ir_emitter, enable_auto_exposure,
+    enable_auto_exposure,
     list_video_stream_options_from_device, resolve_and_group,
     set_emitter_enabled, set_manual_exposure, stream_slug,
 )
@@ -13,8 +13,8 @@ from engine.streams import (
 
 class FakeOptionSensor:
     """Fake sensor exposing just enough of the .supports()/.set_option() API
-    for disable_ir_emitter/enable_auto_exposure - real pyrealsense2 sensors
-    aren't constructible without hardware."""
+    for enable_auto_exposure/set_emitter_enabled/set_manual_exposure - real
+    pyrealsense2 sensors aren't constructible without hardware."""
 
     def __init__(self, supported_options):
         self._supported_options = set(supported_options)
@@ -27,18 +27,6 @@ class FakeOptionSensor:
         self.set_options[option] = value
 
 
-def test_disable_ir_emitter_sets_option_off_when_supported():
-    sensor = FakeOptionSensor(supported_options={rs.option.emitter_enabled})
-    assert disable_ir_emitter(sensor) is True
-    assert sensor.set_options[rs.option.emitter_enabled] == 0
-
-
-def test_disable_ir_emitter_returns_false_when_unsupported():
-    sensor = FakeOptionSensor(supported_options=set())
-    assert disable_ir_emitter(sensor) is False
-    assert sensor.set_options == {}
-
-
 def test_enable_auto_exposure_sets_option_on_when_supported():
     sensor = FakeOptionSensor(supported_options={rs.option.enable_auto_exposure})
     assert enable_auto_exposure(sensor) is True
@@ -46,9 +34,8 @@ def test_enable_auto_exposure_sets_option_on_when_supported():
 
 
 def test_enable_auto_exposure_returns_false_when_unsupported():
-    # Callers rely on this to warn the operator (the same way they already do
-    # for disable_ir_emitter) instead of silently leaving auto-exposure
-    # however it was.
+    # Callers rely on this to warn the operator instead of silently
+    # proceeding with auto-exposure left however it was.
     sensor = FakeOptionSensor(supported_options=set())
     assert enable_auto_exposure(sensor) is False
     assert sensor.set_options == {}

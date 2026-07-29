@@ -48,12 +48,12 @@ def test_export_series_csv_writes_one_column_per_series(tmp_path):
     export_series_csv(
         str(path),
         series_x=[0, 1, 2],
-        series_y_by_name={"ir_frame_drops": [0, 1, 0], "rgb_frame_drops": [0, 0, -1]},
+        series_y_by_name={"stream_a_frame_drops": [0, 1, 0], "stream_b_frame_drops": [0, 0, -1]},
     )
 
     with open(path, newline="") as f:
         rows = list(csv.DictReader(f))
 
     assert [r["pair_index"] for r in rows] == ["0", "1", "2"]
-    assert [r["ir_frame_drops"] for r in rows] == ["0", "1", "0"]
-    assert [r["rgb_frame_drops"] for r in rows] == ["0", "0", "-1"]
+    assert [r["stream_a_frame_drops"] for r in rows] == ["0", "1", "0"]
+    assert [r["stream_b_frame_drops"] for r in rows] == ["0", "0", "-1"]

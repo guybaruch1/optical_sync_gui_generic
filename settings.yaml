@@ -60,8 +60,9 @@ test:
   # from the periodic snapshot_every_n_pairs sampling above).
   max_fd_snapshots: 10
   # analyze_pairing_gap's cross-stream sanity-check threshold, in
-  # MICROSECONDS (ir_ts/rgb_ts are HW frame_timestamp, µs-scale). 100_000us
-  # is the same real-world cutoff as an old 100ms default would have been.
+  # MICROSECONDS (stream_a_ts_us/stream_b_ts_us are HW frame_timestamp,
+  # µs-scale). 100_000us is the same real-world cutoff as an old 100ms
+  # default would have been.
   pairing_gap_outlier_threshold_us: 100000
   # Ignore this many frame-pairs at the START of the run when computing the
   # metrics (position gap / frame-drop stats) - everything is still captured

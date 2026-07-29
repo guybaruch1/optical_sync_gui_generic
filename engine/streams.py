@@ -117,17 +117,6 @@ def resolve_and_group(device, pick_a, pick_b):
     return [(sensor_a, [profile_a]), (sensor_b, [profile_b])]
 
 
-def get_sensors_for_device(ctx, serial):
-    for d in ctx.query_devices():
-        if d.get_info(rs.camera_info.serial_number) != serial:
-            continue
-        sensors = d.query_sensors()
-        stereo = next(s for s in sensors if s.get_info(rs.camera_info.name) == "Stereo Module")
-        rgb = next(s for s in sensors if s.get_info(rs.camera_info.name) == "RGB Camera")
-        return stereo, rgb
-    raise RuntimeError("No connected device with serial {!r}".format(serial))
-
-
 def list_supported_profiles(sensor, stream_type, fmt, stream_index):
     results = set()
     for p in sensor.profiles:
@@ -316,17 +305,10 @@ def capture_synced_frame_pair(groups, on_both_streaming=None, settle_frames=15, 
             sensor.close()
 
 
-def disable_ir_emitter(stereo_sensor):
-    if stereo_sensor.supports(rs.option.emitter_enabled):
-        stereo_sensor.set_option(rs.option.emitter_enabled, 0)
-        return True
-    return False
-
-
 def enable_auto_exposure(sensor):
-    """Returns True/False like disable_ir_emitter, so callers can warn the
-    operator the same way when the sensor doesn't support the option instead
-    of silently proceeding with auto-exposure left however it was."""
+    """Returns True/False so callers can warn the operator when the sensor
+    doesn't support the option instead of silently proceeding with
+    auto-exposure left however it was."""
     if sensor.supports(rs.option.enable_auto_exposure):
         sensor.set_option(rs.option.enable_auto_exposure, 1)
         return True
