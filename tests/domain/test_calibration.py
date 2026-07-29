@@ -74,3 +74,27 @@ def test_load_led_positions_raises_for_uncalibrated_stream_pair(tmp_path):
     config_path.write_text(yaml.safe_dump({"leds": {"Test Camera": {"color": {}}}}))
     with pytest.raises(KeyError):
         load_led_positions(str(config_path), "Test Camera", "infrared1", "infrared2")
+
+
+def test_update_config_leds_preserves_other_stream_slugs_on_same_camera(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump({"leds": {}}))
+
+    update_config_leds(
+        str(config_path), camera_name="Test Camera",
+        stream_a_slug="infrared1", stream_a_positions={"0": [1.0, 2.0, 255.0, 100.0, 177.5]}, stream_a_res=(1280, 720),
+        stream_b_slug="infrared2", stream_b_positions={"0": [3.0, 4.0, 250.0, 90.0, 170.0]}, stream_b_res=(1280, 720),
+    )
+    update_config_leds(
+        str(config_path), camera_name="Test Camera",
+        stream_a_slug="color", stream_a_positions={"0": [5.0, 6.0, 200.0, 80.0, 140.0]}, stream_a_res=(640, 480),
+        stream_b_slug="color2", stream_b_positions={"0": [7.0, 8.0, 210.0, 85.0, 147.5]}, stream_b_res=(640, 480),
+    )
+
+    written = yaml.safe_load(config_path.read_text())
+    camera_entry = written["leds"]["Test Camera"]
+    # Both the first pair's slugs AND the second pair's slugs must coexist
+    assert "infrared1" in camera_entry and "infrared2" in camera_entry
+    assert "color" in camera_entry and "color2" in camera_entry
+    assert camera_entry["infrared1"]["positions"]["0"] == [1.0, 2.0, 255.0, 100.0, 177.5]
+    assert camera_entry["color"]["positions"]["0"] == [5.0, 6.0, 200.0, 80.0, 140.0]
