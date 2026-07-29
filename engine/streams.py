@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 import pyrealsense2 as rs
 
-from domain.realsense_utils import DECODERS
+from domain.realsense_utils import DECODERS, decode_frame
 
 
 @dataclass
@@ -355,8 +355,6 @@ class ContinuousCapture:
             yield stream_a_image, stream_b_image, stream_a_ts_us, stream_b_ts_us
 
     def frames_with_diagnostics(self):
-        from domain.realsense_utils import decode_frame
-
         while True:
             frameset = self._pipeline.wait_for_frames()
             frame_a = self._get_frame(frameset, self.pick_a)
