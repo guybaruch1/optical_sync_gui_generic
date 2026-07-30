@@ -1,6 +1,6 @@
 import pyrealsense2 as rs
 
-from gui.pages.stream_config_page import StreamConfigPage, group_camera_controls, _stream_option_label
+from gui.pages.stream_config_page import StreamConfigPage, _stream_option_label
 
 
 IR1 = {"sensor_index": 0, "stream_type": rs.stream.infrared, "stream_index": 1,
@@ -37,52 +37,20 @@ def test_stream_option_label_disambiguates_same_sensor_color_options():
     assert label_2 == "Color 2 - 1280x720@30fps (bgr8)"
 
 
-# --- group_camera_controls (pure, no Qt/device needed) ---
+# --- populate() - Stream A/B now take INDEPENDENT curated option lists ---
 
-def test_group_camera_controls_same_sensor_index_returns_one_group():
-    groups = group_camera_controls(COLOR1, COLOR2)
-    assert len(groups) == 1
-    assert groups[0]["sensor_indices"] == [0]
-
-
-def test_group_camera_controls_different_sensor_index_returns_two_groups():
-    groups = group_camera_controls(IR1, COLOR0)
-    assert len(groups) == 2
-    assert groups[0]["sensor_indices"] == [0]
-    assert groups[1]["sensor_indices"] == [1]
-
-
-def test_group_camera_controls_flags_infrared_group_only():
-    groups = group_camera_controls(IR1, COLOR0)
-    assert groups[0]["has_infrared"] is True
-    assert groups[1]["has_infrared"] is False
-
-
-def test_group_camera_controls_shared_sensor_with_any_infrared_pick_flags_group():
-    groups = group_camera_controls(IR1, IR2)
-    assert len(groups) == 1
-    assert groups[0]["has_infrared"] is True
-
-
-def test_group_camera_controls_shared_sensor_color_only_not_flagged():
-    groups = group_camera_controls(COLOR1, COLOR2)
-    assert groups[0]["has_infrared"] is False
-
-
-# --- populate() ---
-
-def test_populate_lists_every_stream_option(qapp):
+def test_populate_lists_each_sides_own_options(qapp):
     page = StreamConfigPage()
-    options = [IR1, IR2, COLOR0]
-    page.populate(ctx=None, device_serial="123", stream_options=options)
-    assert page.combo_a.count() == 3
-    assert page.combo_b.count() == 3
+    page.populate(ctx=None, device_serial="123", stream_options_a=[IR1, IR2], stream_options_b=[COLOR0])
+    assert page.combo_a.count() == 2
+    assert page.combo_b.count() == 1
 
 
 def test_populate_preselects_preferred_a_and_b(qapp):
     page = StreamConfigPage()
     page.populate(
-        ctx=None, device_serial="123", stream_options=[IR1, IR2, COLOR0],
+        ctx=None, device_serial="123",
+        stream_options_a=[IR1, IR2], stream_options_b=[IR1, IR2, COLOR0],
         preferred_a={"stream_index": 2, "stream_type": rs.stream.infrared},
         preferred_b={"stream_type": rs.stream.color},
     )
@@ -93,7 +61,7 @@ def test_populate_preselects_preferred_a_and_b(qapp):
 def test_populate_leaves_default_selection_when_preferred_not_found(qapp):
     page = StreamConfigPage()
     page.populate(
-        ctx=None, device_serial="123", stream_options=[IR1, COLOR0],
+        ctx=None, device_serial="123", stream_options_a=[IR1], stream_options_b=[COLOR0],
         preferred_a={"width": 9999},
     )
     assert page.combo_a.currentData() == IR1  # unchanged, first item
@@ -105,11 +73,12 @@ def test_populate_avoids_collision_when_preferred_a_and_b_match_the_same_option(
     # SAME stream option - nothing then stopped Stream A and Stream B from
     # being the same stream. populate() must land combo_a/combo_b on
     # different (stream_type, stream_index) pairs whenever at least one
-    # other distinct option is available.
+    # other distinct option is available on Stream B's own list.
     page = StreamConfigPage()
     same_preferred = {"width": 1280, "height": 720, "fps": 30}
     page.populate(
-        ctx=None, device_serial="123", stream_options=[IR1, IR2, COLOR0],
+        ctx=None, device_serial="123",
+        stream_options_a=[IR1, IR2, COLOR0], stream_options_b=[IR1, IR2, COLOR0],
         preferred_a=same_preferred, preferred_b=same_preferred,
     )
     pick_a, pick_b = page.pick_a, page.pick_b
@@ -121,7 +90,7 @@ def test_populate_avoids_collision_when_preferred_a_and_b_match_the_same_option(
 
 def test_pick_a_and_pick_b_return_current_combo_selections(qapp):
     page = StreamConfigPage()
-    page.populate(ctx=None, device_serial="123", stream_options=[IR1, IR2, COLOR0])
+    page.populate(ctx=None, device_serial="123", stream_options_a=[IR1, IR2], stream_options_b=[IR1, IR2, COLOR0])
     page.combo_a.setCurrentIndex(1)  # IR2
     page.combo_b.setCurrentIndex(2)  # COLOR0
     assert page.pick_a == IR2
@@ -130,52 +99,30 @@ def test_pick_a_and_pick_b_return_current_combo_selections(qapp):
 
 def test_pick_a_and_pick_b_track_combo_changes_live(qapp):
     page = StreamConfigPage()
-    page.populate(ctx=None, device_serial="123", stream_options=[IR1, IR2, COLOR0])
+    page.populate(ctx=None, device_serial="123", stream_options_a=[IR1, IR2], stream_options_b=[COLOR0])
     assert page.pick_a == IR1  # default: first item
     page.combo_a.setCurrentIndex(1)
     assert page.pick_a == IR2  # updates without re-calling populate()
 
 
-# --- camera-control-group widget count, driven by group_camera_controls ---
+# --- camera controls: ONE global block, always present regardless of the
+# currently picked streams (no more per-resolved-sensor-group boxes) ---
 
-def test_selecting_streams_on_the_same_sensor_shows_one_camera_control_group(qapp):
+def test_camera_controls_group_always_present_regardless_of_picks(qapp):
     page = StreamConfigPage()
-    shared = [COLOR1, COLOR2]
-    page.populate(ctx=None, device_serial="123", stream_options=shared)
-    page.combo_a.setCurrentIndex(0)
-    page.combo_b.setCurrentIndex(1)
-    page._refresh_camera_control_groups()  # recomputes resolve_and_group-based grouping for UI layout
-    assert page.camera_control_group_count() == 1  # same sensor -> one control group, not two
+    page.populate(ctx=None, device_serial="123", stream_options_a=[COLOR1], stream_options_b=[COLOR2])
+    assert page._camera_controls["emitter_checkbox"] is not None
+    assert page._camera_controls["group_box"] is not None
 
 
-def test_selecting_streams_on_different_sensors_shows_two_camera_control_groups(qapp):
-    page = StreamConfigPage()
-    page.populate(ctx=None, device_serial="123", stream_options=[IR1, COLOR0])
-    page.combo_a.setCurrentIndex(0)  # IR1, sensor 0
-    page.combo_b.setCurrentIndex(1)  # COLOR0, sensor 1
-    page._refresh_camera_control_groups()
-    assert page.camera_control_group_count() == 2
-
-
-def test_emitter_checkbox_only_shown_for_infrared_group(qapp):
-    page = StreamConfigPage()
-    page.populate(ctx=None, device_serial="123", stream_options=[IR1, COLOR0])
-    page.combo_a.setCurrentIndex(0)
-    page.combo_b.setCurrentIndex(1)
-    page._refresh_camera_control_groups()
-    ir_group = page._camera_control_widgets[0]
-    color_group = page._camera_control_widgets[1]
-    assert ir_group["emitter_checkbox"] is not None
-    assert color_group["emitter_checkbox"] is None
-
-
-# --- config_chosen payload: (pick_a, pick_b, camera_controls) ---
+# --- config_chosen payload: (pick_a, pick_b, camera_controls) - camera_controls
+# is now a single global dict, not a per-sensor-group list ---
 
 def test_next_emits_picks_and_default_auto_exposure_camera_controls(qapp):
     page = StreamConfigPage()
-    page.populate(ctx=None, device_serial="123", stream_options=[IR1, COLOR0])
+    page.populate(ctx=None, device_serial="123", stream_options_a=[IR1], stream_options_b=[COLOR0])
     page.combo_a.setCurrentIndex(0)
-    page.combo_b.setCurrentIndex(1)
+    page.combo_b.setCurrentIndex(0)
 
     received = []
     page.config_chosen.connect(lambda payload: received.append(payload))
@@ -185,34 +132,30 @@ def test_next_emits_picks_and_default_auto_exposure_camera_controls(qapp):
     pick_a, pick_b, camera_controls = received[0]
     assert pick_a == IR1
     assert pick_b == COLOR0
-    assert len(camera_controls) == 2
-    assert camera_controls[0]["sensor_indices"] == [0]
-    assert camera_controls[0]["auto_exposure"] is True
-    assert camera_controls[0]["exposure"] is None
-    assert camera_controls[0]["gain"] is None
-    assert camera_controls[0]["emitter_enabled"] is False  # checkbox checked by default -> emitter disabled
-    assert camera_controls[1]["emitter_enabled"] is None  # no infrared in this group -> N/A
+    assert camera_controls["auto_exposure"] is True
+    assert camera_controls["exposure"] is None
+    assert camera_controls["gain"] is None
+    assert camera_controls["emitter_enabled"] is False  # checkbox checked by default -> emitter disabled
 
 
 def test_manual_exposure_selection_reports_spinbox_values(qapp):
     page = StreamConfigPage()
-    page.populate(ctx=None, device_serial="123", stream_options=[COLOR1, COLOR2])
+    page.populate(ctx=None, device_serial="123", stream_options_a=[COLOR1], stream_options_b=[COLOR2])
     page.combo_a.setCurrentIndex(0)
-    page.combo_b.setCurrentIndex(1)
+    page.combo_b.setCurrentIndex(0)
 
-    group = page._camera_control_widgets[0]
-    group["manual_radio"].setChecked(True)
-    group["exposure_spin"].setValue(5000)
-    group["gain_spin"].setValue(32)
+    page._camera_controls["manual_radio"].setChecked(True)
+    page._camera_controls["exposure_spin"].setValue(5000)
+    page._camera_controls["gain_spin"].setValue(32)
 
     received = []
     page.config_chosen.connect(lambda payload: received.append(payload))
     page._on_next_clicked()
 
     _, _, camera_controls = received[0]
-    assert camera_controls[0]["auto_exposure"] is False
-    assert camera_controls[0]["exposure"] == 5000
-    assert camera_controls[0]["gain"] == 32
+    assert camera_controls["auto_exposure"] is False
+    assert camera_controls["exposure"] == 5000
+    assert camera_controls["gain"] == 32
 
 
 def test_unchecking_disable_emitter_checkbox_reports_emitter_enabled(qapp):
@@ -221,19 +164,18 @@ def test_unchecking_disable_emitter_checkbox_reports_emitter_enabled(qapp):
     # for coverage of the default itself). This test covers the OTHER
     # state: explicitly opting OUT of the default by unchecking it.
     page = StreamConfigPage()
-    page.populate(ctx=None, device_serial="123", stream_options=[IR1, COLOR0])
+    page.populate(ctx=None, device_serial="123", stream_options_a=[IR1], stream_options_b=[COLOR0])
     page.combo_a.setCurrentIndex(0)
-    page.combo_b.setCurrentIndex(1)
+    page.combo_b.setCurrentIndex(0)
 
-    ir_group = page._camera_control_widgets[0]
-    ir_group["emitter_checkbox"].setChecked(False)
+    page._camera_controls["emitter_checkbox"].setChecked(False)
 
     received = []
     page.config_chosen.connect(lambda payload: received.append(payload))
     page._on_next_clicked()
 
     _, _, camera_controls = received[0]
-    assert camera_controls[0]["emitter_enabled"] is True
+    assert camera_controls["emitter_enabled"] is True
 
 
 # --- Stream A / Stream B collision guard (Fix 1: nothing else stopped the
@@ -241,7 +183,10 @@ def test_unchecking_disable_emitter_checkbox_reports_emitter_enabled(qapp):
 
 def test_on_next_clicked_does_not_emit_when_picks_are_the_same_stream(qapp):
     page = StreamConfigPage()
-    page.populate(ctx=None, device_serial="123", stream_options=[IR1, IR2, COLOR0])
+    page.populate(
+        ctx=None, device_serial="123",
+        stream_options_a=[IR1, IR2, COLOR0], stream_options_b=[IR1, IR2, COLOR0],
+    )
     page.combo_a.setCurrentIndex(0)
     page.combo_b.setCurrentIndex(0)  # same option as combo_a
 
@@ -255,7 +200,10 @@ def test_on_next_clicked_does_not_emit_when_picks_are_the_same_stream(qapp):
 
 def test_on_start_preview_clicked_does_not_start_preview_when_picks_are_the_same_stream(qapp, monkeypatch):
     page = StreamConfigPage()
-    page.populate(ctx=None, device_serial="123", stream_options=[IR1, IR2, COLOR0])
+    page.populate(
+        ctx=None, device_serial="123",
+        stream_options_a=[IR1, IR2, COLOR0], stream_options_b=[IR1, IR2, COLOR0],
+    )
     page.combo_a.setCurrentIndex(0)
     page.combo_b.setCurrentIndex(0)  # same option as combo_a
 

@@ -42,29 +42,22 @@ def find_device_by_serial(ctx, serial):
     raise RuntimeError("No connected device with serial {!r}".format(serial))
 
 
-# Some devices' Infrared sensor is really a shared color-ISP sensor
-# under the hood, and advertises the SAME infrared resolution/fps in every
-# color-style format DECODERS knows how to decode (uyvy/bgr8/rgb8/bgra8/
-# rgba8) as well as the true native y8 - all of them just a software
-# repacking of the identical monochrome pixel data, of no use for this
-# app's LED-brightness sampling. Left unfiltered, that multiplies every
-# real infrared resolution/fps option 5-6x in the Stream Select picker with
-# indistinguishable-looking duplicates, burying the genuinely different
-# options (see docs/algorithm_review_log.md for the user report - two
-# screenshots showed a device's Infrared 0/1 combo boxes almost entirely
-# filled with these duplicates). Restrict infrared picks to the one true
-# native format; color streams keep the full DECODERS set since offering
-# multiple real formats there is legitimate.
-_INFRARED_PICKER_FORMATS = {rs.format.y8}
-
-
 def list_video_stream_options_from_device(device):
     """List every infrared/color video-stream profile a device offers, as
     plain dicts (sensor_index/stream_type/stream_index/format/width/height/
-    fps) - the picker data the Stream Config page needs to let the operator
-    choose ANY two streams instead of a hardcoded IR+RGB pair. Split out from
-    list_video_stream_options so it's directly testable against a fake
-    device without needing a fake rs.context too."""
+    fps) - the raw candidate set for the Stream Select picker. This is
+    intentionally unfiltered beyond "is it decodable at all" - some devices
+    advertise the SAME real stream at a given resolution/fps in many pixel
+    formats (e.g. an infrared stream reported as y8 AND uyvy/bgr8/rgb8/
+    bgra8/rgba8, all just software reinterpretations of the same monochrome
+    data), which is real device behavior, not something to silently hide
+    here. settings.yaml's camera.stream_options (see parse_stream_options_
+    config/filter_options_by_curated_list below) is where the operator
+    curates which of these are actually worth offering in the picker -
+    keeping that a hand-edited config decision rather than a hardcoded
+    Python heuristic. Split out from list_video_stream_options so it's
+    directly testable against a fake device without needing a fake
+    rs.context too."""
     options = []
     for sensor_index, sensor in enumerate(device.query_sensors()):
         for p in sensor.profiles:
@@ -80,8 +73,6 @@ def list_video_stream_options_from_device(device):
                 # QImage assumption) can handle anything but what DECODERS
                 # already covers.
                 continue
-            if p.stream_type() == rs.stream.infrared and p.format() not in _INFRARED_PICKER_FORMATS:
-                continue
             vp = p.as_video_stream_profile()
             options.append({
                 "sensor_index": sensor_index,
@@ -93,6 +84,66 @@ def list_video_stream_options_from_device(device):
                 "fps": p.fps(),
             })
     return options
+
+
+_STREAM_TYPES_BY_NAME = {"infrared": rs.stream.infrared, "color": rs.stream.color}
+_FORMATS_BY_NAME = {fmt.name: fmt for fmt in DECODERS}
+
+
+def parse_stream_options_config(raw_stream_options):
+    """Converts settings.yaml's camera.stream_options list (plain
+    stream_type/format name strings, e.g. {"stream_type": "infrared",
+    "stream_index": 1, "width": 1280, "height": 720, "fps": 30, "format":
+    "y8"}) into the same real-rs-enum shape list_video_stream_options_
+    from_device produces (minus sensor_index, which only a live device
+    query can resolve) - the operator-curated allowlist Stream Select's
+    picker gets filtered down to (see filter_options_by_curated_list)."""
+    parsed = []
+    for entry in raw_stream_options:
+        stream_type_name = entry["stream_type"]
+        format_name = entry["format"]
+        if stream_type_name not in _STREAM_TYPES_BY_NAME:
+            raise ValueError(
+                "settings.yaml camera.stream_options: unknown stream_type {!r} - must be "
+                "'infrared' or 'color'.".format(stream_type_name)
+            )
+        if format_name not in _FORMATS_BY_NAME:
+            raise ValueError(
+                "settings.yaml camera.stream_options: unknown format {!r} - must be a format "
+                "domain.realsense_utils.DECODERS can decode.".format(format_name)
+            )
+        parsed.append({
+            "stream_type": _STREAM_TYPES_BY_NAME[stream_type_name],
+            "stream_index": entry["stream_index"],
+            "width": entry["width"],
+            "height": entry["height"],
+            "fps": entry["fps"],
+            "format": _FORMATS_BY_NAME[format_name],
+        })
+    return parsed
+
+
+_CURATED_MATCH_KEYS = ("stream_type", "stream_index", "width", "height", "fps", "format")
+
+
+def filter_options_by_curated_list(options, curated):
+    """Filters list_video_stream_options_from_device's raw output down to
+    just the entries matching something in `curated` (parse_stream_options_
+    config's output) - on stream_type/stream_index/width/height/fps/format,
+    ignoring sensor_index (a live-device detail the curated list doesn't
+    specify, since it can vary by rig even for the same logical stream).
+    Preserves `curated`'s own order (not `options`'s device-enumeration
+    order), so the picker's dropdown order matches however the operator
+    listed entries in settings.yaml. A curated entry with no matching
+    device option is silently skipped - not every curated entry needs to
+    exist on every connected rig."""
+    result = []
+    for entry in curated:
+        for option in options:
+            if all(option[key] == entry[key] for key in _CURATED_MATCH_KEYS):
+                result.append(option)
+                break
+    return result
 
 
 def list_video_stream_options(ctx, serial):

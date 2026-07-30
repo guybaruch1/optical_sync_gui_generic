@@ -23,7 +23,7 @@ def _minimal_context(tmp_path, **overrides):
         ctx=None, device_serial="123456",
         pick_a={"stream_type": "infrared", "stream_index": 1, "width": 4, "height": 4, "fps": 30, "format": "y8"},
         pick_b={"stream_type": "color", "stream_index": 0, "width": 4, "height": 4, "fps": 30, "format": "bgr8"},
-        camera_controls=[],
+        camera_controls={},
         switch_time_ms=1.0, scan_direction=1,
         stream_a_threshold=np.full(2, 150.0), stream_b_threshold=np.full(2, 150.0),
         stream_a_xy=np.array([(1, 1), (2, 2)]), stream_b_xy=np.array([(1, 1), (2, 2)]),

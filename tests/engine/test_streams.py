@@ -8,6 +8,7 @@ from engine.streams import (
     enable_auto_exposure,
     list_video_stream_options_from_device, resolve_and_group,
     set_emitter_enabled, set_manual_exposure, stream_slug,
+    parse_stream_options_config, filter_options_by_curated_list,
 )
 
 
@@ -413,3 +414,105 @@ def test_stream_slug_omits_index_when_zero_for_color():
 def test_stream_slug_appends_index_for_color_when_nonzero():
     pick = {"stream_type": rs.stream.color, "stream_index": 2}
     assert stream_slug(pick) == "color2"
+
+
+# --- parse_stream_options_config / filter_options_by_curated_list (settings.yaml's
+# per-camera camera.stream_options curation - see engine/streams.py docstrings) ---
+
+def test_parse_stream_options_config_converts_names_to_real_enums():
+    raw = [
+        {"stream_type": "infrared", "stream_index": 1, "width": 1280, "height": 720, "fps": 30, "format": "y8"},
+        {"stream_type": "color", "stream_index": 0, "width": 1280, "height": 720, "fps": 30, "format": "bgr8"},
+    ]
+    parsed = parse_stream_options_config(raw)
+    assert parsed == [
+        {"stream_type": rs.stream.infrared, "stream_index": 1, "width": 1280, "height": 720, "fps": 30, "format": rs.format.y8},
+        {"stream_type": rs.stream.color, "stream_index": 0, "width": 1280, "height": 720, "fps": 30, "format": rs.format.bgr8},
+    ]
+
+
+def test_parse_stream_options_config_rejects_unknown_stream_type():
+    raw = [{"stream_type": "depth", "stream_index": 0, "width": 1280, "height": 720, "fps": 30, "format": "y8"}]
+    with pytest.raises(ValueError):
+        parse_stream_options_config(raw)
+
+
+def test_parse_stream_options_config_rejects_unknown_format():
+    raw = [{"stream_type": "infrared", "stream_index": 1, "width": 1280, "height": 720, "fps": 30, "format": "not_a_real_format"}]
+    with pytest.raises(ValueError):
+        parse_stream_options_config(raw)
+
+
+def test_filter_options_by_curated_list_keeps_only_matching_entries():
+    # Simulates the real-world bug report: a device advertises the same
+    # infrared resolution/fps in several redundant pixel formats
+    # (y8/uyvy/bgr8) - the curated list only wants y8.
+    device_options = [
+        {"sensor_index": 0, "stream_type": rs.stream.infrared, "stream_index": 1,
+         "width": 1280, "height": 720, "fps": 30, "format": rs.format.y8},
+        {"sensor_index": 0, "stream_type": rs.stream.infrared, "stream_index": 1,
+         "width": 1280, "height": 720, "fps": 30, "format": rs.format.uyvy},
+        {"sensor_index": 0, "stream_type": rs.stream.infrared, "stream_index": 1,
+         "width": 1280, "height": 720, "fps": 30, "format": rs.format.bgr8},
+    ]
+    curated = [{"stream_type": rs.stream.infrared, "stream_index": 1,
+                "width": 1280, "height": 720, "fps": 30, "format": rs.format.y8}]
+
+    result = filter_options_by_curated_list(device_options, curated)
+
+    assert len(result) == 1
+    assert result[0]["format"] == rs.format.y8
+
+
+def test_filter_options_by_curated_list_ignores_sensor_index():
+    # sensor_index is a live/device detail the curated list never specifies -
+    # a curated entry must still match regardless of which sensor_index the
+    # device happens to report it under.
+    device_options = [
+        {"sensor_index": 3, "stream_type": rs.stream.color, "stream_index": 0,
+         "width": 1280, "height": 720, "fps": 30, "format": rs.format.bgr8},
+    ]
+    curated = [{"stream_type": rs.stream.color, "stream_index": 0,
+                "width": 1280, "height": 720, "fps": 30, "format": rs.format.bgr8}]
+
+    result = filter_options_by_curated_list(device_options, curated)
+
+    assert result == device_options
+
+
+def test_filter_options_by_curated_list_silently_skips_unmatched_curated_entries():
+    # A curated entry with no matching device option (e.g. this specific rig
+    # doesn't support it) is dropped, not an error - not every curated entry
+    # needs to exist on every connected device.
+    device_options = [
+        {"sensor_index": 0, "stream_type": rs.stream.infrared, "stream_index": 1,
+         "width": 1280, "height": 720, "fps": 30, "format": rs.format.y8},
+    ]
+    curated = [
+        {"stream_type": rs.stream.infrared, "stream_index": 1, "width": 1280, "height": 720, "fps": 30, "format": rs.format.y8},
+        {"stream_type": rs.stream.infrared, "stream_index": 2, "width": 1920, "height": 1080, "fps": 60, "format": rs.format.y8},
+    ]
+
+    result = filter_options_by_curated_list(device_options, curated)
+
+    assert len(result) == 1
+
+
+def test_filter_options_by_curated_list_preserves_curated_order_not_device_order():
+    device_options = [
+        {"sensor_index": 0, "stream_type": rs.stream.color, "stream_index": 0,
+         "width": 1280, "height": 720, "fps": 30, "format": rs.format.bgr8},
+        {"sensor_index": 1, "stream_type": rs.stream.infrared, "stream_index": 1,
+         "width": 1280, "height": 720, "fps": 30, "format": rs.format.y8},
+    ]
+    # Curated list requests infrared FIRST, even though the device reports
+    # color first - the picker's dropdown order should follow the curated
+    # list, not raw device enumeration order.
+    curated = [
+        {"stream_type": rs.stream.infrared, "stream_index": 1, "width": 1280, "height": 720, "fps": 30, "format": rs.format.y8},
+        {"stream_type": rs.stream.color, "stream_index": 0, "width": 1280, "height": 720, "fps": 30, "format": rs.format.bgr8},
+    ]
+
+    result = filter_options_by_curated_list(device_options, curated)
+
+    assert [o["stream_type"] for o in result] == [rs.stream.infrared, rs.stream.color]

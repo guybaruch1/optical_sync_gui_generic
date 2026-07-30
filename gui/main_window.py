@@ -23,19 +23,12 @@ from gui.pages.roi_select_page import RoiSelectPage, stream_label
 from gui.pages.calibration_page import CalibrationPage
 from gui.pages.live_session_page import LiveSessionPage
 from state.gui_state import GuiState, save_gui_state
-from engine.streams import list_video_stream_options, stream_slug
+from engine.streams import (
+    list_video_stream_options, stream_slug,
+    parse_stream_options_config, filter_options_by_curated_list,
+)
 from domain.calibration import load_led_positions
 from settings import ensure_output_dir
-
-
-def _controls_for_pick(pick, camera_controls):
-    for c in camera_controls:
-        if pick["sensor_index"] in c["sensor_indices"]:
-            return c
-    raise RuntimeError(
-        "No camera_controls entry found for sensor_index {} - camera_controls/groups may be "
-        "out of sync with the current picks.".format(pick["sensor_index"])
-    )
 
 
 class MainWindow(QMainWindow):
@@ -81,10 +74,23 @@ class MainWindow(QMainWindow):
         self.gui_state.device_serial = serial
         self._device_name = name
         save_gui_state(self.gui_state)
-        stream_options = list_video_stream_options(self.ctx, serial)
         camera_settings = self.settings["camera"]
+        per_camera_options = camera_settings.get("stream_options", {}).get(name)
+        if per_camera_options is None:
+            QMessageBox.critical(
+                self, "No Stream Select options configured",
+                "settings.yaml's camera.stream_options has no entry for camera {!r} - add one "
+                "with its own stream_a/stream_b curated lists before using Stream Select with "
+                "this camera.".format(name),
+            )
+            return
+        stream_options = list_video_stream_options(self.ctx, serial)
+        curated_a = parse_stream_options_config(per_camera_options["stream_a"])
+        curated_b = parse_stream_options_config(per_camera_options["stream_b"])
         self.stream_config_page.populate(
-            self.ctx, serial, stream_options,
+            self.ctx, serial,
+            filter_options_by_curated_list(stream_options, curated_a),
+            filter_options_by_curated_list(stream_options, curated_b),
             preferred_a=camera_settings["stream_a"], preferred_b=camera_settings["stream_b"],
         )
         self.stack.setCurrentWidget(self.stream_config_page)
@@ -95,26 +101,30 @@ class MainWindow(QMainWindow):
         self._pick_b = pick_b
         self._camera_controls = camera_controls
 
-        control_a = _controls_for_pick(pick_a, camera_controls)
-        control_b = _controls_for_pick(pick_b, camera_controls)
+        # camera_controls is now ONE global control set (applied to both
+        # streams together, see gui.pages.roi_select_page._apply_camera_
+        # controls) - GuiState still keeps separate stream_a_*/stream_b_*
+        # emitter/exposure/gain fields (it's just a lossy prefill record,
+        # see this module's docstring), so the same global values are
+        # written into both sides.
         self.gui_state.stream_a_type = pick_a["stream_type"].name
         self.gui_state.stream_a_index = pick_a["stream_index"]
         self.gui_state.stream_a_width = pick_a["width"]
         self.gui_state.stream_a_height = pick_a["height"]
         self.gui_state.stream_a_fps = pick_a["fps"]
-        self.gui_state.stream_a_emitter_enabled = control_a["emitter_enabled"]
-        self.gui_state.stream_a_auto_exposure = control_a["auto_exposure"]
-        self.gui_state.stream_a_exposure = control_a["exposure"]
-        self.gui_state.stream_a_gain = control_a["gain"]
+        self.gui_state.stream_a_emitter_enabled = camera_controls["emitter_enabled"]
+        self.gui_state.stream_a_auto_exposure = camera_controls["auto_exposure"]
+        self.gui_state.stream_a_exposure = camera_controls["exposure"]
+        self.gui_state.stream_a_gain = camera_controls["gain"]
         self.gui_state.stream_b_type = pick_b["stream_type"].name
         self.gui_state.stream_b_index = pick_b["stream_index"]
         self.gui_state.stream_b_width = pick_b["width"]
         self.gui_state.stream_b_height = pick_b["height"]
         self.gui_state.stream_b_fps = pick_b["fps"]
-        self.gui_state.stream_b_emitter_enabled = control_b["emitter_enabled"]
-        self.gui_state.stream_b_auto_exposure = control_b["auto_exposure"]
-        self.gui_state.stream_b_exposure = control_b["exposure"]
-        self.gui_state.stream_b_gain = control_b["gain"]
+        self.gui_state.stream_b_emitter_enabled = camera_controls["emitter_enabled"]
+        self.gui_state.stream_b_auto_exposure = camera_controls["auto_exposure"]
+        self.gui_state.stream_b_exposure = camera_controls["exposure"]
+        self.gui_state.stream_b_gain = camera_controls["gain"]
         save_gui_state(self.gui_state)
 
         self.roi_page.set_context(
