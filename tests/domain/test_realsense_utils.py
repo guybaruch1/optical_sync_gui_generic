@@ -12,6 +12,8 @@ from domain.realsense_utils import (
     draw_led_state_overlay,
     decode_frame,
     DECODERS,
+    _typical_spacing,
+    _debug_circle_radius,
 )
 
 
@@ -79,6 +81,40 @@ def test_merge_close_centroids_passthrough_below_two_points():
     assert merge_close_centroids([(1.0, 1.0)]) == [(1.0, 1.0)]
 
 
+def test_typical_spacing_none_below_two_points():
+    assert _typical_spacing([(1.0, 1.0)]) is None
+
+
+def test_typical_spacing_returns_median_nearest_neighbor_distance():
+    # nearest-neighbor distances here are [1.0, 1.0, ~55.9], so the median is 1.0.
+    centroids = [(10.0, 10.0), (11.0, 10.0), (50.0, 50.0)]
+    assert _typical_spacing(centroids) == 1.0
+
+
+def test_debug_circle_radius_falls_back_to_8_below_two_points():
+    # Same fallback the original hardcoded-8px behavior relied on: with
+    # nothing to compare spacing against, keep the original fixed radius.
+    assert _debug_circle_radius([(25.0, 25.0)]) == 8
+
+
+def test_debug_circle_radius_falls_back_to_8_for_wide_spacing():
+    # Spacing (~42px) * 0.3 exceeds the 8px ceiling, so it's clamped to 8 -
+    # never bigger than the original fixed radius.
+    assert _debug_circle_radius([(10.0, 10.0), (40.0, 40.0)]) == 8
+
+
+def test_debug_circle_radius_scales_down_for_tight_spacing():
+    # 10px apart -> spacing * 0.3 = 3, comfortably under the 8px ceiling
+    # and above the 2px floor.
+    assert _debug_circle_radius([(20.0, 25.0), (30.0, 25.0)]) == 3
+
+
+def test_debug_circle_radius_floors_at_2_for_very_tight_spacing():
+    # 3px apart -> spacing * 0.3 < 1, floored at 2 so the circle never
+    # vanishes entirely.
+    assert _debug_circle_radius([(20.0, 25.0), (23.0, 25.0)]) == 2
+
+
 def test_detect_led_centroids_finds_bright_blob():
     image = np.zeros((50, 50), dtype=np.uint8)
     image[20:30, 20:30] = 255
@@ -107,6 +143,22 @@ def test_save_debug_detection_image_writes_file_and_marks_centroids(tmp_path):
     assert ring_pixel.tolist() == [0, 255, 0]
 
 
+def test_save_debug_detection_image_shrinks_circles_for_tight_spacing(tmp_path):
+    image = np.zeros((50, 50), dtype=np.uint8)
+    path = str(tmp_path / "debug.png")
+    centroids = [(20, 25), (30, 25)]  # 10px apart -> radius should shrink to 3
+
+    save_debug_detection_image(image, centroids, path)
+
+    import cv2
+    saved = cv2.imread(path)
+    # With the old fixed 8px radius these two circles (16px wide each, 10px
+    # apart) would fully overlap. With the shrunk radius they must not - the
+    # midpoint between the two centers should be untouched background.
+    midpoint_pixel = saved[25, 25]
+    assert midpoint_pixel.tolist() != [0, 255, 0]
+
+
 def test_draw_bundle_overlay_converts_grayscale_and_draws_text():
     image = np.zeros((100, 300), dtype=np.uint8)
 
@@ -131,6 +183,20 @@ def test_draw_led_state_overlay_marks_on_led_green_and_off_led_red():
     assert result is not image  # never mutates the caller's array
     assert result[10, 10 + 8].tolist() == [0, 255, 0]  # on -> green ring
     assert result[40, 40 + 8].tolist() == [0, 0, 255]  # off -> red ring
+
+
+def test_draw_led_state_overlay_shrinks_circles_for_tight_spacing():
+    image = np.zeros((50, 50), dtype=np.uint8)
+    xy_positions = [(20, 25), (30, 25)]  # 10px apart -> radius should shrink to 3
+    on_mask = [True, True]
+
+    result = draw_led_state_overlay(image, xy_positions, on_mask)
+
+    # With the old fixed 8px radius these two circles would fully overlap.
+    # With the shrunk radius the midpoint between the two centers should be
+    # untouched background, not part of either green ring.
+    midpoint_pixel = result[25, 25]
+    assert midpoint_pixel.tolist() != [0, 255, 0]
 
 
 def test_draw_led_state_overlay_does_not_mutate_bgr_input():

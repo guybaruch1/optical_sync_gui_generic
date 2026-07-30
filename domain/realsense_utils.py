@@ -57,18 +57,43 @@ def crop_to_roi(image, roi):
     return image[y:y + h, x:x + w].copy()
 
 
-def merge_close_centroids(centroids, distance_fraction=0.5):
-    if len(centroids) < 2:
-        return centroids
+def _typical_spacing(points):
+    """Median nearest-neighbor distance across points, or None if there are
+    fewer than two points to compare (no neighbor distance is computable).
+    Shared by merge_close_centroids (clustering threshold) and the debug
+    overlay drawers (scaling the drawn circle radius down so adjacent
+    circles don't overlap when real LEDs are packed tightly)."""
+    if len(points) < 2:
+        return None
 
-    pts = np.array(centroids)
-
+    pts = np.array(points)
     nn_dists = []
     for i in range(len(pts)):
         d = np.linalg.norm(pts - pts[i], axis=1)
         d[i] = np.inf
         nn_dists.append(d.min())
-    typical_spacing = np.median(nn_dists)
+    return float(np.median(nn_dists))
+
+
+def _debug_circle_radius(points):
+    """Derives the debug-overlay circle radius from the typical spacing
+    between the given points, capped at the original fixed 8px (never
+    bigger than before) and floored at 2px (never vanishes), so adjacent
+    circles stay visually distinct instead of overlapping into a blob when
+    LEDs are packed closer than ~16px apart. Falls back to the original
+    fixed 8px when there are fewer than two points to compare."""
+    spacing = _typical_spacing(points)
+    if spacing is None:
+        return 8
+    return max(2, min(8, int(spacing * 0.3)))
+
+
+def merge_close_centroids(centroids, distance_fraction=0.5):
+    if len(centroids) < 2:
+        return centroids
+
+    pts = np.array(centroids)
+    typical_spacing = _typical_spacing(centroids)
     merge_threshold = typical_spacing * distance_fraction
 
     merged = []
@@ -129,8 +154,9 @@ def decode_frame(raw_bytes, fmt, width, height):
 
 def save_debug_detection_image(image, centroids, path):
     debug_img = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR) if len(image.shape) == 2 else image.copy()
+    radius = _debug_circle_radius(centroids)
     for i, (x, y) in enumerate(centroids):
-        cv2.circle(debug_img, (int(x), int(y)), 8, (0, 255, 0), 1)
+        cv2.circle(debug_img, (int(x), int(y)), radius, (0, 255, 0), 1)
         cv2.putText(debug_img, str(i), (int(x) + 10, int(y)), cv2.FONT_HERSHEY_SIMPLEX,
                     0.4, (0, 0, 255), 1)
     cv2.imwrite(path, debug_img)
@@ -144,9 +170,10 @@ def draw_led_state_overlay(image, xy_positions, on_mask):
     save_debug_detection_image lets calibration's blob detection be
     sanity-checked."""
     debug_img = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR) if len(image.shape) == 2 else image.copy()
+    radius = _debug_circle_radius(xy_positions)
     for (x, y), is_on in zip(xy_positions, on_mask):
         color = (0, 255, 0) if is_on else (0, 0, 255)  # BGR: green=on, red=off
-        cv2.circle(debug_img, (int(x), int(y)), 8, color, 2)
+        cv2.circle(debug_img, (int(x), int(y)), radius, color, 2)
     return debug_img
 
 

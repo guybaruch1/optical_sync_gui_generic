@@ -400,15 +400,17 @@ class LiveSessionPage(QWidget):
         position_gap_metric = PositionGapMetric(
             stream_a_threshold=ctx["stream_a_threshold"], stream_b_threshold=ctx["stream_b_threshold"],
             num_leds=ctx["num_leds"], switch_time_ms=switch_time_ms,
-            stream_a_fps=ctx["pick_a"]["fps"], stream_b_fps=ctx["pick_b"]["fps"],
-            frame_drop_threshold_factor=ctx["frame_drop_threshold_factor"],
             warmup_pairs_to_skip=ctx["warmup_pairs_to_skip"],
         )
         metrics = [
             PairingGapMetric(outlier_threshold_us=ctx["pairing_gap_outlier_threshold_us"]),
             position_gap_metric,
         ]
-        test_session = TestSession(TestSessionConfig(metrics=metrics, duration_s=duration_s))
+        test_session = TestSession(TestSessionConfig(
+            metrics=metrics, duration_s=duration_s,
+            stream_a_fps=ctx["pick_a"]["fps"], stream_b_fps=ctx["pick_b"]["fps"],
+            frame_drop_threshold_factor=ctx["frame_drop_threshold_factor"],
+        ))
         test_session.start()
 
         # A new session's pair_index restarts at 0 - without clearing, its
