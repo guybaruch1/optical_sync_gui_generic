@@ -21,6 +21,26 @@ def sample_neighborhood_brightness(image, x, y, size=5):
     return float(patch.mean())
 
 
+def safe_neighborhood_size(xy_positions, configured_size, min_size=3, spacing_fraction=0.5):
+    """Caps `configured_size` (settings.yaml's calibration.neighborhood_size/
+    test.neighborhood_size) at a safe fraction of the REAL measured LED
+    spacing for this specific run, so the brightness-sampling window used by
+    sample_neighborhood_brightness/sample_all_neighborhood_brightness can
+    never geometrically reach into a neighboring LED's pixels - regardless
+    of whatever resolution/ROI/stream pairing this run happens to use.
+    Only ever shrinks the configured value, never grows it (a small
+    configured window stays small even at generous LED spacing). Falls
+    back to `configured_size` unchanged when there are fewer than two LED
+    positions to measure a spacing from. Called with the same real
+    xy_positions at both calibration time and live-session start, so the
+    two can't silently diverge even though they're computed separately."""
+    spacing = _typical_spacing(list(xy_positions))
+    if spacing is None:
+        return configured_size
+    safe_size = max(min_size, int(spacing * spacing_fraction))
+    return min(configured_size, safe_size)
+
+
 def sample_all_neighborhood_brightness(image, xy_positions, size=5):
     """Like sample_neighborhood_brightness, but for many LED positions on
     the same frame - converts BGR to grayscale once up front instead of

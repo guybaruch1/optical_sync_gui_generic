@@ -48,7 +48,12 @@ calibration:
   row_gap_px: 15
   # Minimum contour area (px^2) to count as a real LED blob, not noise.
   min_blob_area: 20
-  # NxN pixel window averaged per LED position, for noise resilience.
+  # NxN pixel window averaged per LED position, for noise resilience. This
+  # is an UPPER BOUND, not a guaranteed actual value: domain.realsense_utils.
+  # safe_neighborhood_size caps it down at run time if it's geometrically
+  # too big for this run's real measured LED pixel spacing (resolution/ROI
+  # vary per run, so a fixed constant can't be trusted to always be safe) -
+  # see docs/algorithm_review_log.md's Issue 1.
   neighborhood_size: 5
   # Warn if any LED's on-minus-off brightness gap is smaller than this -
   # its threshold may be unreliable.
@@ -65,6 +70,11 @@ test:
   # at fast switch speeds (many sweeps per second).
   duration_s: 10.0
   num_leds: 100
+  # Same UPPER BOUND caveat as calibration.neighborhood_size above - capped
+  # at run time by domain.realsense_utils.safe_neighborhood_size, computed
+  # independently from the same real xy_positions this run loaded, so it
+  # can't silently diverge from what calibration used even though the two
+  # are two separately-edited settings.yaml keys.
   neighborhood_size: 5
   # Calibration's stored threshold assumes an LED held steady for a full
   # exposure. At fast switch times only a fraction of that brightness is

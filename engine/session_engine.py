@@ -17,7 +17,7 @@ from engine.streams import (
     set_emitter_enabled, enable_auto_exposure, set_manual_exposure,
 )
 from engine.led_panel import LEDPanel
-from domain.realsense_utils import sample_all_neighborhood_brightness
+from domain.realsense_utils import sample_all_neighborhood_brightness, safe_neighborhood_size
 
 
 class SessionEngineThread(QThread):
@@ -51,6 +51,18 @@ class SessionEngineThread(QThread):
         self.stream_a_xy = stream_a_xy
         self.stream_b_xy = stream_b_xy
         self.neighborhood_size = neighborhood_size
+        # Capped once here (not per-frame) at what's actually safe for THIS
+        # run's real measured LED pixel spacing - see
+        # domain.realsense_utils.safe_neighborhood_size's docstring. Computed
+        # from the same real xy_positions domain.calibration.
+        # build_positions_with_thresholds used at calibration time, so the
+        # two can't silently diverge even though they're computed separately.
+        self._stream_a_safe_size = (
+            safe_neighborhood_size(stream_a_xy, neighborhood_size) if stream_a_xy is not None else neighborhood_size
+        )
+        self._stream_b_safe_size = (
+            safe_neighborhood_size(stream_b_xy, neighborhood_size) if stream_b_xy is not None else neighborhood_size
+        )
         self.scan_direction = scan_direction
         self.switch_time_ms = switch_time_ms
         self.display_stride = display_stride
@@ -72,11 +84,11 @@ class SessionEngineThread(QThread):
         4-tuple directly for exactly that reason)."""
         for stream_a_image, stream_b_image, stream_a_ts_us, stream_b_ts_us in self._capture.frames():
             stream_a_bright = (
-                sample_all_neighborhood_brightness(stream_a_image, self.stream_a_xy, self.neighborhood_size)
+                sample_all_neighborhood_brightness(stream_a_image, self.stream_a_xy, self._stream_a_safe_size)
                 if self.stream_a_xy is not None else None
             )
             stream_b_bright = (
-                sample_all_neighborhood_brightness(stream_b_image, self.stream_b_xy, self.neighborhood_size)
+                sample_all_neighborhood_brightness(stream_b_image, self.stream_b_xy, self._stream_b_safe_size)
                 if self.stream_b_xy is not None else None
             )
             yield stream_a_image, stream_b_image, stream_a_ts_us, stream_b_ts_us, stream_a_bright, stream_b_bright
