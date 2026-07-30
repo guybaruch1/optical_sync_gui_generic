@@ -157,7 +157,21 @@ class StreamConfigPage(QWidget):
         doesn't suit this rig/camera."""
         self.ctx = ctx
         self.device_serial = device_serial
-        self._stream_options = list(stream_options)
+        # Sorted so the combo is easy to scan: grouped by stream type/index
+        # first (so e.g. all "Infrared 0" options sit together), then by
+        # resolution/fps descending (largest, fastest first - the common
+        # preference), then format name for a stable order when more than
+        # one format legitimately exists at the same resolution/fps (e.g.
+        # a color sensor offering both bgr8 and mjpeg). Raw device
+        # enumeration order (the old behavior) has no such structure and
+        # left related options scattered throughout the list.
+        self._stream_options = sorted(
+            stream_options,
+            key=lambda o: (
+                o["stream_type"].name, o["stream_index"],
+                -o["width"], -o["height"], -o["fps"], o["format"].name,
+            ),
+        )
 
         for combo, preferred in ((self.combo_a, preferred_a), (self.combo_b, preferred_b)):
             combo.blockSignals(True)

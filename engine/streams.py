@@ -42,6 +42,22 @@ def find_device_by_serial(ctx, serial):
     raise RuntimeError("No connected device with serial {!r}".format(serial))
 
 
+# Some devices' Infrared sensor is really a shared color-ISP sensor
+# under the hood, and advertises the SAME infrared resolution/fps in every
+# color-style format DECODERS knows how to decode (uyvy/bgr8/rgb8/bgra8/
+# rgba8) as well as the true native y8 - all of them just a software
+# repacking of the identical monochrome pixel data, of no use for this
+# app's LED-brightness sampling. Left unfiltered, that multiplies every
+# real infrared resolution/fps option 5-6x in the Stream Select picker with
+# indistinguishable-looking duplicates, burying the genuinely different
+# options (see docs/algorithm_review_log.md for the user report - two
+# screenshots showed a device's Infrared 0/1 combo boxes almost entirely
+# filled with these duplicates). Restrict infrared picks to the one true
+# native format; color streams keep the full DECODERS set since offering
+# multiple real formats there is legitimate.
+_INFRARED_PICKER_FORMATS = {rs.format.y8}
+
+
 def list_video_stream_options_from_device(device):
     """List every infrared/color video-stream profile a device offers, as
     plain dicts (sensor_index/stream_type/stream_index/format/width/height/
@@ -63,6 +79,8 @@ def list_video_stream_options_from_device(device):
                 # downstream (LED-blob detection, VideoPanel's 8-bit
                 # QImage assumption) can handle anything but what DECODERS
                 # already covers.
+                continue
+            if p.stream_type() == rs.stream.infrared and p.format() not in _INFRARED_PICKER_FORMATS:
                 continue
             vp = p.as_video_stream_profile()
             options.append({
