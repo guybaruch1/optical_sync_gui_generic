@@ -84,13 +84,33 @@ class MainWindow(QMainWindow):
                 "this camera.".format(name),
             )
             return
+        try:
+            curated_a = parse_stream_options_config(per_camera_options["stream_a"])
+            curated_b = parse_stream_options_config(per_camera_options["stream_b"])
+        except (KeyError, ValueError) as exc:
+            QMessageBox.critical(
+                self, "Invalid Stream Select configuration",
+                "settings.yaml's camera.stream_options entry for camera {!r} is invalid "
+                "({}: {}) - fix its stream_a/stream_b entries before using Stream Select "
+                "with this camera.".format(name, type(exc).__name__, exc),
+            )
+            return
+
         stream_options = list_video_stream_options(self.ctx, serial)
-        curated_a = parse_stream_options_config(per_camera_options["stream_a"])
-        curated_b = parse_stream_options_config(per_camera_options["stream_b"])
+        options_a = filter_options_by_curated_list(stream_options, curated_a)
+        options_b = filter_options_by_curated_list(stream_options, curated_b)
+        empty_sides = [label for label, options in (("Stream A", options_a), ("Stream B", options_b)) if not options]
+        if empty_sides:
+            QMessageBox.critical(
+                self, "No matching Stream Select options",
+                "None of camera {!r}'s curated {} entries in settings.yaml's camera.stream_options "
+                "matched anything this connected device actually reports - check those entries "
+                "against what this specific device/firmware supports.".format(name, " and ".join(empty_sides)),
+            )
+            return
+
         self.stream_config_page.populate(
-            self.ctx, serial,
-            filter_options_by_curated_list(stream_options, curated_a),
-            filter_options_by_curated_list(stream_options, curated_b),
+            self.ctx, serial, options_a, options_b,
             preferred_a=camera_settings["stream_a"], preferred_b=camera_settings["stream_b"],
         )
         self.stack.setCurrentWidget(self.stream_config_page)

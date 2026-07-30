@@ -23,7 +23,8 @@ commit/PR noted).
 
 ## Issue 1: Fixed brightness-sampling window vs. actual LED pixel spacing
 
-**Status:** open
+**Status:** fixed (implemented on `worktree-neighborhood-size-safety-cap`,
+pushed, PR not yet opened - not merged into `main` as of this writing)
 
 **Where:** `domain/realsense_utils.py:14` (`sample_neighborhood_brightness`),
 `:24` (`sample_all_neighborhood_brightness`); consumed by
@@ -50,36 +51,63 @@ and `test.neighborhood_size` are two independently-edited keys, both
 defaulting to `5`, never checked against each other - same silent-
 divergence risk as the sibling project.
 
-**Candidate fixes (carried over from the sibling review, not yet chosen -
-still needs the same rig-specific input before narrowing):**
+**Decision: Option B chosen** (recompute on the fly, no `config.yaml`
+schema change) - resolution/ROI/stream-pairing vary per run by design in
+this project, ruling out a persisted one-time constant (Option A) or a
+warning-only approach (Option C).
+
+**Candidate fixes (carried over from the sibling review):**
 - A. Measure typical LED pixel spacing during calibration (reusing/
   extracting `merge_close_centroids`'s nearest-neighbor-distance logic,
   `domain/realsense_utils.py:60-83`) and persist a derived safe window
   size into `config.yaml`, used by both calibration and live sampling.
-- B. Same measurement, but recomputed on the fly from the already-loaded
-  position arrays (`stream_a_xy`/`stream_b_xy` in `session_engine.py`, the
-  loaded `xy_positions` in `calibration.py`) both at calibration time and
-  at live session start, instead of persisting anything new - guarantees
-  calibration and live use an identical value by construction, no schema
-  change.
+- B. **(chosen)** Same measurement, but recomputed on the fly from the
+  already-loaded position arrays (`stream_a_xy`/`stream_b_xy` in
+  `session_engine.py`, the loaded `xy_positions` in `calibration.py`) both
+  at calibration time and at live session start, instead of persisting
+  anything new - guarantees calibration and live use an identical value by
+  construction, no schema change.
 - C. Leave sampling behavior untouched; add a calibration-time warning (in
   the same style as the existing low-contrast/row-layout-mismatch warnings
   in `gui/pages/calibration_page.py:163-180`) if the configured
   `neighborhood_size` could geometrically reach a neighboring LED, so a
   human notices and retunes `settings.yaml` by hand.
 
-**Open questions for the user (rig-specific, can't verify from code
-alone):**
+**Fix applied:** new `domain/realsense_utils.py` helper,
+`safe_neighborhood_size(xy_positions, configured_size, min_size=3,
+spacing_fraction=0.5)`, reuses the Issue-3-fix's `_typical_spacing` helper
+to measure the real median nearest-neighbor LED distance, then caps
+`configured_size` at `max(min_size, int(spacing * spacing_fraction))` -
+only ever shrinks the configured value, never grows it, and falls back to
+`configured_size` unchanged when there are fewer than two LEDs to measure
+a spacing from. `domain/calibration.py`'s `build_positions_with_thresholds`
+computes this once from `xy_positions` before sampling on/off frames.
+`engine/session_engine.py`'s `SessionEngineThread.__init__` computes it
+once each for `stream_a_xy`/`stream_b_xy` (not per-frame), and
+`_frame_pairs_with_brightness` uses the capped values. `settings.yaml`'s
+`calibration.neighborhood_size`/`test.neighborhood_size` comments updated
+to document these are now upper bounds, not guaranteed actual values.
+
+**Verification:** full suite green (175 passed) after independent review
+of the diff. New tests in `tests/domain/test_realsense_utils.py` cover
+`safe_neighborhood_size`'s fallback/no-op/capping/flooring branches; a new
+test in `tests/domain/test_calibration.py` spies on
+`sample_neighborhood_brightness` to confirm the capped size is what
+actually reaches the real sampling calls, not just that the helper's own
+math is right in isolation. Independently re-verified during the 2026-07-30
+code-review pass (separate fresh-eyes agent, no context from the
+implementation) - found nothing wrong: confirmed only-shrinks/never-grows
+behavior, correct fallback on `None`/empty/`<2`-point inputs, and that
+`stream_a_xy` really is an `(N,2)` coordinate array (not a 5-field position
+record) at the real call site (`gui/main_window.py:171`).
+
+**Open questions for the user (rig-specific, not needed to implement
+Option B, but still useful context for tuning `spacing_fraction`/`min_size`
+later if real runs show the margin is too tight or too loose):**
 - Typical ROI size in pixels and resolution actually used in practice on
   this project's rigs.
 - Physical panel layout (rows x columns for the configured `num_leds`) and
   LED pitch.
-- Whether this project's wider variety of stream pairings (IR/IR, IR/color,
-  color/color, potentially at different resolutions per stream on a Dual
-  RGB device) means the two streams in a pair can end up at *different*
-  real pixel spacings more often than the sibling project's fixed IR-vs-RGB
-  case - which would push further towards Option B (recomputed per-stream)
-  over a single shared constant.
 - Whether a real `config.yaml` from an actual calibration run on this
   project has been inspected for today's actual nearest-neighbor spacing
   (not yet done here, unlike the sibling review which had a real D435I
@@ -89,7 +117,7 @@ alone):**
 
 ## Issue 2: Frame drops don't exclude "HW TS Latency" (`PairingGapMetric`), only "Optical Sync"
 
-**Status:** fixed (implemented via agent on `worktree-algo-review-log`, not yet committed/pushed - pending user go-ahead)
+**Status:** fixed (merged into `main` via PR #1, commit `932426d`)
 
 **Where:** `engine/metrics.py:105-119` (`PairingGapMetric.update`),
 `gui/pages/live_session_page.py:594,615` (stats/plot gating on
@@ -228,15 +256,25 @@ receives an already-built `test_session`/`position_gap_metric`).
 **Not yet done (after the fix):** `docs/project_overview.md`'s "both
 measurements" claim is now actually true in code; `docs/technical_deep_dive.md`
 §7-9 still describes frame-drop detection as living inside
-`PositionGapMetric` only - worth a follow-up doc pass if/when this gets
-committed, not done as part of this fix (out of scope of the agent brief).
-No real recorded run's output re-checked post-fix either.
+`PositionGapMetric` only - worth a follow-up doc pass, not done as part of
+this fix (out of scope of the agent brief). No real recorded run's output
+re-checked post-fix either.
+
+**Re-verified in the 2026-07-30 code-review pass** (fresh-eyes agent, no
+context from the original implementation): confirmed the hoist is correct
+end to end - `TestSession.process_pair` owns the rolling-timestamp state
+and mutates `sample` before any metric runs, `PairingGapMetric` excludes
+with the right reason priority (drop > outlier), `PositionGapMetric`'s own
+priority order is unchanged, and no stale caller anywhere in the repo still
+passes the old `PositionGapMetric(stream_a_fps=..., ...)` constructor
+signature or `export_session_csvs(..., drop_reason=...)` argument. Nothing
+wrong found.
 
 ---
 
 ## Issue 3: Debug overlay circle radius is a fixed constant, same root cause as Issue 1
 
-**Status:** fixed (implemented via agent on `worktree-algo-review-log`, not yet committed/pushed - pending user go-ahead)
+**Status:** fixed (merged into `main` via PR #1, commit `932426d`)
 
 **Where:** `domain/realsense_utils.py:133` (`save_debug_detection_image`)
 and `:149` (`draw_led_state_overlay`) - both call
@@ -333,6 +371,32 @@ validated against? Has a real miscount ever actually been observed in
 practice, or is this purely a code-inspection finding so far (unlike
 Issues 1-3, which all have some form of real evidence behind them)?
 
+**Sub-finding 4a (found in the 2026-07-30 code-review pass) - single-linkage
+chaining lets ONE noise centroid silently bridge two real rows, independent
+of how well `row_gap_px` is tuned:** the row-split test only compares each
+centroid to its immediate predecessor in the globally-y-sorted list
+(`curr[1] - prev[1] > row_gap_px`, `domain/calibration.py:21`), not to the
+row's first point - classic single-linkage clustering, which chains through
+a bridging point even when the real geometry is fine. Worked example: real
+rows at y≈10 and y≈40 (30px apart, well clear of the default
+`row_gap_px=15`), plus one stray centroid (dust/reflection/blob-merge
+artifact) at y=25 sorts between them. Consecutive y-diffs are 15 and 15 -
+neither exceeds `row_gap_px=15` (`>`, not `>=`), so the noise point chains
+both real rows into ONE row-plus-noise blob, then re-sorted by x - `led_id`s
+silently scrambled across what should've been two independent rows, with no
+exception and no warning (the existing `row_layout_a != row_layout_b`
+cross-check only compares row *counts* between streams, not which physical
+rows they are - both streams could bridge the same way and stay silent).
+This is a materially different, and arguably more urgent, failure mode than
+"pick a better `row_gap_px`": no constant choice fixes it, since a single
+outlier detection defeats it regardless. Not currently tested (existing
+`tests/domain/test_calibration.py` coverage is a clean two-row case with no
+noise point). Worth folding into whatever fix gets chosen for the main
+Issue 4 finding, or fixing independently (e.g. compare each candidate row
+split against the row's own first point, not just the immediate
+predecessor, to prevent one bridging point from merging two rows) -
+tradeoffs not yet analyzed, flagging for discussion like the rest of Issue 4.
+
 ---
 
 ## Issue 5 (candidate, newly found - not yet fully scoped): `find_last_on_led` picks the longest "on" run, vulnerable to a persistently-lit LED cluster
@@ -374,4 +438,186 @@ theoretical code-reading concern so far? Is there any existing hardware-
 level safeguard (LED panel self-diagnostics, etc.) that would make this
 unreachable in practice?
 
+**Sub-finding 5a (found in the 2026-07-30 code-review pass) - the tie-break
+between equal-length runs is order-dependent, not evidence-based, which
+compounds the main finding above:** ties use strict `>` (`engine/metrics.py`,
+the `if length > best_len` checks), so the *first*-listed candidate wins a
+tie, and candidate order is always `middle_runs + [wrap]` - meaning a normal
+run always beats the wraparound run on an exact-length tie, and among
+several disjoint non-adjacent runs of equal length, the lowest-index one
+always wins, with no basis (recency, proximity to the previous frame's
+position, etc.) for that choice. Verified by hand: `n=10`, boundary runs of
+length 1 each (wrap length 2) plus a middle run at indices (4,5) also length
+2 - the middle run wins purely because it's listed first, even though both
+are equally "valid" by the function's own logic. Practically this needs two
+*disjoint, non-adjacent* equal-length on-runs (ordinary adjacent-index LED
+transitions already merge into one run via the contiguity check, so this is
+rarer than it first looks) - but it directly compounds the main Issue 5
+concern: a stuck/noisy cluster doesn't even need to be *longer* than the
+real scan run to win, only *tied* with it, and an arbitrary index-order rule
+decides the winner instead of any real signal.
+
 ---
+
+## Audited, no bugs found (2026-07-30 code-review pass)
+
+Two more functions from the originally-planned broader audit scope were
+checked in depth by hand-tracing edge cases (empty/single-element inputs,
+boundary values, floating-point precision, numerical stability over many
+updates) - no bugs found in either:
+
+- `engine/metrics.py`'s `compute_position_gap` (circular-distance math): the
+  `diff > half` vs. `diff <= -half` asymmetry looks suspicious at first
+  glance but is actually correct - for even `n`, both `diff == +half` and
+  `diff == -half` canonicalize to the same antipodal `+half` output
+  (consistent, not a discontinuity); for odd `n`, `half = n/2.0` is never an
+  integer, so an integer `diff` can never land exactly on the boundary,
+  making the asymmetry moot. Checked at n=2, n=9, n=10 with no wraparound
+  bug found at any boundary.
+- `domain/running_stats.py`'s `RunningStats` (Welford's online algorithm):
+  correct at count=1 (`std` returns 0.0 by its own explicit guard), correct
+  with repeated identical values (`_m2` stays exactly `0.0`, not just
+  near-zero), correct with mixed-sign values. `std` divides by `count`
+  (population, not sample/Bessel-corrected) - a definitional choice, not a
+  bug, and the one real caller (`live_session_page.py`) already guards
+  `count == 0` before reading `mean`/`std`.
+
+---
+
+## Issue 6 (found in the 2026-07-30 code-review pass, on `main` via merged PR #2): Stream Select's new per-camera config feature has three gaps - one real UX regression, two missing-validation crashes/silent-failures
+
+**Status:** fixed (implemented on `worktree-fix-issue6-stream-config-gaps`, not yet merged into `main`)
+
+This issue covers three related gaps found while reviewing the merged
+"replace live device-format picker with per-camera YAML-curated stream
+lists" work (PR #2, commits `bf4b687`/`9d7ea6e`/merge `5b44e69`, now on
+`main`). All three stem from the same feature and were found together, but
+are logged as sub-findings since each needs its own fix decision.
+
+**Sub-finding 6a - "Disable IR emitter" checkbox regression: consolidating
+to one global camera-control block dropped the infrared-awareness that
+used to gate it, causing a spurious warning on every pure color+color
+(Dual RGB) run.** Confirmed directly against current `main`:
+`gui/pages/stream_config_page.py`'s `_build_camera_control_group`
+(`:205-214`) now shows the "Disable IR emitter" checkbox unconditionally,
+always defaulted to checked (`emitter_checkbox.setChecked(True)`) -
+previously (`group_camera_controls`'s per-group `has_infrared` flag) it
+was only shown/applied when a resolved group actually contained an
+infrared stream. `_read_camera_controls` (`:260`) turns "checked" into
+`camera_controls["emitter_enabled"] = False` (checked = "please disable
+the emitter") unconditionally, and `_apply_camera_controls`
+(`gui/pages/roi_select_page.py`) / `engine/session_engine.py`'s inline
+duplicate now call `set_emitter_enabled(sensor, False)` on every resolved
+sensor in every run, with no gating on whether that sensor is even
+infrared-capable. For a pure color+color (Dual RGB) stream pairing - per
+`CLAUDE.md` a first-class, explicitly-generalized-for topology of this
+app - `set_emitter_enabled` returns `False` (the sensor doesn't support
+`rs.option.emitter_enabled` at all) on every single run, surfacing a
+"WARNING: emitter_enabled not supported on sensor - confirm the emitter
+state manually" message every time, unless the operator manually unchecks
+the box each session. Not a crash, but a real, easily-hit UX regression
+traded away by the "global controls" simplification. No test exercises
+this path (the existing
+`test_camera_controls_group_always_present_regardless_of_picks` only
+checks the checkbox widget exists, not the warning behavior).
+
+**Decision: Option A chosen** (gate emitter application per-group on
+whether it actually contains an infrared stream, keep the checkbox global).
+
+*Candidate fixes:*
+- A. **(chosen)** Keep the checkbox global/always-visible (per the user's
+  explicit "camera control will be global to both streams" design ask),
+  but only *attempt* `set_emitter_enabled` (and thus only ever warn) on a
+  resolved group whose real profiles actually include an infrared stream -
+  `resolve_and_group`'s returned `(sensor, profiles)` groups already carry
+  real `rs.stream_profile` objects with a callable `.stream_type()`, so
+  this needs no new data, just an `any(p.stream_type() == rs.stream.infrared
+  for p in profiles)` gate inside `_apply_camera_controls`/
+  `session_engine.py`'s duplicate, applied identically in both places.
+- B. Default the checkbox unchecked instead of checked, so a pure
+  color+color run's default behavior is "leave exposure/emitter alone" -
+  smaller diff, but changes the default behavior for genuine IR pairs too
+  (previously always defaulted to emitter-disabled, which every prior
+  version of this app's camera setup treated as the safe default given the
+  structured-light projector corrupts LED detection if left on).
+- C. Leave as-is, document that the warning is expected/benign for
+  color+color pairs and should just be dismissed/ignored. Cheapest, but
+  trains operators to ignore warnings on every single run, which risks
+  masking a real "emitter left on" problem on an actual IR pair later.
+
+**Fix applied (6a):** `gui/pages/roi_select_page.py`'s
+`_apply_camera_controls` and `engine/session_engine.py`'s inline duplicate
+both now compute `group_has_infrared = any(p.stream_type() ==
+rs.stream.infrared for p in profiles)` per group, and only attempt
+`set_emitter_enabled` (thus only ever warn about it) when
+`camera_controls["emitter_enabled"] is not None and group_has_infrared`.
+`session_engine.py` needed a new `import pyrealsense2 as rs` (didn't
+previously import it). The checkbox itself stays global/always-visible/
+always-defaulted-checked in `stream_config_page.py`, unchanged - only the
+*application* of emitter control is now gated per resolved group, not the
+UI. `auto_exposure`/`exposure`/`gain` remain ungated by stream type
+(exposure control is meaningful for color sensors too).
+
+**Sub-finding 6b - a malformed `camera.stream_options` entry in
+`settings.yaml` crashes the whole app with a raw, unhandled exception
+instead of a friendly message.** `gui/main_window.py`'s `_on_device_chosen`
+(`:73-96`) wraps the "camera has no entry at all" case in a `QMessageBox`
+(`:79-86`), but the very next lines - `per_camera_options["stream_a"]`/
+`["stream_b"]` (`:88-89`, raw `KeyError` if either key is misspelled or
+missing) and `parse_stream_options_config` (`engine/streams.py`, raises a
+bare `ValueError` on an unknown `stream_type`/`format` string, or
+`KeyError` on a missing `stream_index`/`width`/etc. key) - have no
+surrounding `try/except`. `main.py` installs no custom exception hook, so
+an unhandled exception raised inside this Qt slot is fatal in PySide6 (the
+whole app aborts) rather than showing the same kind of clean, curated
+error the adjacent "no entry" branch already demonstrates is the intended
+UX. Given `settings.yaml` is explicitly the one hand-edited file in this
+project, a simple typo in a freshly hand-written `stream_options` block
+(e.g. `stream_type: colour`, or forgetting `stream_index`) crashes the
+whole GUI instead of pointing at the mistake.
+
+*Candidate fix (straightforward, not really a design tradeoff like 6a):*
+wrap the `per_camera_options["stream_a"]`/`["stream_b"]` lookups and the
+`parse_stream_options_config` calls in a `try/except (KeyError, ValueError)`
+inside `_on_device_chosen`, surfacing the same kind of `QMessageBox.critical`
+the "no entry" branch already uses, with the actual bad value/missing key
+named in the message.
+
+**Fix applied (6b):** exactly the candidate fix - `_on_device_chosen` now
+wraps both `per_camera_options["stream_a"]`/`["stream_b"]` and the
+`parse_stream_options_config` calls in `try/except (KeyError, ValueError)`,
+showing a `QMessageBox.critical` naming the camera, the exception type, and
+the exception's own message, instead of letting it crash the app.
+
+**Sub-finding 6c - a curated list with no entries matching what the
+connected device actually reports leaves Stream Select silently unusable,
+with no error at all.** `_on_device_chosen` never checks whether
+`filter_options_by_curated_list(...)` actually returned anything for
+either side before calling `populate()`. If a camera's curated `stream_a`/
+`stream_b` entries (right device name, but e.g. a different firmware
+version reporting a different fps/format set) don't match anything the
+live device reports, `StreamConfigPage` ends up with one or both combo
+boxes empty. `pick_a`/`pick_b` then return `None` (`combo.currentData()`
+on an empty combo), so `_on_next_clicked`/`_on_start_preview_clicked` both
+just silently `return` with no status message - the operator is left on a
+normal-looking page whose buttons do nothing, with no clue why. More
+likely to actually occur now than with the old unfiltered picker (which
+could never produce an empty list), since curated entries match on exact
+`width`/`height`/`fps`/`format` values.
+
+*Candidate fix (straightforward):* after filtering, if either resulting
+list is empty, show a `QMessageBox.critical` (same style as the "no entry"
+case) naming which side is empty and that this camera's curated entries
+didn't match anything the connected device reports, instead of silently
+switching to an unusable Stream Config page.
+
+**Verification:** confirmed all three directly against current `main` (not
+just the review agent's report) by reading `gui/pages/stream_config_page.py`,
+`gui/main_window.py`, and `engine/streams.py` as they currently stand. Full
+suite still green (169 passed on `main` as of this writing) - none of these
+are caught by any existing test.
+
+**Objective going forward:** decide 6a's approach (A recommended), then
+apply the straightforward fixes for 6b/6c - these three are lower-risk,
+more clearly "just fix it" changes than 6a, which has a genuine design
+tradeoff to settle first.

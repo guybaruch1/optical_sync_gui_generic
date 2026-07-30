@@ -9,6 +9,7 @@ hardware. This class exists only so that logic can run on a background
 thread and reach the UI safely.
 """
 
+import pyrealsense2 as rs
 from PySide6.QtCore import QThread, Signal
 
 from engine.acquisition_loop import AcquisitionLoop, AcquisitionCallbacks
@@ -93,8 +94,14 @@ class SessionEngineThread(QThread):
             # for both streams together. Mirrors gui/pages/roi_select_page.py's
             # _apply_camera_controls - duplicated here rather than imported since
             # this is hardware-thread code, not GUI code.
-            for sensor, _profiles in groups:
-                if self.camera_controls["emitter_enabled"] is not None:
+            for sensor, profiles in groups:
+                # See gui/pages/roi_select_page.py's _apply_camera_controls
+                # for why this gate exists - without it, a pure color+color
+                # (Dual RGB) pairing gets a spurious "not supported" warning
+                # every run, since the emitter checkbox defaults to checked
+                # regardless of whether either stream is actually infrared.
+                group_has_infrared = any(p.stream_type() == rs.stream.infrared for p in profiles)
+                if self.camera_controls["emitter_enabled"] is not None and group_has_infrared:
                     if not set_emitter_enabled(sensor, self.camera_controls["emitter_enabled"]):
                         self.error.emit(
                             "WARNING: emitter_enabled not supported on sensor - confirm the "

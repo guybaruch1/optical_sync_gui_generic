@@ -79,8 +79,17 @@ def _apply_camera_controls(groups, camera_controls):
     Returns a list of warning strings for any setting any sensor doesn't
     support, so the caller can surface them without silently proceeding."""
     warnings = []
-    for sensor, _profiles in groups:
-        if camera_controls["emitter_enabled"] is not None:
+    for sensor, profiles in groups:
+        # The "Disable IR emitter" checkbox is global (always shown/checked
+        # regardless of what's picked - see stream_config_page.py), but
+        # emitter control only makes sense for a group that actually
+        # includes an infrared stream. Without this gate, a pure
+        # color+color (Dual RGB) pairing would get a spurious "not
+        # supported" warning on every single run, since the checkbox
+        # defaults to checked but no sensor in the group supports emitter
+        # control at all.
+        group_has_infrared = any(p.stream_type() == rs.stream.infrared for p in profiles)
+        if camera_controls["emitter_enabled"] is not None and group_has_infrared:
             if not set_emitter_enabled(sensor, camera_controls["emitter_enabled"]):
                 warnings.append(
                     "WARNING: emitter_enabled not supported on sensor - confirm the "
