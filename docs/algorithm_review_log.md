@@ -23,7 +23,7 @@ commit/PR noted).
 
 ## Issue 1: Fixed brightness-sampling window vs. actual LED pixel spacing
 
-**Status:** open
+**Status:** fixed (implemented on `worktree-neighborhood-size-safety-cap`)
 
 **Where:** `domain/realsense_utils.py:14` (`sample_neighborhood_brightness`),
 `:24` (`sample_all_neighborhood_brightness`); consumed by
@@ -50,36 +50,69 @@ and `test.neighborhood_size` are two independently-edited keys, both
 defaulting to `5`, never checked against each other - same silent-
 divergence risk as the sibling project.
 
-**Candidate fixes (carried over from the sibling review, not yet chosen -
-still needs the same rig-specific input before narrowing):**
+**Decision: Option B chosen** (recompute on the fly, no `config.yaml`
+schema change) - resolution/ROI/stream-pairing vary per run by design in
+this project, ruling out a persisted one-time constant (Option A) or a
+warning-only approach (Option C, which wouldn't actually fix the live-
+session risk). Implemented without needing final answers to the rig-
+specific open questions below, since Option B adapts automatically to
+whatever real spacing a given run has - it doesn't need to know the
+specific panel layout/pitch in advance.
+
+**Candidate fixes (carried over from the sibling review):**
 - A. Measure typical LED pixel spacing during calibration (reusing/
   extracting `merge_close_centroids`'s nearest-neighbor-distance logic,
   `domain/realsense_utils.py:60-83`) and persist a derived safe window
   size into `config.yaml`, used by both calibration and live sampling.
-- B. Same measurement, but recomputed on the fly from the already-loaded
-  position arrays (`stream_a_xy`/`stream_b_xy` in `session_engine.py`, the
-  loaded `xy_positions` in `calibration.py`) both at calibration time and
-  at live session start, instead of persisting anything new - guarantees
-  calibration and live use an identical value by construction, no schema
-  change.
+- B. **(chosen)** Same measurement, but recomputed on the fly from the
+  already-loaded position arrays (`stream_a_xy`/`stream_b_xy` in
+  `session_engine.py`, the loaded `xy_positions` in `calibration.py`) both
+  at calibration time and at live session start, instead of persisting
+  anything new - guarantees calibration and live use an identical value by
+  construction, no schema change.
 - C. Leave sampling behavior untouched; add a calibration-time warning (in
   the same style as the existing low-contrast/row-layout-mismatch warnings
   in `gui/pages/calibration_page.py:163-180`) if the configured
   `neighborhood_size` could geometrically reach a neighboring LED, so a
   human notices and retunes `settings.yaml` by hand.
 
-**Open questions for the user (rig-specific, can't verify from code
-alone):**
+**Fix applied:** new `domain/realsense_utils.py` helper,
+`safe_neighborhood_size(xy_positions, configured_size, min_size=3,
+spacing_fraction=0.5)`, reuses the Issue-3-fix's already-extracted
+`_typical_spacing` helper to measure the real median nearest-neighbor LED
+distance for the given positions, then caps `configured_size` at
+`max(min_size, int(spacing * spacing_fraction))` - only ever shrinks the
+configured value, never grows it, and falls back to `configured_size`
+unchanged when there are fewer than two LEDs to measure a spacing from.
+`domain/calibration.py`'s `build_positions_with_thresholds` computes this
+once from `xy_positions` before sampling on/off frames.
+`engine/session_engine.py`'s `SessionEngineThread.__init__` computes it
+once each for `stream_a_xy`/`stream_b_xy` (not per-frame) and
+`_frame_pairs_with_brightness` uses the capped values instead of the raw
+configured `neighborhood_size`. `settings.yaml`'s
+`calibration.neighborhood_size`/`test.neighborhood_size` comments updated
+to document these are now upper bounds, not guaranteed actual values.
+
+**Verification:** full suite green (175 passed) after independent review
+of the diff. New tests in `tests/domain/test_realsense_utils.py` cover
+`safe_neighborhood_size`'s fallback (fewer than 2 points), no-op on wide
+spacing, capping on tight spacing, flooring at `min_size`, and never
+exceeding `configured_size` even with a higher `min_size`. A new test in
+`tests/domain/test_calibration.py` spies on
+`domain.calibration.sample_neighborhood_brightness` to confirm
+`build_positions_with_thresholds` actually passes the capped size to the
+real sampling calls, not just that the helper's own math is correct in
+isolation. `engine/session_engine.py` has no automated tests by design
+(hardware-thread code, per `CLAUDE.md`) - the `__init__`-time computation
+there is covered by manual/hardware verification only.
+
+**Open questions for the user (rig-specific, not needed to implement
+Option B, but still useful context for tuning `spacing_fraction`/`min_size`
+later if real runs show the margin is too tight or too loose):**
 - Typical ROI size in pixels and resolution actually used in practice on
   this project's rigs.
 - Physical panel layout (rows x columns for the configured `num_leds`) and
   LED pitch.
-- Whether this project's wider variety of stream pairings (IR/IR, IR/color,
-  color/color, potentially at different resolutions per stream on a Dual
-  RGB device) means the two streams in a pair can end up at *different*
-  real pixel spacings more often than the sibling project's fixed IR-vs-RGB
-  case - which would push further towards Option B (recomputed per-stream)
-  over a single shared constant.
 - Whether a real `config.yaml` from an actual calibration run on this
   project has been inspected for today's actual nearest-neighbor spacing
   (not yet done here, unlike the sibling review which had a real D435I
