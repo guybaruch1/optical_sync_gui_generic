@@ -14,6 +14,7 @@ from domain.realsense_utils import (
     DECODERS,
     _typical_spacing,
     _debug_circle_radius,
+    safe_neighborhood_size,
 )
 
 
@@ -113,6 +114,39 @@ def test_debug_circle_radius_floors_at_2_for_very_tight_spacing():
     # 3px apart -> spacing * 0.3 < 1, floored at 2 so the circle never
     # vanishes entirely.
     assert _debug_circle_radius([(20.0, 25.0), (23.0, 25.0)]) == 2
+
+
+def test_safe_neighborhood_size_falls_back_to_configured_below_two_points():
+    # Can't measure a spacing from fewer than two LEDs - trust the
+    # configured value unchanged (matches _debug_circle_radius's same
+    # fewer-than-two-points fallback).
+    assert safe_neighborhood_size([(25.0, 25.0)], configured_size=5) == 5
+
+
+def test_safe_neighborhood_size_leaves_configured_value_unchanged_for_wide_spacing():
+    # LEDs 40px apart -> spacing * 0.5 = 20, well above the configured 5,
+    # so the configured value is never grown, only ever shrunk.
+    assert safe_neighborhood_size([(10.0, 10.0), (50.0, 10.0)], configured_size=5) == 5
+
+
+def test_safe_neighborhood_size_caps_at_safe_fraction_of_tight_spacing():
+    # LEDs 6px apart -> spacing * 0.5 = 3, tighter than the configured 5,
+    # so the window shrinks to stay safe.
+    assert safe_neighborhood_size([(10.0, 10.0), (16.0, 10.0)], configured_size=5) == 3
+
+
+def test_safe_neighborhood_size_floors_at_min_size_for_very_tight_spacing():
+    # LEDs 2px apart -> spacing * 0.5 = 1, floored at the default min_size=3
+    # so the window never shrinks to something too small to average at all.
+    assert safe_neighborhood_size([(10.0, 10.0), (12.0, 10.0)], configured_size=5) == 3
+
+
+def test_safe_neighborhood_size_never_exceeds_configured_even_if_min_size_is_higher():
+    # A custom min_size higher than the configured value must still never
+    # grow the result past what was actually configured.
+    assert safe_neighborhood_size(
+        [(10.0, 10.0), (12.0, 10.0)], configured_size=2, min_size=3,
+    ) == 2
 
 
 def test_detect_led_centroids_finds_bright_blob():

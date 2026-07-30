@@ -8,7 +8,7 @@ keeps only the pure computation, not the camera/LED-panel orchestration.
 
 import yaml
 
-from domain.realsense_utils import sample_neighborhood_brightness
+from domain.realsense_utils import sample_neighborhood_brightness, safe_neighborhood_size
 
 
 def assign_grid_ids(centroids, row_gap_px=15):
@@ -35,10 +35,15 @@ def assign_grid_ids(centroids, row_gap_px=15):
 
 
 def build_positions_with_thresholds(xy_positions, on_frame, off_frame, neighborhood_size):
+    # Caps neighborhood_size at what's actually safe for THIS run's real
+    # measured LED pixel spacing (see safe_neighborhood_size's docstring) -
+    # a fixed configured window can otherwise bleed into a neighboring LED's
+    # pixels at tight spacing, corrupting that LED's on/off threshold.
+    safe_size = safe_neighborhood_size(list(xy_positions.values()), neighborhood_size)
     result = {}
     for led_id, (x, y) in xy_positions.items():
-        on_value = sample_neighborhood_brightness(on_frame, x, y, neighborhood_size)
-        off_value = sample_neighborhood_brightness(off_frame, x, y, neighborhood_size)
+        on_value = sample_neighborhood_brightness(on_frame, x, y, safe_size)
+        off_value = sample_neighborhood_brightness(off_frame, x, y, safe_size)
         threshold = off_value + 0.5 * (on_value - off_value)
         result[led_id] = [x, y, round(on_value, 2), round(off_value, 2), round(threshold, 2)]
     return result

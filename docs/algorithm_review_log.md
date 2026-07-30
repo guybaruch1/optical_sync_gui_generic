@@ -611,13 +611,21 @@ case) naming which side is empty and that this camera's curated entries
 didn't match anything the connected device reports, instead of silently
 switching to an unusable Stream Config page.
 
-**Verification:** confirmed all three directly against current `main` (not
-just the review agent's report) by reading `gui/pages/stream_config_page.py`,
-`gui/main_window.py`, and `engine/streams.py` as they currently stand. Full
-suite still green (169 passed on `main` as of this writing) - none of these
-are caught by any existing test.
+**Fix applied (6c):** exactly the candidate fix - after filtering,
+`_on_device_chosen` now checks whether either resulting list is empty and,
+if so, shows a `QMessageBox.critical` naming which side(s) came up empty
+and that the camera's curated entries didn't match anything the connected
+device reports, instead of silently switching to an unusable Stream Config
+page.
 
-**Objective going forward:** decide 6a's approach (A recommended), then
-apply the straightforward fixes for 6b/6c - these three are lower-risk,
-more clearly "just fix it" changes than 6a, which has a genuine design
-tradeoff to settle first.
+**Verification:** all three fixes implemented on
+`worktree-fix-issue6-stream-config-gaps`. New test coverage added where
+none existed before: `tests/gui/test_main_window.py` (new file) covers
+6b (malformed `stream_type`/missing key both surface the friendly error,
+not a crash) and 6c (an empty-intersection side surfaces the friendly
+error, naming only the actually-empty side; a fully-matching camera still
+succeeds and populates both combos); `tests/gui/pages/test_roi_select_page.py`
+(new file, `_apply_camera_controls` had zero prior coverage) covers 6a -
+a color-only group no longer attempts/warns about emitter control, an
+infrared group still does, and a mixed multi-group call gates each group
+independently. Full suite green (180 passed).

@@ -40,6 +40,30 @@ def test_build_positions_with_thresholds_computes_midpoint():
     assert threshold == 150.0
 
 
+def test_build_positions_with_thresholds_caps_window_at_safe_size_for_tight_spacing(monkeypatch):
+    # Regression test for Issue 1 (docs/algorithm_review_log.md): a fixed
+    # configured neighborhood_size, unrelated to real LED pixel spacing,
+    # risks bleeding into a neighboring LED's pixels. Confirms the actual
+    # sampling calls receive the capped safe size, not the raw configured
+    # value, when two LEDs are only 6px apart (safe_neighborhood_size(6px
+    # spacing, configured=5) -> 3, per its own directly-tested math).
+    calls = []
+
+    def spy_sample(image, x, y, size):
+        calls.append(size)
+        return 150.0
+
+    monkeypatch.setattr("domain.calibration.sample_neighborhood_brightness", spy_sample)
+
+    on_frame = np.full((20, 20), 200, dtype=np.uint8)
+    off_frame = np.full((20, 20), 100, dtype=np.uint8)
+    xy_positions = {"0": (10.0, 10.0), "1": (16.0, 10.0)}  # 6px apart
+
+    build_positions_with_thresholds(xy_positions, on_frame, off_frame, neighborhood_size=5)
+
+    assert calls == [3, 3, 3, 3]  # on+off for each of 2 LEDs, all capped to 3, not the configured 5
+
+
 def test_update_config_leds_writes_per_stream_slugs(tmp_path):
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.safe_dump({"leds": {"Other Camera": {"color": {}}}}))
