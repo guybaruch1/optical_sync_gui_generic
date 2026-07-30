@@ -13,10 +13,13 @@ sync test with a real-time video feed and graphs.
 
 - **Device selection** — lists every connected RealSense device (no
   Stereo-Module/RGB-Camera requirement — `engine.streams.list_devices` has
-  no PID/sensor restriction). For D535/D585-family devices running in
-  "Dedicated RGB" mode, automatically switches the device to "Dual RGB"
-  mode before proceeding, with no confirmation prompt (devices that aren't
-  a recognized D535/D585 variant skip this step entirely).
+  no PID/sensor restriction). For D535/D585-family devices, a "RGB Mode"
+  choice (Dual RGB / Dedicated RGB radio buttons) appears, defaulted to
+  whatever mode the device is actually in right now - picking the other
+  mode and clicking **Next** switches it (a few seconds, device
+  re-enumerates); leaving it as-is or picking the current mode is a no-op.
+  Devices that aren't a recognized D535/D585 variant never show this
+  choice at all.
 - **Stream configuration** — a **Test** picker listing the named tests
   configured for the connected camera model in `settings.yaml`'s
   `camera.stream_options` (e.g. "IR1 vs IR2 sync", "IR vs RGB sync" - each
@@ -93,9 +96,9 @@ design — see [Project structure](#project-structure)).
 The window opens maximized. Walk through the wizard:
 
 1. **Device Select** — pick your connected RealSense device. If it's a
-   D535/D585-family device currently in "Dedicated RGB" mode, it will
-   automatically be switched to "Dual RGB" mode before continuing (no
-   confirmation prompt).
+   D535/D585-family device, an "RGB Mode" choice appears (Dual RGB (2C) /
+   Dedicated RGB (3C)), defaulted to its current mode - pick the other one
+   before clicking **Next** to switch it (takes a few seconds).
 2. **Stream Config** — pick a named test (defined per camera model in
    `settings.yaml`'s `camera.stream_options`) and a sensor-options
    resolution/fps/format pairing for it, and set the global camera controls
