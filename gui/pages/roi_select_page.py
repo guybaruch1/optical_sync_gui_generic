@@ -45,10 +45,9 @@ _STREAM_TYPE_LABELS = {
 
 def stream_label(pick):
     """Human-readable label for a stream pick, e.g. "Infrared 1" / "Color 2"
-    - mirrors gui/pages/stream_config_page.py's _stream_option_label naming
-    so the same pick reads the same way across both pages, just without the
-    resolution/fps/format suffix that page's combo entries need but a
-    cv2.selectROI window title doesn't."""
+    - a cv2.selectROI window title doesn't need the resolution/fps/format
+    detail gui/pages/stream_config_page.py's sensor-options combo entries
+    show, just which physical stream this is."""
     stream_type = pick["stream_type"]
     type_label = _STREAM_TYPE_LABELS.get(stream_type, stream_type.name.capitalize())
     return "{} {}".format(type_label, pick["stream_index"])

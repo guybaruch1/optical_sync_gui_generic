@@ -25,7 +25,7 @@ from gui.pages.live_session_page import LiveSessionPage
 from state.gui_state import GuiState, save_gui_state
 from engine.streams import (
     list_video_stream_options, stream_slug,
-    parse_stream_options_config, filter_options_by_curated_list,
+    parse_camera_tests_config, resolve_camera_tests,
 )
 from domain.calibration import load_led_positions
 from settings import ensure_output_dir
@@ -75,43 +75,44 @@ class MainWindow(QMainWindow):
         self._device_name = name
         save_gui_state(self.gui_state)
         camera_settings = self.settings["camera"]
-        per_camera_options = camera_settings.get("stream_options", {}).get(name)
-        if per_camera_options is None:
+        raw_tests = camera_settings.get("stream_options", {}).get(name)
+        if not raw_tests:
             QMessageBox.critical(
                 self, "No Stream Select options configured",
                 "settings.yaml's camera.stream_options has no entry for camera {!r} - add one "
-                "with its own stream_a/stream_b curated lists before using Stream Select with "
-                "this camera.".format(name),
+                "with its own named tests before using Stream Select with this camera.".format(name),
             )
             return
         try:
-            curated_a = parse_stream_options_config(per_camera_options["stream_a"])
-            curated_b = parse_stream_options_config(per_camera_options["stream_b"])
+            parsed_tests = parse_camera_tests_config(raw_tests)
         except (KeyError, ValueError) as exc:
             QMessageBox.critical(
                 self, "Invalid Stream Select configuration",
                 "settings.yaml's camera.stream_options entry for camera {!r} is invalid "
-                "({}: {}) - fix its stream_a/stream_b entries before using Stream Select "
-                "with this camera.".format(name, type(exc).__name__, exc),
+                "({}: {}) - fix its test entries before using Stream Select with this "
+                "camera.".format(name, type(exc).__name__, exc),
             )
             return
 
-        stream_options = list_video_stream_options(self.ctx, serial)
-        options_a = filter_options_by_curated_list(stream_options, curated_a)
-        options_b = filter_options_by_curated_list(stream_options, curated_b)
-        empty_sides = [label for label, options in (("Stream A", options_a), ("Stream B", options_b)) if not options]
-        if empty_sides:
+        device_options = list_video_stream_options(self.ctx, serial)
+        resolved_tests = resolve_camera_tests(device_options, parsed_tests)
+        # Tests with no sensor_options entry matching what this specific
+        # device/firmware reports are dropped rather than shown - see
+        # engine.streams.resolve_camera_tests's docstring.
+        usable_tests = [t for t in resolved_tests if t["options"]]
+        if not usable_tests:
             QMessageBox.critical(
                 self, "No matching Stream Select options",
-                "None of camera {!r}'s curated {} entries in settings.yaml's camera.stream_options "
-                "matched anything this connected device actually reports - check those entries "
-                "against what this specific device/firmware supports.".format(name, " and ".join(empty_sides)),
+                "None of camera {!r}'s configured tests in settings.yaml's camera.stream_options "
+                "matched anything this connected device actually reports - check those tests' "
+                "sensor_options against what this specific device/firmware supports.".format(name),
             )
             return
 
         self.stream_config_page.populate(
-            self.ctx, serial, options_a, options_b,
+            self.ctx, serial, usable_tests,
             preferred_a=camera_settings["stream_a"], preferred_b=camera_settings["stream_b"],
+            preferred_test_name=self.gui_state.last_test_name,
         )
         self.stack.setCurrentWidget(self.stream_config_page)
 
@@ -120,6 +121,13 @@ class MainWindow(QMainWindow):
         self._pick_a = pick_a
         self._pick_b = pick_b
         self._camera_controls = camera_controls
+
+        # config_chosen's payload stays (pick_a, pick_b, camera_controls) -
+        # ROI Select/Calibration/Live Session downstream never need to know
+        # a "test" concept exists at all. Only this prefill-persistence spot
+        # cares which named test produced this pick, so it's read directly
+        # off the still-current page rather than added to the signal payload.
+        self.gui_state.last_test_name = self.stream_config_page.current_test_name
 
         # camera_controls is now ONE global control set (applied to both
         # streams together, see gui.pages.roi_select_page._apply_camera_

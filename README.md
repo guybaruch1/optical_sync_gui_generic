@@ -5,9 +5,9 @@ streams a connected Intel RealSense camera offers - two IR streams, IR+RGB,
 or two color streams on a Dual-RGB device - against an Image Engineering
 LED panel. It replaces three separate command-line scripts (ROI picker, LED
 calibration, pipeline sync test) with one guided wizard: pick your device,
-pick two streams ("Stream A"/"Stream B") and their camera controls, draw
-the ROI on each, calibrate the LED panel, then run a live sync test with a
-real-time video feed and graphs.
+pick a named test (e.g. "IR1 vs IR2 sync", "IR vs RGB sync") and camera
+controls, draw the ROI on each, calibrate the LED panel, then run a live
+sync test with a real-time video feed and graphs.
 
 ## Features
 
@@ -17,18 +17,20 @@ real-time video feed and graphs.
   "Dedicated RGB" mode, automatically switches the device to "Dual RGB"
   mode before proceeding, with no confirmation prompt (devices that aren't
   a recognized D535/D585 variant skip this step entirely).
-- **Stream configuration** — two independent pickers, Stream A and Stream
-  B, each listing every fully-specified stream option the device actually
-  reports (any infrared or color stream, any resolution/fps/format) as one
-  combo entry (e.g. "Infrared 1 - 1280x720@30fps (y8)"). Below the pickers,
-  one "Camera Controls" group per distinct physical sensor the two picks
-  resolve to (one group if both picks share a sensor, e.g. two color
-  streams on a Dual RGB device; two groups otherwise): an IR-emitter-disable
-  checkbox (only shown if that group includes an infrared stream) and an
-  auto/manual exposure+gain choice. A **live pairing-quality preview**
-  follows: a bundle counter, per-stream HW frame number, HW timestamps, and
-  their delta are burned onto Stream A's video and printed to the console,
-  so you can sanity check pairing before committing to a combo.
+- **Stream configuration** — a **Test** picker listing the named tests
+  configured for the connected camera model in `settings.yaml`'s
+  `camera.stream_options` (e.g. "IR1 vs IR2 sync", "IR vs RGB sync" - each
+  test fixes which two physical streams it compares), and a **Sensor
+  Options** picker for a resolution/fps/format pairing under that test
+  (e.g. "1280x720 @ 30fps (y8)"), intersected with whatever the connected
+  device actually reports. Below the pickers, ONE global "Camera Controls"
+  group applied to both streams together regardless of how they resolve to
+  physical sensors at capture time: an IR-emitter-disable checkbox (a no-op
+  with a surfaced warning if neither stream is infrared) and an auto/manual
+  exposure+gain choice. A **live pairing-quality preview** follows: a bundle
+  counter, per-stream HW frame number, HW timestamps, and their delta are
+  burned onto Stream A's video and printed to the console, so you can sanity
+  check pairing before committing to a combo.
 - **ROI selection** — capture one frame with all LEDs lit, then drag a box
   on each stream via a native OpenCV popup window.
 - **LED calibration** — detects every LED's pixel position and per-LED
@@ -94,11 +96,12 @@ The window opens maximized. Walk through the wizard:
    D535/D585-family device currently in "Dedicated RGB" mode, it will
    automatically be switched to "Dual RGB" mode before continuing (no
    confirmation prompt).
-2. **Stream Config** — pick Stream A and Stream B independently from every
-   stream the device reports, and set each resolved sensor's camera
-   controls (IR emitter disable, auto/manual exposure+gain). Optionally
-   click **Start Preview** to check pairing quality live before clicking
-   **Next** (this stops the preview automatically).
+2. **Stream Config** — pick a named test (defined per camera model in
+   `settings.yaml`'s `camera.stream_options`) and a sensor-options
+   resolution/fps/format pairing for it, and set the global camera controls
+   (IR emitter disable, auto/manual exposure+gain). Optionally click
+   **Start Preview** to check pairing quality live before clicking **Next**
+   (this stops the preview automatically).
 3. **ROI Select** — click **Capture & Select ROI**; a popup shows a frame
    with all LEDs lit. Drag a box around the panel on Stream A's window,
    press Enter, then repeat for Stream B's window.

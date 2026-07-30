@@ -1,23 +1,20 @@
-"""Wizard step 2: pick any two streams the connected device offers (IR, RGB,
-or two of the same type sharing one sensor), configure ONE global set of
-camera controls (IR emitter, auto/manual exposure+gain) applied to both
-streams together, and preview live pairing quality (bundle/frame-number/
-timestamp/delta overlay, plus matching console logging) for the currently
-selected pair before committing to it.
+"""Wizard step 2: pick a named test (e.g. "IR1 vs IR2 sync", "IR vs RGB
+sync" - settings.yaml's camera.stream_options, per connected camera model)
+and a resolution/fps/format "sensor options" pairing for it, configure ONE
+global set of camera controls (IR emitter, auto/manual exposure+gain)
+applied to both streams together, and preview live pairing quality
+(bundle/frame-number/timestamp/delta overlay, plus matching console
+logging) for the currently selected pair before committing to it.
 
-Generalized from the old hardcoded IR-combo/RGB-combo pair: engine.streams.
-list_video_stream_options already returns fully-specified stream options -
-sensor_index/stream_type/stream_index/format/width/height/fps all bundled
-into one dict per profile - so a SINGLE combo per side, listing every
-fully-specified option as one label (e.g. "Infrared 1 - 1280x720@30fps
-(y8)"), is enough. A second resolution/fps combo per side would only be
-useful if stream *identity* (stream_type/stream_index) and stream
-*resolution/fps* needed independent narrowing - they don't here, since
-picking a different resolution/fps for the same stream identity is just
-picking a different entry in the same combo. Two combos per side would add
-a layer of "first narrow identity, then narrow resolution" indirection for
-no real benefit given the option list is already small and curated (see
-settings.yaml's camera.stream_options).
+Generalized from the old two-independent-combo version (separate "Stream
+A"/"Stream B" pickers): a test's two streams are a FIXED identity
+(stream_type/stream_index never changes across sensor options) chosen by
+settings.yaml, not independently narrowed by the operator - so there's
+exactly one remaining choice, which resolution/fps/format pairing to run
+that test at. This also removes the old collision-avoidance problem
+entirely ("Stream A" and "Stream B" landing on the same stream): a test's
+two streams differ by construction (engine.streams.resolve_camera_tests
+only ever pairs a test's own distinct stream_a_identity/stream_b_identity).
 
 Camera controls are ONE global block regardless of how Stream A/B resolve
 to physical sensors at capture time (engine.streams.resolve_and_group can
@@ -33,34 +30,42 @@ from PySide6.QtWidgets import (
     QGroupBox, QCheckBox, QRadioButton, QButtonGroup, QSpinBox,
 )
 
-from engine.streams import list_video_stream_options
 from engine.stream_preview_thread import StreamPreviewThread
 from gui.widgets.video_panel import VideoPanel
 
 
-_STREAM_TYPE_LABELS = {
-    "infrared": "Infrared",
-    "color": "Color",
-}
+_STREAM_TYPE_SHORT_LABELS = {"infrared": "IR", "color": "RGB"}
 
 
-def _stream_option_label(option):
-    """Formats one list_video_stream_options() entry as a combo-box label,
-    e.g. "Infrared 1 - 1280x720@30fps (y8)" / "Color 1 - 1280x720@30fps
-    (bgr8)". stream_index is ALWAYS appended, for both infrared and color:
-    a Dual RGB device (or any device exposing two color stream indices on
-    one sensor) can otherwise produce two options that are identical in
-    every other field (same sensor, same resolution/fps/format), which
-    would render as two visually indistinguishable combo entries - the
-    operator would have no way to tell which one they were picking for
-    Stream A vs Stream B. Always including stream_index keeps every label
-    unique regardless of how many streams of a given type the device
-    exposes."""
-    stream_type = option["stream_type"]
-    type_label = _STREAM_TYPE_LABELS.get(stream_type.name, stream_type.name.capitalize())
-    type_label = "{} {}".format(type_label, option["stream_index"])
-    return "{} - {}x{}@{}fps ({})".format(
-        type_label, option["width"], option["height"], option["fps"], option["format"].name,
+def _side_short_label(pick):
+    return _STREAM_TYPE_SHORT_LABELS.get(pick["stream_type"].name, pick["stream_type"].name.capitalize())
+
+
+def _full_side_desc(pick):
+    return "{}x{}@{}fps ({}, {})".format(
+        pick["width"], pick["height"], pick["fps"], _side_short_label(pick), pick["format"].name,
+    )
+
+
+def _sensor_option_label(option):
+    """Formats one engine.streams.resolve_camera_tests sensor-options entry
+    ({"pick_a", "pick_b"}) as a combo-box label. When both sides share
+    resolution/fps (the common case), shown once - e.g. "1280x720 @ 30fps
+    (y8)" if the formats also match, or "1280x720 @ 30fps (IR: y8, RGB:
+    bgr8)" if only the formats differ. Falls back to describing both sides
+    in full (e.g. for a device where the two streams' max resolutions
+    genuinely differ) if resolution/fps themselves differ between sides."""
+    pick_a, pick_b = option["pick_a"], option["pick_b"]
+    same_res_fps = (
+        (pick_a["width"], pick_a["height"], pick_a["fps"]) == (pick_b["width"], pick_b["height"], pick_b["fps"])
+    )
+    if not same_res_fps:
+        return "{} vs {}".format(_full_side_desc(pick_a), _full_side_desc(pick_b))
+    res_fps = "{}x{} @ {}fps".format(pick_a["width"], pick_a["height"], pick_a["fps"])
+    if pick_a["format"] == pick_b["format"]:
+        return "{} ({})".format(res_fps, pick_a["format"].name)
+    return "{} ({}: {}, {}: {})".format(
+        res_fps, _side_short_label(pick_a), pick_a["format"].name, _side_short_label(pick_b), pick_b["format"].name,
     )
 
 
@@ -72,16 +77,19 @@ class StreamConfigPage(QWidget):
         self.ctx = None
         self.device_serial = None
         self.preview_thread = None
-        self._stream_options_a = []
-        self._stream_options_b = []
+        self._tests = []
+        self._preferred_a = None
+        self._preferred_b = None
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
-        self.combo_a = QComboBox()
-        self.combo_b = QComboBox()
-        form.addRow(QLabel("Stream A:"), self.combo_a)
-        form.addRow(QLabel("Stream B:"), self.combo_b)
+        self.combo_test = QComboBox()
+        self.combo_sensor_options = QComboBox()
+        form.addRow(QLabel("Test:"), self.combo_test)
+        form.addRow(QLabel("Sensor Options:"), self.combo_sensor_options)
         layout.addLayout(form)
+
+        self.combo_test.currentIndexChanged.connect(self._on_test_changed)
 
         self._camera_controls = self._build_camera_control_group()
         layout.addWidget(self._camera_controls["group_box"])
@@ -109,86 +117,90 @@ class StreamConfigPage(QWidget):
     @property
     def pick_a(self):
         """The currently-selected Stream A option dict (or None before a
-        selection exists), always read live from the combo rather than
-        cached - so it can never drift out of sync with what the operator
-        actually has selected right now. Part of this page's documented
-        produced interface (alongside populate()/config_chosen) - Task 18's
-        gui/main_window.py rewiring reads this to get the live picks
-        without needing to reach into combo_a/combo_b directly."""
-        return self.combo_a.currentData()
+        selection exists), always read live from the sensor-options combo
+        rather than cached - so it can never drift out of sync with what
+        the operator actually has selected right now. Part of this page's
+        documented produced interface (alongside populate()/config_chosen) -
+        gui/main_window.py reads this to get the live picks without needing
+        to reach into the combos directly."""
+        option = self.combo_sensor_options.currentData()
+        return option["pick_a"] if option is not None else None
 
     @property
     def pick_b(self):
         """The currently-selected Stream B option dict (or None). See
         pick_a's docstring."""
-        return self.combo_b.currentData()
+        option = self.combo_sensor_options.currentData()
+        return option["pick_b"] if option is not None else None
 
-    def populate(self, ctx, device_serial, stream_options_a, stream_options_b, preferred_a=None, preferred_b=None):
-        """stream_options_a/stream_options_b are each already filtered to
-        their own curated allowlist (settings.yaml's camera.stream_a_options/
-        stream_b_options via engine.streams.filter_options_by_curated_list) -
-        Stream A and Stream B intentionally have INDEPENDENT candidate lists,
-        not one shared list both dropdowns pick from, so each side can be
-        curated separately (e.g. Stream A limited to infrared entries, Stream
-        B to color entries). Order is whatever the caller already resolved
-        (the curated list's own order) - not re-sorted here.
+    @property
+    def current_test_name(self):
+        """The currently-selected test's name (or None before a selection
+        exists) - read by gui/main_window.py to persist as GuiState's
+        last_test_name prefill hint, since config_chosen's own emitted
+        payload stays (pick_a, pick_b, camera_controls) with no "test"
+        concept in it at all - ROI Select/Calibration/Live Session
+        downstream never need to know tests exist."""
+        return self.combo_test.currentData()
 
-        preferred_a/preferred_b are optional partial-match dicts (e.g.
+    def populate(self, ctx, device_serial, tests, preferred_a=None, preferred_b=None, preferred_test_name=None):
+        """`tests` is engine.streams.resolve_camera_tests's output, already
+        filtered by gui/main_window.py to tests with at least one
+        sensor_options entry matching this connected device - each entry is
+        {"test_name": str, "options": [{"pick_a", "pick_b"}, ...]}.
+
+        preferred_test_name pre-selects that test if present in `tests`
+        (GuiState's last-used test name); otherwise the first test in the
+        list is used. preferred_a is an optional partial-match dict (e.g.
         {"width": 1280, "height": 720, "fps": 30} from settings.yaml's
-        camera.stream_a/stream_b) - the first option matching every key
-        given is pre-selected in the combo instead of leaving it at
-        whatever comes first; the user can still pick something else if it
-        doesn't suit this rig/camera."""
+        camera.stream_a) - the first sensor-options entry whose `pick_a`
+        matches every key given is pre-selected within whichever test ends
+        up selected; the user can still pick something else if it doesn't
+        suit this rig/camera. preferred_b is accepted for interface
+        symmetry with the old two-combo version but not currently used for
+        preselection (only pick_a is matched, same as this project's other
+        preselection logic)."""
         self.ctx = ctx
         self.device_serial = device_serial
-        self._stream_options_a = list(stream_options_a)
-        self._stream_options_b = list(stream_options_b)
+        self._tests = list(tests)
+        self._preferred_a = preferred_a
+        self._preferred_b = preferred_b
 
-        for combo, options, preferred in (
-            (self.combo_a, self._stream_options_a, preferred_a),
-            (self.combo_b, self._stream_options_b, preferred_b),
-        ):
-            combo.blockSignals(True)
-            combo.clear()
-            for option in options:
-                combo.addItem(_stream_option_label(option), userData=option)
-            combo.blockSignals(False)
-            self._preselect(combo, preferred)
+        self.combo_test.blockSignals(True)
+        self.combo_test.clear()
+        for test in self._tests:
+            self.combo_test.addItem(test["test_name"], userData=test["test_name"])
 
-        self._avoid_collision(self.combo_a, self.combo_b)
+        test_index = 0
+        if preferred_test_name is not None:
+            found = self.combo_test.findData(preferred_test_name)
+            if found != -1:
+                test_index = found
+        if self.combo_test.count():
+            self.combo_test.setCurrentIndex(test_index)
+        self.combo_test.blockSignals(False)
 
-    def _preselect(self, combo, preferred):
-        if not preferred:
+        self._populate_sensor_options(test_index)
+
+    def _on_test_changed(self, index):
+        self._populate_sensor_options(index)
+
+    def _populate_sensor_options(self, test_index):
+        self.combo_sensor_options.blockSignals(True)
+        self.combo_sensor_options.clear()
+        if 0 <= test_index < len(self._tests):
+            for option in self._tests[test_index]["options"]:
+                self.combo_sensor_options.addItem(_sensor_option_label(option), userData=option)
+        self.combo_sensor_options.blockSignals(False)
+        self._preselect_sensor_options()
+
+    def _preselect_sensor_options(self):
+        if not self._preferred_a:
             return
-        for index in range(combo.count()):
-            option = combo.itemData(index)
-            if all(option.get(key) == value for key, value in preferred.items()):
-                combo.setCurrentIndex(index)
-                return
-
-    def _avoid_collision(self, combo_a, combo_b):
-        """Called once after both combos have been preselected: if they
-        landed on the exact same (stream_type, stream_index) - which
-        happens whenever preferred_a/preferred_b match the same single
-        option, e.g. settings.yaml's stream_a/stream_b defaults being
-        identical dicts on first launch - advance combo_b to the first
-        OTHER option that differs from combo_a's current selection, so the
-        wizard never opens on an unusable "Stream A == Stream B" state. If
-        every available option is the same stream (a single-stream device),
-        leave combo_b where it is; the explicit guards in
-        _on_next_clicked/_on_start_preview_clicked and engine.streams.
-        resolve_and_group's own check still catch that before anything bad
-        happens."""
-        option_a = combo_a.currentData()
-        option_b = combo_b.currentData()
-        if option_a is None or option_b is None:
-            return
-        if (option_a["stream_type"], option_a["stream_index"]) != (option_b["stream_type"], option_b["stream_index"]):
-            return
-        for index in range(combo_b.count()):
-            option = combo_b.itemData(index)
-            if (option["stream_type"], option["stream_index"]) != (option_a["stream_type"], option_a["stream_index"]):
-                combo_b.setCurrentIndex(index)
+        for index in range(self.combo_sensor_options.count()):
+            option = self.combo_sensor_options.itemData(index)
+            if all(option["pick_a"].get(key) == value for key, value in self._preferred_a.items()):
+                self.combo_sensor_options.setCurrentIndex(index)
                 return
 
     def _build_camera_control_group(self):
@@ -263,14 +275,23 @@ class StreamConfigPage(QWidget):
             "gain": None if auto_exposure else w["gain_spin"].value(),
         }
 
+    def _streams_are_identical(self, pick_a, pick_b):
+        return pick_a["stream_type"] == pick_b["stream_type"] and pick_a["stream_index"] == pick_b["stream_index"]
+
     def _on_start_preview_clicked(self):
         pick_a = self.pick_a
         pick_b = self.pick_b
         if pick_a is None or pick_b is None:
             return
-        if pick_a["stream_type"] == pick_b["stream_type"] and pick_a["stream_index"] == pick_b["stream_index"]:
+        if self._streams_are_identical(pick_a, pick_b):
+            # Defense-in-depth only: a well-formed settings.yaml test always
+            # has distinct stream_a_identity/stream_b_identity, but a
+            # misconfigured one could accidentally define the same stream
+            # twice - engine.streams.resolve_and_group would raise on this
+            # too, catch it here first with a clearer message.
             self.status_label.setText(
-                "Stream A and Stream B must be different streams - pick two different combo entries."
+                "This test's Stream A and Stream B are the same physical stream - fix its "
+                "settings.yaml entry."
             )
             return
 
@@ -282,8 +303,8 @@ class StreamConfigPage(QWidget):
 
         self.start_preview_button.setEnabled(False)
         self.stop_preview_button.setEnabled(True)
-        self.combo_a.setEnabled(False)
-        self.combo_b.setEnabled(False)
+        self.combo_test.setEnabled(False)
+        self.combo_sensor_options.setEnabled(False)
 
     def _on_stop_preview_clicked(self):
         self._stop_preview()
@@ -295,8 +316,8 @@ class StreamConfigPage(QWidget):
             self.preview_thread = None
         self.start_preview_button.setEnabled(True)
         self.stop_preview_button.setEnabled(False)
-        self.combo_a.setEnabled(True)
-        self.combo_b.setEnabled(True)
+        self.combo_test.setEnabled(True)
+        self.combo_sensor_options.setEnabled(True)
 
     def _on_preview_error(self, message):
         self.status_label.setText("Error: {}".format(message))
@@ -307,9 +328,10 @@ class StreamConfigPage(QWidget):
         pick_b = self.pick_b
         if pick_a is None or pick_b is None:
             return
-        if pick_a["stream_type"] == pick_b["stream_type"] and pick_a["stream_index"] == pick_b["stream_index"]:
+        if self._streams_are_identical(pick_a, pick_b):
             self.status_label.setText(
-                "Stream A and Stream B must be different streams - pick two different combo entries."
+                "This test's Stream A and Stream B are the same physical stream - fix its "
+                "settings.yaml entry."
             )
             return
         self._stop_preview()

@@ -7,32 +7,46 @@
 # are safe to rely on.
 
 camera:
-  # Per-camera-model curated allowlists for the Stream Select picker, keyed
-  # by the EXACT connected device name (rs.camera_info.name, shown as-is on
-  # Device Select - e.g. "Intel RealSense D455") - different camera models
-  # support genuinely different sensors/resolutions, so one shared list
-  # can't fit every rig. Each camera's stream_a/stream_b list is intersected
-  # with whatever THAT specific connected device actually reports before
-  # populating Stream Select's two dropdowns - a hand-curated allowlist per
-  # side, not the raw device enumeration. Some devices advertise the same
-  # real stream at a given resolution/fps in many redundant pixel formats
-  # (e.g. an infrared stream reported as y8 AND uyvy/bgr8/rgb8/bgra8/rgba8,
-  # which are just software reinterpretations of the same monochrome data)
-  # - left unfiltered, that floods the dropdown with near-identical entries
-  # and buries the options that actually differ.
+  # Per-camera-model named tests for the Stream Select picker, keyed by the
+  # EXACT connected device name (rs.camera_info.name, shown as-is on Device
+  # Select - e.g. "Intel RealSense D455") - different camera models support
+  # genuinely different sensors/resolutions, so one shared list can't fit
+  # every rig. Each camera has a LIST of named tests (e.g. "IR1 vs IR2
+  # sync") - the operator picks a test first (which fixes WHICH two
+  # physical streams are being compared, via stream_a_identity/
+  # stream_b_identity: stream_type + stream_index, never changing across
+  # sensor options), then a "sensor options" entry for it (a resolution/
+  # fps/format pairing for both sides together). Each sensor_options entry
+  # is intersected with whatever THAT specific connected device actually
+  # reports before showing up in the picker - a hand-curated allowlist, not
+  # the raw device enumeration. Some devices advertise the same real stream
+  # at a given resolution/fps in many redundant pixel formats (e.g. an
+  # infrared stream reported as y8 AND uyvy/bgr8/rgb8/bgra8/rgba8, which are
+  # just software reinterpretations of the same monochrome data) - left
+  # unfiltered, that floods the dropdown with near-identical entries and
+  # buries the options that actually differ.
   #
   # stream_type is "infrared" or "color", format is any pixel format
   # domain/realsense_utils.py's DECODERS can decode (e.g. y8, bgr8, rgb8,
-  # bgra8, rgba8, yuyv, uyvy, mjpeg). Order here is the order shown in each
-  # dropdown. Connecting a camera model with no entry here shows an error
-  # asking you to add one - copy the block below as a starting template.
+  # bgra8, rgba8, yuyv, uyvy, mjpeg). A test with no sensor_options entry
+  # matching what the connected device actually reports is simply not
+  # offered. Connecting a camera model with no entry here at all shows an
+  # error asking you to add one - copy the block below as a starting
+  # template.
   stream_options:
     "RealSense D455":
-      stream_a:
-        - {stream_type: infrared, stream_index: 1, width: 1280, height: 720, fps: 30, format: y8}
-        - {stream_type: infrared, stream_index: 2, width: 1280, height: 720, fps: 30, format: y8}
-      stream_b:
-        - {stream_type: color, stream_index: 0, width: 1280, height: 720, fps: 30, format: bgr8}
+      - test_name: "IR1 vs IR2 sync"
+        stream_a_identity: {stream_type: infrared, stream_index: 1}
+        stream_b_identity: {stream_type: infrared, stream_index: 2}
+        sensor_options:
+          - stream_a: {width: 1280, height: 720, fps: 30, format: y8}
+            stream_b: {width: 1280, height: 720, fps: 30, format: y8}
+      - test_name: "IR vs RGB sync"
+        stream_a_identity: {stream_type: infrared, stream_index: 1}
+        stream_b_identity: {stream_type: color, stream_index: 0}
+        sensor_options:
+          - stream_a: {width: 1280, height: 720, fps: 30, format: y8}
+            stream_b: {width: 1280, height: 720, fps: 30, format: bgr8}
   # Used as the PRE-SELECTED default in the Stream Config wizard page's
   # dropdowns, if the connected camera actually reports this exact combo -
   # you can still pick a different one there if this rig/camera doesn't

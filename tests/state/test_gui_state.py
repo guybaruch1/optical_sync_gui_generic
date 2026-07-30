@@ -17,7 +17,7 @@ def test_load_gui_state_ignores_corrupt_file(tmp_path):
 def test_save_then_load_round_trips_stream_picks_and_camera_controls(tmp_path):
     path = tmp_path / "gui_state.json"
     original = GuiState(
-        device_serial="123456",
+        device_serial="123456", last_test_name="IR vs RGB sync",
         stream_a_type="infrared", stream_a_index=1, stream_a_width=1280, stream_a_height=720,
         stream_a_fps=30, stream_a_roi=[10, 20, 100, 100],
         stream_a_emitter_enabled=False, stream_a_auto_exposure=True, stream_a_exposure=None, stream_a_gain=None,

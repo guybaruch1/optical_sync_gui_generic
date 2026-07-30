@@ -14,6 +14,7 @@ from dataclasses import dataclass
 @dataclass
 class GuiState:
     device_serial: "str | None" = None
+    last_test_name: "str | None" = None
     stream_a_type: "str | None" = None
     stream_a_index: "int | None" = None
     stream_a_width: "int | None" = None
