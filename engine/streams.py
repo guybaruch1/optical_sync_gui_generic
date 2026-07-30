@@ -51,9 +51,9 @@ def list_video_stream_options_from_device(device):
     formats (e.g. an infrared stream reported as y8 AND uyvy/bgr8/rgb8/
     bgra8/rgba8, all just software reinterpretations of the same monochrome
     data), which is real device behavior, not something to silently hide
-    here. settings.yaml's camera.stream_options (see parse_stream_options_
-    config/filter_options_by_curated_list below) is where the operator
-    curates which of these are actually worth offering in the picker -
+    here. settings.yaml's camera.stream_options (see parse_camera_tests_
+    config/resolve_camera_tests below) is where the operator curates which
+    of these are actually worth offering in the picker -
     keeping that a hand-edited config decision rather than a hardcoded
     Python heuristic. Split out from list_video_stream_options so it's
     directly testable against a fake device without needing a fake
@@ -90,35 +90,62 @@ _STREAM_TYPES_BY_NAME = {"infrared": rs.stream.infrared, "color": rs.stream.colo
 _FORMATS_BY_NAME = {fmt.name: fmt for fmt in DECODERS}
 
 
-def parse_stream_options_config(raw_stream_options):
-    """Converts settings.yaml's camera.stream_options list (plain
-    stream_type/format name strings, e.g. {"stream_type": "infrared",
-    "stream_index": 1, "width": 1280, "height": 720, "fps": 30, "format":
-    "y8"}) into the same real-rs-enum shape list_video_stream_options_
-    from_device produces (minus sensor_index, which only a live device
-    query can resolve) - the operator-curated allowlist Stream Select's
-    picker gets filtered down to (see filter_options_by_curated_list)."""
+def _parse_stream_type(stream_type_name):
+    if stream_type_name not in _STREAM_TYPES_BY_NAME:
+        raise ValueError(
+            "settings.yaml camera.stream_options: unknown stream_type {!r} - must be "
+            "'infrared' or 'color'.".format(stream_type_name)
+        )
+    return _STREAM_TYPES_BY_NAME[stream_type_name]
+
+
+def _parse_format(format_name):
+    if format_name not in _FORMATS_BY_NAME:
+        raise ValueError(
+            "settings.yaml camera.stream_options: unknown format {!r} - must be a format "
+            "domain.realsense_utils.DECODERS can decode.".format(format_name)
+        )
+    return _FORMATS_BY_NAME[format_name]
+
+
+def parse_camera_tests_config(raw_tests):
+    """Converts one camera's settings.yaml camera.stream_options entry -
+    a list of named tests, each fixing which two physical streams it
+    compares (stream_a_identity/stream_b_identity: stream_type/stream_index,
+    never changing across sensor options) and offering a list of
+    resolution/fps/format pairs to run that test at (sensor_options) - into
+    real-rs-enum form (plain stream_type/format name strings -> rs.stream/
+    rs.format members). Raises ValueError on an unrecognized stream_type/
+    format string, same convention the old flat-list config parsing used.
+    Returns [{"test_name": str, "stream_a_identity": {"stream_type", "stream_index"},
+    "stream_b_identity": {...}, "sensor_options": [{"stream_a": {width,
+    height, fps, format}, "stream_b": {...}}, ...]}, ...] - still missing
+    sensor_index, which only a live device query can resolve (see
+    resolve_camera_tests)."""
+    def parse_identity(raw_identity):
+        return {
+            "stream_type": _parse_stream_type(raw_identity["stream_type"]),
+            "stream_index": raw_identity["stream_index"],
+        }
+
+    def parse_side(raw_side):
+        return {
+            "width": raw_side["width"],
+            "height": raw_side["height"],
+            "fps": raw_side["fps"],
+            "format": _parse_format(raw_side["format"]),
+        }
+
     parsed = []
-    for entry in raw_stream_options:
-        stream_type_name = entry["stream_type"]
-        format_name = entry["format"]
-        if stream_type_name not in _STREAM_TYPES_BY_NAME:
-            raise ValueError(
-                "settings.yaml camera.stream_options: unknown stream_type {!r} - must be "
-                "'infrared' or 'color'.".format(stream_type_name)
-            )
-        if format_name not in _FORMATS_BY_NAME:
-            raise ValueError(
-                "settings.yaml camera.stream_options: unknown format {!r} - must be a format "
-                "domain.realsense_utils.DECODERS can decode.".format(format_name)
-            )
+    for test in raw_tests:
         parsed.append({
-            "stream_type": _STREAM_TYPES_BY_NAME[stream_type_name],
-            "stream_index": entry["stream_index"],
-            "width": entry["width"],
-            "height": entry["height"],
-            "fps": entry["fps"],
-            "format": _FORMATS_BY_NAME[format_name],
+            "test_name": test["test_name"],
+            "stream_a_identity": parse_identity(test["stream_a_identity"]),
+            "stream_b_identity": parse_identity(test["stream_b_identity"]),
+            "sensor_options": [
+                {"stream_a": parse_side(entry["stream_a"]), "stream_b": parse_side(entry["stream_b"])}
+                for entry in test["sensor_options"]
+            ],
         })
     return parsed
 
@@ -126,24 +153,46 @@ def parse_stream_options_config(raw_stream_options):
 _CURATED_MATCH_KEYS = ("stream_type", "stream_index", "width", "height", "fps", "format")
 
 
-def filter_options_by_curated_list(options, curated):
-    """Filters list_video_stream_options_from_device's raw output down to
-    just the entries matching something in `curated` (parse_stream_options_
-    config's output) - on stream_type/stream_index/width/height/fps/format,
-    ignoring sensor_index (a live-device detail the curated list doesn't
-    specify, since it can vary by rig even for the same logical stream).
-    Preserves `curated`'s own order (not `options`'s device-enumeration
-    order), so the picker's dropdown order matches however the operator
-    listed entries in settings.yaml. A curated entry with no matching
-    device option is silently skipped - not every curated entry needs to
-    exist on every connected rig."""
-    result = []
-    for entry in curated:
-        for option in options:
-            if all(option[key] == entry[key] for key in _CURATED_MATCH_KEYS):
-                result.append(option)
-                break
-    return result
+def _find_matching_option(options, wanted):
+    """Returns the first entry in `options` (list_video_stream_options_
+    from_device's output) matching `wanted` on stream_type/stream_index/
+    width/height/fps/format - ignoring sensor_index, a live-device detail
+    the curated config never specifies, since it can vary by rig even for
+    the same logical stream. Returns None if nothing matches (this specific
+    rig/firmware doesn't support what was asked for)."""
+    for option in options:
+        if all(option[key] == wanted[key] for key in _CURATED_MATCH_KEYS):
+            return option
+    return None
+
+
+def resolve_camera_tests(device_options, parsed_tests):
+    """Resolves each parsed test's sensor_options against a live device's
+    raw options (list_video_stream_options_from_device's output), producing
+    only the sensor-options entries where BOTH sides actually match
+    something this specific connected device reports - combining each
+    test's fixed stream_a_identity/stream_b_identity with each
+    sensor_options entry's width/height/fps/format to search, same
+    ignore-sensor_index matching _find_matching_option always used.
+    Preserves both the tests' and their sensor_options' own configured
+    order, not device-enumeration order.
+
+    Returns [{"test_name": str, "options": [{"pick_a": <full device option
+    incl. sensor_index>, "pick_b": ...}, ...]}, ...] - EVERY parsed test is
+    included, even with an empty "options" list, so the caller can tell
+    "test exists but nothing on this rig matches it" apart from "test
+    doesn't exist at all" and decide how to handle that (this project's
+    convention: omit it from the picker rather than show it disabled)."""
+    resolved_tests = []
+    for test in parsed_tests:
+        resolved_options = []
+        for entry in test["sensor_options"]:
+            pick_a = _find_matching_option(device_options, {**test["stream_a_identity"], **entry["stream_a"]})
+            pick_b = _find_matching_option(device_options, {**test["stream_b_identity"], **entry["stream_b"]})
+            if pick_a is not None and pick_b is not None:
+                resolved_options.append({"pick_a": pick_a, "pick_b": pick_b})
+        resolved_tests.append({"test_name": test["test_name"], "options": resolved_options})
+    return resolved_tests
 
 
 def list_video_stream_options(ctx, serial):
