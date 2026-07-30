@@ -70,33 +70,33 @@ def _select_roi(image, window_title):
 
 
 def _apply_camera_controls(groups, camera_controls):
-    """Applies each camera_controls entry (from Stream Select's
-    _read_camera_controls) to the group at the same list position -
-    resolve_and_group and Stream Select's group_camera_controls both build
-    their groups in the same pick_a-then-pick_b order from the same
-    sensor_index equality test, so groups[i] and camera_controls[i] always
-    describe the same physical sensor. Returns a list of warning strings for
-    any setting the sensor doesn't support, so the caller can surface them
-    without silently proceeding."""
+    """Applies the ONE global camera_controls dict (from Stream Select's
+    _read_camera_controls) uniformly to every resolved sensor group -
+    Stream Select no longer configures emitter/exposure/gain per resolved
+    sensor group, just once for both streams together. A sensor that
+    doesn't support a given setting (e.g. emitter control on a color-only
+    sensor) just gets a surfaced warning for that setting, same as before.
+    Returns a list of warning strings for any setting any sensor doesn't
+    support, so the caller can surface them without silently proceeding."""
     warnings = []
-    for (sensor, _profiles), control in zip(groups, camera_controls):
-        if control["emitter_enabled"] is not None:
-            if not set_emitter_enabled(sensor, control["emitter_enabled"]):
+    for sensor, _profiles in groups:
+        if camera_controls["emitter_enabled"] is not None:
+            if not set_emitter_enabled(sensor, camera_controls["emitter_enabled"]):
                 warnings.append(
-                    "WARNING: emitter_enabled not supported on sensor(s) {} - confirm the "
-                    "emitter state manually.".format(control["sensor_indices"])
+                    "WARNING: emitter_enabled not supported on sensor - confirm the "
+                    "emitter state manually."
                 )
-        if control["auto_exposure"]:
+        if camera_controls["auto_exposure"]:
             if not enable_auto_exposure(sensor):
                 warnings.append(
-                    "WARNING: enable_auto_exposure not supported on sensor(s) {} - confirm "
-                    "auto-exposure manually.".format(control["sensor_indices"])
+                    "WARNING: enable_auto_exposure not supported on sensor - confirm "
+                    "auto-exposure manually."
                 )
         else:
-            if not set_manual_exposure(sensor, control["exposure"], control["gain"]):
+            if not set_manual_exposure(sensor, camera_controls["exposure"], camera_controls["gain"]):
                 warnings.append(
-                    "WARNING: manual exposure/gain not supported on sensor(s) {} - confirm "
-                    "exposure settings manually.".format(control["sensor_indices"])
+                    "WARNING: manual exposure/gain not supported on sensor - confirm "
+                    "exposure settings manually."
                 )
     return warnings
 

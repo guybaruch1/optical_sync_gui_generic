@@ -87,32 +87,30 @@ class SessionEngineThread(QThread):
         try:
             device = find_device_by_serial(self.ctx, self.device_serial)
             groups = resolve_and_group(device, self.pick_a, self.pick_b)
-            # Applies each camera_controls entry (from Stream Select) to the group at
-            # the same list position - resolve_and_group and Stream Select's
-            # group_camera_controls both build their groups in the same
-            # pick_a-then-pick_b order from the same sensor_index equality test, so
-            # groups[i] and self.camera_controls[i] always describe the same
-            # physical sensor. Mirrors gui/pages/roi_select_page.py's
+            # Applies the ONE global self.camera_controls dict (from Stream Select)
+            # uniformly to every resolved sensor group - Stream Select no longer
+            # configures emitter/exposure/gain per resolved sensor group, just once
+            # for both streams together. Mirrors gui/pages/roi_select_page.py's
             # _apply_camera_controls - duplicated here rather than imported since
             # this is hardware-thread code, not GUI code.
-            for (sensor, _profiles), control in zip(groups, self.camera_controls):
-                if control["emitter_enabled"] is not None:
-                    if not set_emitter_enabled(sensor, control["emitter_enabled"]):
+            for sensor, _profiles in groups:
+                if self.camera_controls["emitter_enabled"] is not None:
+                    if not set_emitter_enabled(sensor, self.camera_controls["emitter_enabled"]):
                         self.error.emit(
-                            "WARNING: emitter_enabled not supported on sensor(s) {} - confirm the "
-                            "emitter state manually.".format(control["sensor_indices"])
+                            "WARNING: emitter_enabled not supported on sensor - confirm the "
+                            "emitter state manually."
                         )
-                if control["auto_exposure"]:
+                if self.camera_controls["auto_exposure"]:
                     if not enable_auto_exposure(sensor):
                         self.error.emit(
-                            "WARNING: enable_auto_exposure not supported on sensor(s) {} - confirm "
-                            "auto-exposure manually.".format(control["sensor_indices"])
+                            "WARNING: enable_auto_exposure not supported on sensor - confirm "
+                            "auto-exposure manually."
                         )
                 else:
-                    if not set_manual_exposure(sensor, control["exposure"], control["gain"]):
+                    if not set_manual_exposure(sensor, self.camera_controls["exposure"], self.camera_controls["gain"]):
                         self.error.emit(
-                            "WARNING: manual exposure/gain not supported on sensor(s) {} - confirm "
-                            "exposure settings manually.".format(control["sensor_indices"])
+                            "WARNING: manual exposure/gain not supported on sensor - confirm "
+                            "exposure settings manually."
                         )
 
             # Puts the panel into single-LED scanning mode at the configured

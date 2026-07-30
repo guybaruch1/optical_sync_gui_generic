@@ -1,8 +1,9 @@
 """Wizard step 2: pick any two streams the connected device offers (IR, RGB,
-or two of the same type sharing one sensor), configure per-sensor camera
-controls (IR emitter, auto/manual exposure+gain), and preview live pairing
-quality (bundle/frame-number/timestamp/delta overlay, plus matching console
-logging) for the currently selected pair before committing to it.
+or two of the same type sharing one sensor), configure ONE global set of
+camera controls (IR emitter, auto/manual exposure+gain) applied to both
+streams together, and preview live pairing quality (bundle/frame-number/
+timestamp/delta overlay, plus matching console logging) for the currently
+selected pair before committing to it.
 
 Generalized from the old hardcoded IR-combo/RGB-combo pair: engine.streams.
 list_video_stream_options already returns fully-specified stream options -
@@ -15,10 +16,17 @@ useful if stream *identity* (stream_type/stream_index) and stream
 picking a different resolution/fps for the same stream identity is just
 picking a different entry in the same combo. Two combos per side would add
 a layer of "first narrow identity, then narrow resolution" indirection for
-no real benefit given the option list is already small and fully expanded.
-"""
+no real benefit given the option list is already small and curated (see
+settings.yaml's camera.stream_options).
 
-import pyrealsense2 as rs
+Camera controls are ONE global block regardless of how Stream A/B resolve
+to physical sensors at capture time (engine.streams.resolve_and_group can
+still fold them onto one shared sensor or split them across two - that's
+an orthogonal, capture-time concern) - simpler for the operator than
+juggling per-sensor-group settings, and every prior version of this app's
+camera setup (before the multi-sensor-group generalization) worked this
+way too."""
+
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLabel, QComboBox, QPushButton,
@@ -31,8 +39,8 @@ from gui.widgets.video_panel import VideoPanel
 
 
 _STREAM_TYPE_LABELS = {
-    rs.stream.infrared: "Infrared",
-    rs.stream.color: "Color",
+    "infrared": "Infrared",
+    "color": "Color",
 }
 
 
@@ -49,41 +57,11 @@ def _stream_option_label(option):
     unique regardless of how many streams of a given type the device
     exposes."""
     stream_type = option["stream_type"]
-    type_label = _STREAM_TYPE_LABELS.get(stream_type, stream_type.name.capitalize())
+    type_label = _STREAM_TYPE_LABELS.get(stream_type.name, stream_type.name.capitalize())
     type_label = "{} {}".format(type_label, option["stream_index"])
     return "{} - {}x{}@{}fps ({})".format(
         type_label, option["width"], option["height"], option["fps"], option["format"].name,
     )
-
-
-def group_camera_controls(pick_a, pick_b):
-    """Device-independent mirror of engine.streams.resolve_and_group's
-    grouping decision, for UI layout purposes only: decides how many
-    emitter/exposure control groups Stream Select should show, purely from
-    the two picks' own sensor_index fields - no live `device` handle
-    needed. Same sensor_index -> the two picks will end up opened on one
-    physical sensor object at capture time (resolve_and_group returns one
-    group for them), so show ONE control group; different sensor_index ->
-    two sensor objects, so show TWO. The real resolve_and_group (which
-    needs a live device to map sensor_index -> actual sensor object) is
-    only called later, at capture time in gui/main_window.py.
-
-    Returns a list of {"sensor_indices": [...], "has_infrared": bool}
-    dicts, one per group - "has_infrared" is True if ANY pick folded into
-    that group is an infrared stream (determines whether the group's
-    "Disable IR emitter" checkbox should be shown at all)."""
-    if pick_a["sensor_index"] == pick_b["sensor_index"]:
-        picks_per_group = [[pick_a, pick_b]]
-    else:
-        picks_per_group = [[pick_a], [pick_b]]
-
-    groups = []
-    for picks in picks_per_group:
-        groups.append({
-            "sensor_indices": sorted({p["sensor_index"] for p in picks}),
-            "has_infrared": any(p["stream_type"] == rs.stream.infrared for p in picks),
-        })
-    return groups
 
 
 class StreamConfigPage(QWidget):
@@ -94,8 +72,8 @@ class StreamConfigPage(QWidget):
         self.ctx = None
         self.device_serial = None
         self.preview_thread = None
-        self._stream_options = []
-        self._camera_control_widgets = []  # list of per-group widget dicts, see _build_camera_control_group
+        self._stream_options_a = []
+        self._stream_options_b = []
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -105,11 +83,8 @@ class StreamConfigPage(QWidget):
         form.addRow(QLabel("Stream B:"), self.combo_b)
         layout.addLayout(form)
 
-        self.combo_a.currentIndexChanged.connect(self._refresh_camera_control_groups)
-        self.combo_b.currentIndexChanged.connect(self._refresh_camera_control_groups)
-
-        self.camera_controls_layout = QVBoxLayout()
-        layout.addLayout(self.camera_controls_layout)
+        self._camera_controls = self._build_camera_control_group()
+        layout.addWidget(self._camera_controls["group_box"])
 
         preview_row = QHBoxLayout()
         self.start_preview_button = QPushButton("Start Preview")
@@ -148,8 +123,17 @@ class StreamConfigPage(QWidget):
         pick_a's docstring."""
         return self.combo_b.currentData()
 
-    def populate(self, ctx, device_serial, stream_options, preferred_a=None, preferred_b=None):
-        """preferred_a/preferred_b are optional partial-match dicts (e.g.
+    def populate(self, ctx, device_serial, stream_options_a, stream_options_b, preferred_a=None, preferred_b=None):
+        """stream_options_a/stream_options_b are each already filtered to
+        their own curated allowlist (settings.yaml's camera.stream_a_options/
+        stream_b_options via engine.streams.filter_options_by_curated_list) -
+        Stream A and Stream B intentionally have INDEPENDENT candidate lists,
+        not one shared list both dropdowns pick from, so each side can be
+        curated separately (e.g. Stream A limited to infrared entries, Stream
+        B to color entries). Order is whatever the caller already resolved
+        (the curated list's own order) - not re-sorted here.
+
+        preferred_a/preferred_b are optional partial-match dicts (e.g.
         {"width": 1280, "height": 720, "fps": 30} from settings.yaml's
         camera.stream_a/stream_b) - the first option matching every key
         given is pre-selected in the combo instead of leaving it at
@@ -157,18 +141,21 @@ class StreamConfigPage(QWidget):
         doesn't suit this rig/camera."""
         self.ctx = ctx
         self.device_serial = device_serial
-        self._stream_options = list(stream_options)
+        self._stream_options_a = list(stream_options_a)
+        self._stream_options_b = list(stream_options_b)
 
-        for combo, preferred in ((self.combo_a, preferred_a), (self.combo_b, preferred_b)):
+        for combo, options, preferred in (
+            (self.combo_a, self._stream_options_a, preferred_a),
+            (self.combo_b, self._stream_options_b, preferred_b),
+        ):
             combo.blockSignals(True)
             combo.clear()
-            for option in self._stream_options:
+            for option in options:
                 combo.addItem(_stream_option_label(option), userData=option)
             combo.blockSignals(False)
             self._preselect(combo, preferred)
 
         self._avoid_collision(self.combo_a, self.combo_b)
-        self._refresh_camera_control_groups()
 
     def _preselect(self, combo, preferred):
         if not preferred:
@@ -204,45 +191,27 @@ class StreamConfigPage(QWidget):
                 combo_b.setCurrentIndex(index)
                 return
 
-    def _refresh_camera_control_groups(self):
-        self._clear_camera_control_groups()
-
-        pick_a = self.pick_a
-        pick_b = self.pick_b
-        if pick_a is None or pick_b is None:
-            return
-
-        groups = group_camera_controls(pick_a, pick_b)
-        multiple = len(groups) > 1
-        for group in groups:
-            self._camera_control_widgets.append(self._build_camera_control_group(group, multiple))
-
-    def _clear_camera_control_groups(self):
-        while self.camera_controls_layout.count():
-            item = self.camera_controls_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-        self._camera_control_widgets = []
-
-    def _build_camera_control_group(self, group, multiple):
-        title = "Camera Controls"
-        if multiple:
-            title = "{} - Sensor {}".format(title, group["sensor_indices"][0])
-        box = QGroupBox(title)
+    def _build_camera_control_group(self):
+        """ONE global camera-control block, built once and shown regardless
+        of which streams are currently picked - applied to both Stream A
+        and Stream B together at capture time (see
+        gui.pages.roi_select_page._apply_camera_controls), not per resolved
+        sensor group. The "Disable IR emitter" checkbox is always present;
+        it's simply a no-op (with a surfaced warning) if neither resolved
+        sensor actually supports emitter control."""
+        box = QGroupBox("Camera Controls")
         box_layout = QVBoxLayout(box)
 
-        emitter_checkbox = None
-        if group["has_infrared"]:
-            emitter_checkbox = QCheckBox("Disable IR emitter")
-            # Default to checked (emitter disabled): both prior projects this
-            # generalizes (optical_sync_gui, optical_sync_gui_d585) hardcoded
-            # the IR emitter OFF unconditionally, since the structured-light
-            # projector pattern corrupts LED blob detection and calibrated
-            # on/off thresholds if left on. Manual opt-out (unchecking) is
-            # still available for whoever needs the emitter on.
-            emitter_checkbox.setChecked(True)
-            box_layout.addWidget(emitter_checkbox)
+        emitter_checkbox = QCheckBox("Disable IR emitter")
+        # Default to checked (emitter disabled): every prior version of this
+        # app's camera setup (before per-sensor-group controls were added,
+        # and the sibling optical_sync_gui project) hardcoded the IR emitter
+        # OFF unconditionally, since the structured-light projector pattern
+        # corrupts LED blob detection and calibrated on/off thresholds if
+        # left on. Manual opt-out (unchecking) is still available for
+        # whoever needs the emitter on.
+        emitter_checkbox.setChecked(True)
+        box_layout.addWidget(emitter_checkbox)
 
         auto_radio = QRadioButton("Auto exposure")
         manual_radio = QRadioButton("Manual exposure")
@@ -271,10 +240,7 @@ class StreamConfigPage(QWidget):
         manual_radio.toggled.connect(exposure_spin.setEnabled)
         manual_radio.toggled.connect(gain_spin.setEnabled)
 
-        self.camera_controls_layout.addWidget(box)
-
         return {
-            "sensor_indices": group["sensor_indices"],
             "group_box": box,
             "emitter_checkbox": emitter_checkbox,
             "auto_radio": auto_radio,
@@ -283,24 +249,19 @@ class StreamConfigPage(QWidget):
             "gain_spin": gain_spin,
         }
 
-    def camera_control_group_count(self):
-        return len(self._camera_control_widgets)
-
     def _read_camera_controls(self):
-        controls = []
-        for group in self._camera_control_widgets:
-            auto_exposure = group["auto_radio"].isChecked()
-            emitter_checkbox = group["emitter_checkbox"]
-            controls.append({
-                "sensor_indices": group["sensor_indices"],
-                "emitter_enabled": (
-                    None if emitter_checkbox is None else not emitter_checkbox.isChecked()
-                ),
-                "auto_exposure": auto_exposure,
-                "exposure": None if auto_exposure else group["exposure_spin"].value(),
-                "gain": None if auto_exposure else group["gain_spin"].value(),
-            })
-        return controls
+        """Returns the single global camera-control dict - applied
+        uniformly to every resolved sensor (see
+        gui.pages.roi_select_page._apply_camera_controls), unlike the old
+        per-sensor-group list."""
+        w = self._camera_controls
+        auto_exposure = w["auto_radio"].isChecked()
+        return {
+            "emitter_enabled": not w["emitter_checkbox"].isChecked(),
+            "auto_exposure": auto_exposure,
+            "exposure": None if auto_exposure else w["exposure_spin"].value(),
+            "gain": None if auto_exposure else w["gain_spin"].value(),
+        }
 
     def _on_start_preview_clicked(self):
         pick_a = self.pick_a
