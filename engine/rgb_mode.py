@@ -6,7 +6,7 @@ ID (PID), not device name - see librealsense's d500-factory.cpp /
 d500-private.h for the PID tables.
 
 get_mode() is pure (a PID lookup) and unit-tested. switch_mode()/
-wait_for_reenumeration()/ensure_dual_rgb_mode() talk to real hardware
+wait_for_reenumeration()/ensure_mode() talk to real hardware
 (debug-protocol register write + hardware_reset(), which disconnects/
 reconnects the device over USB) and are untested by design, the same
 convention this project already uses for engine/session_engine.py and
@@ -82,27 +82,31 @@ def wait_for_reenumeration(ctx, serial, timeout_s=REENUMERATION_TIMEOUT_S):
     )
 
 
-def ensure_dual_rgb_mode(ctx, device):
-    """Checks the device's current RGB mode and switches it to Dual RGB if
-    it's currently Dedicated. Returns a device handle guaranteed to be in
-    Dual RGB mode (possibly re-enumerated, if a switch happened)."""
+def ensure_mode(ctx, device, target_mode):
+    """Checks the device's current RGB mode and switches it to
+    `target_mode` ("dual" or "dedicated") if it's currently the other one.
+    Returns a device handle guaranteed to be in `target_mode` (possibly
+    re-enumerated, if a switch happened) - a no-op if the device is already
+    in that mode. Generalizes the old dual-only ensure_dual_rgb_mode so the
+    operator can choose either direction (gui/pages/device_select_page.py's
+    2C/3C radio choice), not just force Dual RGB."""
     mode = get_mode(device)
     if mode is None:
         pid = device.get_info(rs.camera_info.product_id)
         raise RuntimeError(
             "Product ID {!r} is not a recognized D535/D585 Dual/Dedicated RGB variant.".format(pid)
         )
-    if mode == "dual":
+    if mode == target_mode:
         return device
 
-    serial = switch_mode(device, "dual")
+    serial = switch_mode(device, target_mode)
     new_device = wait_for_reenumeration(ctx, serial)
 
     new_mode = get_mode(new_device)
-    if new_mode != "dual":
+    if new_mode != target_mode:
         new_pid = new_device.get_info(rs.camera_info.product_id)
         raise RuntimeError(
             "Mode switch did not take effect - device re-enumerated with PID={!r} "
-            "(expected a Dual RGB PID).".format(new_pid)
+            "(expected a {} PID).".format(new_pid, target_mode)
         )
     return new_device
