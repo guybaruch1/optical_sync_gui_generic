@@ -27,7 +27,7 @@ camera:
   # dropdown. Connecting a camera model with no entry here shows an error
   # asking you to add one - copy the block below as a starting template.
   stream_options:
-    "Intel RealSense D455":
+    "RealSense D455":
       stream_a:
         - {stream_type: infrared, stream_index: 1, width: 1280, height: 720, fps: 30, format: y8}
         - {stream_type: infrared, stream_index: 2, width: 1280, height: 720, fps: 30, format: y8}
