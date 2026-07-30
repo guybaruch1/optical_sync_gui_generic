@@ -69,12 +69,50 @@ def test_pairing_gap_metric_accepts_close_pair():
     assert result.exclude_reason is None
 
 
+def test_pairing_gap_metric_excludes_on_frame_drop_even_within_outlier_threshold():
+    # A frame drop must exclude the pairing-gap measurement too, even when the
+    # raw timestamp gap is well within outlier_threshold_us - this is the bug
+    # fix: previously PairingGapMetric had zero frame-drop awareness.
+    metric = PairingGapMetric(outlier_threshold_us=100_000)
+    sample = FramePairSample(
+        pair_index=0, stream_a_ts_us=1_000_000.0, stream_b_ts_us=1_000_050.0,
+        stream_a_frame_drop=True, stream_b_frame_drop=False,
+    )
+    result = metric.update(sample)
+    assert result.excluded is True
+    assert result.exclude_reason == "frame_drop"
+
+
+def test_pairing_gap_metric_excludes_on_stream_b_frame_drop():
+    metric = PairingGapMetric(outlier_threshold_us=100_000)
+    sample = FramePairSample(
+        pair_index=0, stream_a_ts_us=1_000_000.0, stream_b_ts_us=1_000_050.0,
+        stream_a_frame_drop=False, stream_b_frame_drop=True,
+    )
+    result = metric.update(sample)
+    assert result.excluded is True
+    assert result.exclude_reason == "frame_drop"
+
+
+def test_pairing_gap_metric_frame_drop_reason_wins_over_outlier():
+    # Both a drop and an outlier gap present at once - reason should still
+    # read "frame_drop" per the decided priority (drop OR outlier; reason is
+    # "frame_drop" if the drop is why).
+    metric = PairingGapMetric(outlier_threshold_us=100_000)
+    sample = FramePairSample(
+        pair_index=0, stream_a_ts_us=1_000_000.0, stream_b_ts_us=1_500_000.0,
+        stream_a_frame_drop=True, stream_b_frame_drop=False,
+    )
+    result = metric.update(sample)
+    assert result.excluded is True
+    assert result.exclude_reason == "frame_drop"
+
+
 def test_position_gap_metric_reports_miss_when_nothing_on():
     threshold = np.full(10, 150.0)
     metric = PositionGapMetric(
         stream_a_threshold=threshold, stream_b_threshold=threshold, num_leds=10,
-        switch_time_ms=1.0, stream_a_fps=30, stream_b_fps=30,
-        frame_drop_threshold_factor=1.5, warmup_pairs_to_skip=0,
+        switch_time_ms=1.0, warmup_pairs_to_skip=0,
     )
     sample = FramePairSample(
         pair_index=0, stream_a_ts_us=0.0, stream_b_ts_us=0.0,
@@ -89,8 +127,7 @@ def test_position_gap_metric_computes_gap_ms():
     threshold = np.full(10, 150.0)
     metric = PositionGapMetric(
         stream_a_threshold=threshold, stream_b_threshold=threshold, num_leds=10,
-        switch_time_ms=2.0, stream_a_fps=30, stream_b_fps=30,
-        frame_drop_threshold_factor=1.5, warmup_pairs_to_skip=0,
+        switch_time_ms=2.0, warmup_pairs_to_skip=0,
     )
     stream_a_bright = np.full(10, 50.0); stream_a_bright[5] = 200.0
     stream_b_bright = np.full(10, 50.0); stream_b_bright[3] = 200.0
@@ -104,8 +141,7 @@ def test_position_gap_metric_flags_warmup_pairs():
     threshold = np.full(10, 150.0)
     metric = PositionGapMetric(
         stream_a_threshold=threshold, stream_b_threshold=threshold, num_leds=10,
-        switch_time_ms=1.0, stream_a_fps=30, stream_b_fps=30,
-        frame_drop_threshold_factor=1.5, warmup_pairs_to_skip=2,
+        switch_time_ms=1.0, warmup_pairs_to_skip=2,
     )
     bright = np.full(10, 200.0)
     first = metric.update(FramePairSample(0, 0.0, 0.0, bright, bright))
@@ -117,67 +153,44 @@ def test_position_gap_metric_flags_warmup_pairs():
 
 
 def test_position_gap_metric_flags_frame_drop():
+    # PositionGapMetric no longer computes frame-drop status itself - it just
+    # reads sample.stream_a_frame_drop/stream_b_frame_drop, which TestSession
+    # is now responsible for setting before calling update().
     threshold = np.full(10, 150.0)
     metric = PositionGapMetric(
         stream_a_threshold=threshold, stream_b_threshold=threshold, num_leds=10,
-        switch_time_ms=1.0, stream_a_fps=30, stream_b_fps=30,
-        frame_drop_threshold_factor=1.5, warmup_pairs_to_skip=0,
+        switch_time_ms=1.0, warmup_pairs_to_skip=0,
     )
     bright = np.full(10, 200.0)
-    metric.update(FramePairSample(0, 0.0, 0.0, bright, bright))
-    result = metric.update(FramePairSample(1, 500_000.0, 33333.0, bright, bright))
+    result = metric.update(FramePairSample(
+        1, 500_000.0, 33333.0, bright, bright, stream_a_frame_drop=True, stream_b_frame_drop=False,
+    ))
     assert result.exclude_reason == "frame_drop"
 
 
-def test_position_gap_metric_extra_reports_no_drop_when_clean():
+def test_position_gap_metric_no_frame_drop_reason_when_sample_flags_clean():
     threshold = np.full(10, 150.0)
     metric = PositionGapMetric(
         stream_a_threshold=threshold, stream_b_threshold=threshold, num_leds=10,
-        switch_time_ms=1.0, stream_a_fps=30, stream_b_fps=30,
-        frame_drop_threshold_factor=1.5, warmup_pairs_to_skip=0,
+        switch_time_ms=1.0, warmup_pairs_to_skip=0,
     )
     stream_a_bright = np.full(10, 50.0); stream_a_bright[5] = 200.0
     stream_b_bright = np.full(10, 50.0); stream_b_bright[3] = 200.0
-    metric.update(FramePairSample(0, 0.0, 0.0, stream_a_bright, stream_b_bright))
-    result = metric.update(FramePairSample(1, 33333.0, 33333.0, stream_a_bright, stream_b_bright))
-    assert result.extra == {"stream_a_frame_drop": False, "stream_b_frame_drop": False}
-
-
-def test_position_gap_metric_extra_flags_which_stream_dropped():
-    threshold = np.full(10, 150.0)
-    metric = PositionGapMetric(
-        stream_a_threshold=threshold, stream_b_threshold=threshold, num_leds=10,
-        switch_time_ms=1.0, stream_a_fps=30, stream_b_fps=30,
-        frame_drop_threshold_factor=1.5, warmup_pairs_to_skip=0,
-    )
-    bright = np.full(10, 200.0)
-    metric.update(FramePairSample(0, 0.0, 0.0, bright, bright))
-    result = metric.update(FramePairSample(1, 500_000.0, 33333.0, bright, bright))
-    assert result.extra == {"stream_a_frame_drop": True, "stream_b_frame_drop": False}
-
-
-def test_position_gap_metric_extra_present_even_when_miss():
-    threshold = np.full(10, 150.0)
-    metric = PositionGapMetric(
-        stream_a_threshold=threshold, stream_b_threshold=threshold, num_leds=10,
-        switch_time_ms=1.0, stream_a_fps=30, stream_b_fps=30,
-        frame_drop_threshold_factor=1.5, warmup_pairs_to_skip=0,
-    )
     sample = FramePairSample(
         pair_index=0, stream_a_ts_us=0.0, stream_b_ts_us=0.0,
-        stream_a_bright=np.full(10, 50.0), stream_b_bright=np.full(10, 50.0),
+        stream_a_bright=stream_a_bright, stream_b_bright=stream_b_bright,
+        stream_a_frame_drop=False, stream_b_frame_drop=False,
     )
     result = metric.update(sample)
-    assert result.exclude_reason == "miss"
-    assert result.extra == {"stream_a_frame_drop": False, "stream_b_frame_drop": False}
+    assert result.excluded is False
+    assert result.exclude_reason is None
 
 
 def test_position_gap_metric_tracks_last_on_masks_for_debug_snapshots():
     threshold = np.full(4, 150.0)
     metric = PositionGapMetric(
         stream_a_threshold=threshold, stream_b_threshold=threshold, num_leds=4,
-        switch_time_ms=1.0, stream_a_fps=30, stream_b_fps=30,
-        frame_drop_threshold_factor=1.5, warmup_pairs_to_skip=0,
+        switch_time_ms=1.0, warmup_pairs_to_skip=0,
     )
     assert metric.last_stream_a_on_mask is None
     assert metric.last_stream_b_on_mask is None

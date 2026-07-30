@@ -30,7 +30,7 @@ def export_series_csv(path, series_x, series_y_by_name):
             writer.writerow(row)
 
 
-def export_session_csvs(rows, kept_path, dropped_path, drop_reason="frame_drop"):
+def export_session_csvs(rows, kept_path, dropped_path):
     fieldnames = []
     for row in rows:
         for key in row.keys():
@@ -48,10 +48,7 @@ def export_session_csvs(rows, kept_path, dropped_path, drop_reason="frame_drop")
         dropped_writer.writeheader()
 
         for row in rows:
-            is_frame_drop = any(
-                key.endswith("_exclude_reason") and value == drop_reason
-                for key, value in row.items()
-            )
+            is_frame_drop = bool(row.get("stream_a_frame_drop") or row.get("stream_b_frame_drop"))
             if is_frame_drop:
                 dropped_writer.writerow(row)
                 n_dropped += 1

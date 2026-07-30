@@ -56,9 +56,6 @@ test:
   # negative) to be flagged as a probable dropped frame - same style of check
   # as print_frame_drops.py.
   frame_drop_threshold_factor: 1.5
-  # Cap on FD-triggered on/off overlay snapshots per run (separate bucket
-  # from the periodic snapshot_every_n_pairs sampling above).
-  max_fd_snapshots: 10
   # analyze_pairing_gap's cross-stream sanity-check threshold, in
   # MICROSECONDS (stream_a_ts_us/stream_b_ts_us are HW frame_timestamp,
   # µs-scale). 100_000us is the same real-world cutoff as an old 100ms

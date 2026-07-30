@@ -2,11 +2,13 @@ import csv
 from domain.csv_export import export_session_csvs, export_series_csv
 
 
-def _row(pair_index, exclude_reason=None):
+def _row(pair_index, exclude_reason=None, stream_a_frame_drop=False, stream_b_frame_drop=False):
     return {
         "pair_index": pair_index,
         "ir_ts_us": 1000.0 + pair_index,
         "rgb_ts_us": 1000.5 + pair_index,
+        "stream_a_frame_drop": stream_a_frame_drop,
+        "stream_b_frame_drop": stream_b_frame_drop,
         "pairing_gap_us": -0.5,
         "pairing_gap_us_excluded": False,
         "pairing_gap_us_exclude_reason": None,
@@ -16,7 +18,11 @@ def _row(pair_index, exclude_reason=None):
 
 
 def test_export_session_csvs_splits_by_frame_drop(tmp_path):
-    rows = [_row(0), _row(1, exclude_reason="frame_drop"), _row(2, exclude_reason="warmup")]
+    rows = [
+        _row(0),
+        _row(1, exclude_reason="frame_drop", stream_a_frame_drop=True),
+        _row(2, exclude_reason="warmup"),
+    ]
     kept_path = tmp_path / "kept.csv"
     dropped_path = tmp_path / "dropped.csv"
 
@@ -32,6 +38,24 @@ def test_export_session_csvs_splits_by_frame_drop(tmp_path):
 
     assert [r["pair_index"] for r in kept_rows] == ["0", "2"]
     assert [r["pair_index"] for r in dropped_rows] == ["1"]
+
+
+def test_export_session_csvs_routes_by_boolean_flag_even_when_exclude_reason_is_no_led_data(tmp_path):
+    # Regression test for sub-finding 2b: a pair that's BOTH a frame drop and
+    # missing LED data gets labeled "no_led_data" by PositionGapMetric (its
+    # no_led_data > miss > frame_drop > warmup priority order), not
+    # "frame_drop" - so the old string-match against "*_exclude_reason" ==
+    # "frame_drop" would have misrouted it into the kept file. The new
+    # boolean-flag check must still route it to dropped.
+    rows = [
+        _row(0, exclude_reason="no_led_data", stream_b_frame_drop=True),
+    ]
+    kept_path = tmp_path / "kept.csv"
+    dropped_path = tmp_path / "dropped.csv"
+
+    n_kept, n_dropped = export_session_csvs(rows, str(kept_path), str(dropped_path))
+
+    assert (n_kept, n_dropped) == (0, 1)
 
 
 def test_export_session_csvs_empty_rows(tmp_path):

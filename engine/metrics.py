@@ -23,6 +23,8 @@ class FramePairSample:
     stream_b_ts_us: float
     stream_a_bright: "np.ndarray | None" = None
     stream_b_bright: "np.ndarray | None" = None
+    stream_a_frame_drop: bool = False
+    stream_b_frame_drop: bool = False
 
 
 @dataclass
@@ -110,19 +112,27 @@ class PairingGapMetric(Metric):
 
     def update(self, sample: FramePairSample) -> MetricResult:
         gap = sample.stream_a_ts_us - sample.stream_b_ts_us
-        excluded = abs(gap) > self.outlier_threshold_us
+        is_outlier = abs(gap) > self.outlier_threshold_us
+        is_drop = sample.stream_a_frame_drop or sample.stream_b_frame_drop
+        excluded = is_drop or is_outlier
+        if is_drop:
+            exclude_reason = "frame_drop"
+        elif is_outlier:
+            exclude_reason = "syncer_outlier"
+        else:
+            exclude_reason = None
         return MetricResult(
             name=self.name,
             value=gap,
             excluded=excluded,
-            exclude_reason="syncer_outlier" if excluded else None,
+            exclude_reason=exclude_reason,
         )
 
 
 def _is_frame_drop(prev_ts, curr_ts, fps, threshold_factor):
     if prev_ts is None:
         return False
-    if fps <= 0:
+    if fps is None or fps <= 0:
         # Shouldn't happen with real hardware-reported fps, but a stray 0/negative
         # value would otherwise divide-by-zero here instead of just reporting
         # "can't tell" for this pair.
@@ -136,17 +146,12 @@ class PositionGapMetric(Metric):
     name = "position_gap_ms"
 
     def __init__(self, stream_a_threshold, stream_b_threshold, num_leds, switch_time_ms,
-                 stream_a_fps, stream_b_fps, frame_drop_threshold_factor, warmup_pairs_to_skip):
+                 warmup_pairs_to_skip):
         self.stream_a_threshold = stream_a_threshold
         self.stream_b_threshold = stream_b_threshold
         self.num_leds = num_leds
         self.switch_time_ms = switch_time_ms
-        self.stream_a_fps = stream_a_fps
-        self.stream_b_fps = stream_b_fps
-        self.frame_drop_threshold_factor = frame_drop_threshold_factor
         self.warmup_pairs_to_skip = warmup_pairs_to_skip
-        self._prev_stream_a_ts = None
-        self._prev_stream_b_ts = None
         self._pair_count = 0
         # Per-LED on/off classification from the most recent update() call that
         # actually had brightness data - a side channel read directly by
@@ -158,16 +163,11 @@ class PositionGapMetric(Metric):
         self.last_stream_b_on_mask = None
 
     def update(self, sample: FramePairSample) -> MetricResult:
-        stream_a_drop = _is_frame_drop(self._prev_stream_a_ts, sample.stream_a_ts_us, self.stream_a_fps, self.frame_drop_threshold_factor)
-        stream_b_drop = _is_frame_drop(self._prev_stream_b_ts, sample.stream_b_ts_us, self.stream_b_fps, self.frame_drop_threshold_factor)
-        self._prev_stream_a_ts = sample.stream_a_ts_us
-        self._prev_stream_b_ts = sample.stream_b_ts_us
         self._pair_count += 1
         is_warmup = self._pair_count <= self.warmup_pairs_to_skip
-        drop_extra = {"stream_a_frame_drop": stream_a_drop, "stream_b_frame_drop": stream_b_drop}
 
         if sample.stream_a_bright is None or sample.stream_b_bright is None:
-            return MetricResult(name=self.name, value=None, excluded=True, exclude_reason="no_led_data", extra=drop_extra)
+            return MetricResult(name=self.name, value=None, excluded=True, exclude_reason="no_led_data")
 
         stream_a_on = sample.stream_a_bright > self.stream_a_threshold
         stream_b_on = sample.stream_b_bright > self.stream_b_threshold
@@ -177,13 +177,13 @@ class PositionGapMetric(Metric):
         stream_b_last, _ = find_last_on_led(stream_b_on)
 
         if stream_a_last is None or stream_b_last is None:
-            return MetricResult(name=self.name, value=None, excluded=True, exclude_reason="miss", extra=drop_extra)
+            return MetricResult(name=self.name, value=None, excluded=True, exclude_reason="miss")
 
         diff = compute_position_gap(stream_a_last, stream_b_last, self.num_leds)
         gap_ms = diff * self.switch_time_ms
 
-        if stream_a_drop or stream_b_drop:
-            return MetricResult(name=self.name, value=gap_ms, excluded=True, exclude_reason="frame_drop", extra=drop_extra)
+        if sample.stream_a_frame_drop or sample.stream_b_frame_drop:
+            return MetricResult(name=self.name, value=gap_ms, excluded=True, exclude_reason="frame_drop")
         if is_warmup:
-            return MetricResult(name=self.name, value=gap_ms, excluded=True, exclude_reason="warmup", extra=drop_extra)
-        return MetricResult(name=self.name, value=gap_ms, excluded=False, exclude_reason=None, extra=drop_extra)
+            return MetricResult(name=self.name, value=gap_ms, excluded=True, exclude_reason="warmup")
+        return MetricResult(name=self.name, value=gap_ms, excluded=False, exclude_reason=None)
