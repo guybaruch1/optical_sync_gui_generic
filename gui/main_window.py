@@ -217,16 +217,20 @@ class MainWindow(QMainWindow):
         stream_b_on = np.array([stream_b_positions[i][2] for i in stream_b_ids])
         stream_b_off = np.array([stream_b_positions[i][3] for i in stream_b_ids])
 
-        threshold_fraction = self.settings["test"]["threshold_fraction"]
-        stream_a_threshold = stream_a_off + threshold_fraction * (stream_a_on - stream_a_off)
-        stream_b_threshold = stream_b_off + threshold_fraction * (stream_b_on - stream_b_off)
-
         output_dir = ensure_output_dir(self.settings)
         self.live_session_page.set_context(
             self.ctx, self.gui_state.device_serial, pick_a, pick_b, camera_controls,
             switch_time_ms=self.settings["test"]["switch_time_ms"],
             scan_direction=self.settings["test"]["scan_direction"],
-            stream_a_threshold=stream_a_threshold, stream_b_threshold=stream_b_threshold,
+            # Raw calibrated on/off values, not a precomputed threshold -
+            # live_session_page.py recomputes the actual per-LED threshold
+            # fresh at start_session() time from its own live-editable
+            # Threshold Fraction toolbar spinbox (this settings.yaml value
+            # is only that spinbox's starting default), the same pattern
+            # switch_time_ms/frame_sample_interval already use.
+            stream_a_on=stream_a_on, stream_a_off=stream_a_off,
+            stream_b_on=stream_b_on, stream_b_off=stream_b_off,
+            threshold_fraction=self.settings["test"]["threshold_fraction"],
             stream_a_xy=stream_a_xy, stream_b_xy=stream_b_xy,
             num_leds=num_leds, neighborhood_size=self.settings["test"]["neighborhood_size"],
             frame_drop_threshold_factor=self.settings["test"]["frame_drop_threshold_factor"],

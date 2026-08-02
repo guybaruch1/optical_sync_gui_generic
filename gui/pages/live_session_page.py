@@ -65,7 +65,7 @@ import cv2
 from PySide6.QtCore import Qt, QSize, QRectF
 from PySide6.QtGui import QIcon, QPixmap, QPainter, QPen, QColor
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QSpinBox, QLabel, QCheckBox, QFrame, QApplication,
+    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QSpinBox, QDoubleSpinBox, QLabel, QCheckBox, QFrame, QApplication,
 )
 
 from gui.widgets.video_panel import VideoPanel
@@ -296,6 +296,26 @@ class LiveSessionPage(QWidget):
         )
         control_row.addWidget(self.frame_sample_interval_spinbox)
 
+        control_row.addWidget(QLabel("Threshold Fraction:"))
+        self.threshold_fraction_spinbox = QDoubleSpinBox()
+        self.threshold_fraction_spinbox.setRange(0.0, 1.0)
+        self.threshold_fraction_spinbox.setSingleStep(0.01)
+        self.threshold_fraction_spinbox.setDecimals(2)
+        # Overridden with the settings.yaml default in set_context(); kept
+        # editable per-run (like switch time/frame sample interval) so the
+        # live on/off cutoff can be tuned without hand-editing settings.yaml
+        # between runs. Read live in start_session() (not a fixed ctx
+        # value) to recompute stream_a_threshold/stream_b_threshold fresh
+        # from the raw calibrated on/off values each time Start is clicked.
+        self.threshold_fraction_spinbox.setValue(0.25)
+        self.threshold_fraction_spinbox.setToolTip(
+            "Fraction between each LED's calibrated off/on brightness used as the live "
+            "on/off cutoff: threshold = off + fraction*(on-off). Calibration assumed a full "
+            "exposure; fast switch times only reach a fraction of that brightness, so this "
+            "is usually tuned below the calibration default of 0.5."
+        )
+        control_row.addWidget(self.threshold_fraction_spinbox)
+
         control_row.addStretch(1)
         self.export_csv_button = QPushButton("Export CSV")
         self.export_csv_button.clicked.connect(self._reexport_last_session_csvs)
@@ -357,14 +377,20 @@ class LiveSessionPage(QWidget):
         self.drop_plot.set_series_visible("stream_b_frame_drops", checked)
 
     def set_context(self, ctx, device_serial, pick_a, pick_b, camera_controls, switch_time_ms, scan_direction,
-                     stream_a_threshold, stream_b_threshold, stream_a_xy, stream_b_xy, num_leds, neighborhood_size,
+                     stream_a_on, stream_a_off, stream_b_on, stream_b_off, threshold_fraction,
+                     stream_a_xy, stream_b_xy, num_leds, neighborhood_size,
                      frame_drop_threshold_factor, warmup_pairs_to_skip, pairing_gap_outlier_threshold_us,
                      kept_csv_path, dropped_csv_path, output_dir, snapshot_every_n_pairs, max_snapshots,
                      stream_a_roi, stream_b_roi, camera_name, stream_a_label, stream_b_label):
         self._context = dict(
             ctx=ctx, device_serial=device_serial, pick_a=pick_a, pick_b=pick_b, camera_controls=camera_controls,
             switch_time_ms=switch_time_ms, scan_direction=scan_direction,
-            stream_a_threshold=stream_a_threshold, stream_b_threshold=stream_b_threshold,
+            # Raw calibrated on/off values, not a precomputed threshold -
+            # start_session() recomputes stream_a_threshold/stream_b_threshold
+            # fresh from these plus the live threshold_fraction_spinbox value
+            # every time Start is clicked (see start_session()'s comment).
+            stream_a_on=stream_a_on, stream_a_off=stream_a_off,
+            stream_b_on=stream_b_on, stream_b_off=stream_b_off,
             stream_a_xy=stream_a_xy, stream_b_xy=stream_b_xy,
             num_leds=num_leds, neighborhood_size=neighborhood_size,
             frame_drop_threshold_factor=frame_drop_threshold_factor,
@@ -383,6 +409,7 @@ class LiveSessionPage(QWidget):
         # anywhere, so a fresh app launch always starts back from this
         # settings.yaml default, not whatever was last typed.
         self.switch_time_spinbox.setValue(int(round(switch_time_ms)))
+        self.threshold_fraction_spinbox.setValue(threshold_fraction)
         short_name = _short_camera_name(camera_name)
         self.stream_a_title_label.setText("{} - {}".format(short_name, stream_a_label))
         self.stream_b_title_label.setText("{} - {}".format(short_name, stream_b_label))
@@ -397,8 +424,15 @@ class LiveSessionPage(QWidget):
         # computed against a switch time the panel wasn't really using.
         switch_time_ms = self.switch_time_spinbox.value()
         display_stride = self.frame_sample_interval_spinbox.value()
+        # Read live from the toolbar, not a fixed ctx value - recomputed
+        # fresh from the raw calibrated on/off values each time Start is
+        # clicked, same tunable-per-run pattern as switch_time_ms above
+        # (see set_context()'s comment).
+        threshold_fraction = self.threshold_fraction_spinbox.value()
+        stream_a_threshold = ctx["stream_a_off"] + threshold_fraction * (ctx["stream_a_on"] - ctx["stream_a_off"])
+        stream_b_threshold = ctx["stream_b_off"] + threshold_fraction * (ctx["stream_b_on"] - ctx["stream_b_off"])
         position_gap_metric = PositionGapMetric(
-            stream_a_threshold=ctx["stream_a_threshold"], stream_b_threshold=ctx["stream_b_threshold"],
+            stream_a_threshold=stream_a_threshold, stream_b_threshold=stream_b_threshold,
             num_leds=ctx["num_leds"], switch_time_ms=switch_time_ms,
             warmup_pairs_to_skip=ctx["warmup_pairs_to_skip"],
         )
@@ -478,6 +512,7 @@ class LiveSessionPage(QWidget):
         self.duration_spinbox.setEnabled(False)
         self.switch_time_spinbox.setEnabled(False)
         self.frame_sample_interval_spinbox.setEnabled(False)
+        self.threshold_fraction_spinbox.setEnabled(False)
 
     def stop_session(self):
         if self.engine_thread is not None:
@@ -670,6 +705,7 @@ class LiveSessionPage(QWidget):
         self.duration_spinbox.setEnabled(True)
         self.switch_time_spinbox.setEnabled(True)
         self.frame_sample_interval_spinbox.setEnabled(True)
+        self.threshold_fraction_spinbox.setEnabled(True)
 
     def _save_led_state_debug_images(self):
         # Also wired to the "Save Debug Snapshot" button for an on-demand
