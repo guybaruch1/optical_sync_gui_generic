@@ -66,6 +66,7 @@ from PySide6.QtCore import Qt, QSize, QRectF
 from PySide6.QtGui import QIcon, QPixmap, QPainter, QPen, QColor
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QSpinBox, QDoubleSpinBox, QLabel, QCheckBox, QFrame, QApplication,
+    QScrollArea,
 )
 
 from gui.widgets.video_panel import VideoPanel
@@ -142,8 +143,24 @@ class LiveSessionPage(QWidget):
         self._optical_sync_stats = RunningStats()
         self._last_session_rows = None
 
-        self.setStyleSheet("LiveSessionPage { background-color: #f2f0ea; }")
-        layout = QVBoxLayout(self)
+        # The page's real content lives in content_widget/layout, inside a
+        # QScrollArea - not directly in self. Without this, a lower-
+        # resolution screen that can't fit two video panels + three charts +
+        # the toolbar at once had no way to reach whatever didn't fit: Qt
+        # just clipped/compressed everything down to (and past) each
+        # widget's minimum size with no scrollbar to recover the rest,
+        # which is what produced overlapping/garbled stat-tile text and a
+        # chart cut off past the window's visible bottom edge.
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.NoFrame)
+        content_widget = QWidget()
+        content_widget.setStyleSheet("QWidget { background-color: #f2f0ea; }")
+        layout = QVBoxLayout(content_widget)
+        scroll_area.setWidget(content_widget)
+        outer_layout.addWidget(scroll_area)
 
         video_row = QHBoxLayout()
         self.stream_a_panel = VideoPanel(force_square=True)

@@ -2,6 +2,7 @@ import os
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+from PySide6.QtWidgets import QScrollArea
 
 from gui.pages.live_session_page import LiveSessionPage, _short_camera_name
 
@@ -16,6 +17,25 @@ def test_short_camera_name_handles_single_word_input():
 
 def test_short_camera_name_handles_empty_string():
     assert _short_camera_name("") == ""
+
+
+# --- Regression test: on a screen too small to fit two video panels + three
+# charts + the toolbar at once, there was no way to reach whatever didn't
+# fit - Qt just clipped/overlapped content instead of scrolling to it. The
+# page's real content must live inside a resizable QScrollArea, not
+# directly in the page itself. ---
+
+def test_page_content_lives_inside_a_resizable_scroll_area(qapp):
+    page = LiveSessionPage()
+    scroll_areas = page.findChildren(QScrollArea)
+    assert len(scroll_areas) == 1
+    scroll_area = scroll_areas[0]
+    assert scroll_area.widgetResizable() is True
+    # The video panels (and everything else) are descendants of the scroll
+    # area's own content widget, not siblings of it directly on the page -
+    # confirms they're actually wrapped inside the scrollable area.
+    assert scroll_area.widget() is not None
+    assert page.stream_a_panel in scroll_area.widget().findChildren(type(page.stream_a_panel))
 
 
 def _minimal_context(tmp_path, **overrides):

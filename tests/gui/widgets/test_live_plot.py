@@ -1,6 +1,21 @@
 from gui.widgets.live_plot import LivePlot
 
 
+# --- Regression test: pg.PlotWidget's own default sizeHint (600x480) made
+# every plot balloon to that size - and pull in a scrollbar - even on a
+# normal/maximized screen once LiveSessionPage's content moved inside a
+# QScrollArea (which sizes the content widget off each child's sizeHint
+# whenever that exceeds the viewport). LivePlot must report a modest
+# sizeHint of its own so it only grows that large when there's real
+# available space to grow into (Expanding + the graphs column's stretch
+# factors still handle that, unaffected by this override). ---
+
+def test_size_hint_is_modest_not_pyqtgraphs_oversized_default(qapp):
+    plot = LivePlot()
+    assert plot.sizeHint().width() <= 400
+    assert plot.sizeHint().height() <= 200
+
+
 def test_add_point_accumulates_series_data(qapp):
     plot = LivePlot()
     plot.add_series("pairing_gap_us", color="r")
