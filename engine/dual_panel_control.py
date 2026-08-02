@@ -10,12 +10,13 @@ camera/test that hasn't had the operator check "Use dual LED panel" on
 Device Select) - every function below takes that exact same code path it
 always has for `None`, so nothing changes for the common case. When it's a
 dict (settings.yaml's `dual_panel:` section - panel_a_port, panel_b_port,
-relay_port, relay_com_port, relay_pulse_duration_s), these functions
-instead route through _run_on_both_panels: only ONE of 2 physically
-separate LED panels is ever visible over USB at a time (they share one
-Acroname hub), so a single LEDPanel.* call only ever reaches whichever
-panel currently happens to be hub-exposed - reaching both means switching
-hub ports, sending the command, switching again, sending it again.
+relay_port, relay_com_port, relay_pulse_duration_s,
+hub_switch_settle_s), these functions instead route through
+_run_on_both_panels: only ONE of 2 physically separate LED panels is ever
+visible over USB at a time (they share one Acroname hub), so a single
+LEDPanel.* call only ever reaches whichever panel currently happens to be
+hub-exposed - reaching both means switching hub ports, sending the
+command, switching again, sending it again.
 
 _run_on_both_panels/_pulse_relay have NO automated tests - they need the
 real Acroname `brainstem` SDK, a physically connected hub, and the actual
@@ -93,16 +94,27 @@ def _run_on_both_panels(dual_panel_config, action):
         panel_a_port = dual_panel_config["panel_a_port"]
         panel_b_port = dual_panel_config["panel_b_port"]
         relay_port = dual_panel_config["relay_port"]
+        settle_s = dual_panel_config["hub_switch_settle_s"]
 
-        hub.enable_ports([panel_a_port], True, delay_in_seconds=0)
+        # disable_other_ports=False - the ORIGINAL demo script this was
+        # ported from passed True here, which (per AcronameHub.enable_ports)
+        # disables EVERY downstream port on the hub not in the given list,
+        # not just the other panel/relay port. That's fine in a standalone
+        # demo script with nothing else attached, but on a real rig where
+        # the camera (or anything else) might share this same hub, it would
+        # silently cut that device's USB connection too. The explicit
+        # disable_ports() calls right below already narrowly target exactly
+        # the 2 ports that should go off - nothing outside
+        # {panel_a_port, panel_b_port, relay_port} is ever touched.
+        hub.enable_ports([panel_a_port], False, delay_in_seconds=0)
         hub.disable_ports([panel_b_port, relay_port])
-        time.sleep(1)
+        time.sleep(settle_s)
         action()
 
-        time.sleep(1)
-        hub.enable_ports([panel_b_port, relay_port], True, delay_in_seconds=0)
+        time.sleep(settle_s)
+        hub.enable_ports([panel_b_port, relay_port], False, delay_in_seconds=0)
         hub.disable_ports([panel_a_port])
-        time.sleep(1)
+        time.sleep(settle_s)
         action()
     finally:
         hub.disconnect()

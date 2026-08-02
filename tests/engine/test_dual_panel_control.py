@@ -1,4 +1,4 @@
-from unittest.mock import patch
+from unittest.mock import patch, call
 
 import engine.dual_panel_control as dual_panel_control
 from engine.dual_panel_control import turn_all_leds_on, turn_all_leds_off, start_scanning, stop_scanning
@@ -6,7 +6,7 @@ from engine.dual_panel_control import turn_all_leds_on, turn_all_leds_off, start
 
 DUAL_PANEL_CONFIG = {
     "panel_a_port": 0, "panel_b_port": 1, "relay_port": 6,
-    "relay_com_port": "COM6", "relay_pulse_duration_s": 0.2,
+    "relay_com_port": "COM6", "relay_pulse_duration_s": 0.2, "hub_switch_settle_s": 3.0,
 }
 
 
@@ -126,7 +126,7 @@ def test_run_on_both_panels_switches_hub_ports_and_calls_action_twice():
             return True
 
         def enable_ports(self, ports, disable_other_ports, delay_in_seconds):
-            self.calls.append(("enable", list(ports)))
+            self.calls.append(("enable", list(ports), disable_other_ports))
 
         def disable_ports(self, ports):
             self.calls.append(("disable", list(ports)))
@@ -140,17 +140,24 @@ def test_run_on_both_panels_switches_hub_ports_and_calls_action_twice():
 
     fake_hub = FakeHub()
     with patch.dict("sys.modules", {"engine.acroname_hub": fake_acroname_hub_module()}), \
-         patch("time.sleep"):
+         patch("time.sleep") as mock_sleep:
         action_calls = []
         dual_panel_control._run_on_both_panels(DUAL_PANEL_CONFIG, lambda: action_calls.append(1))
 
     assert action_calls == [1, 1]
     assert fake_hub.calls == [
         "try_connect",
-        ("enable", [0]), ("disable", [1, 6]),
-        ("enable", [1, 6]), ("disable", [0]),
+        # disable_other_ports=False both times - the original demo script's
+        # True would sweep-disable every OTHER port on the hub (e.g. the
+        # camera, if it shares this hub), not just the 2 that should go off;
+        # the very next disable_ports() call already narrowly targets those.
+        ("enable", [0], False), ("disable", [1, 6]),
+        ("enable", [1, 6], False), ("disable", [0]),
         "disconnect",
     ]
+    # Every settling sleep uses the configured hub_switch_settle_s, not a
+    # hardcoded value - lets the operator tune it in settings.yaml alone.
+    assert mock_sleep.call_args_list == [call(3.0)] * 3
 
 
 def test_run_on_both_panels_raises_if_hub_connection_fails():

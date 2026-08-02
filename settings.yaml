@@ -141,6 +141,13 @@ dual_panel:
   # not a real requirement - this is a brief start trigger, not something
   # that stays on for the whole session.
   relay_pulse_duration_s: 0.2
+  # How long to wait after switching which panel's USB port is hub-enabled
+  # before sending it any command - UNVERIFIED, needs tuning on the real
+  # rig. Bumped up from an initial 1s guess since a full USB re-enumeration
+  # after an Acroname port switch was taking noticeably longer than that in
+  # practice; keep raising this (no code change needed) if commands still
+  # seem to reach a panel before it's actually ready.
+  hub_switch_settle_s: 3.0
 
 paths:
   config_path: config.yaml
