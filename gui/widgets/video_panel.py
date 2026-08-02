@@ -12,13 +12,16 @@ class VideoPanel(QLabel):
         self.setScaledContents(True)
         self._force_square = force_square
         if force_square:
-            # Matches the design mockup: a fixed-size square anchored at
-            # its natural position, NOT stretched to fill the row - the
-            # mockup shows real empty space beside the camera boxes, not
-            # them growing to consume it. setFixedSize also sets the size
-            # policy to Fixed, so this intentionally opts out of the
-            # Expanding behavior below.
-            self.setFixedSize(320, 320)
+            # Matches the design mockup at its natural 320x320 size when
+            # there's room (sizeHint() below), but - unlike the old
+            # setFixedSize(320, 320) - allowed to shrink on a smaller/lower-
+            # resolution screen instead of rigidly holding 320px and forcing
+            # the rest of the page's content to overflow past the window's
+            # visible area with no way to reach it. Expanding + a real
+            # minimum, same shape as the non-square branch below, just with
+            # a squarer floor.
+            self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            self.setMinimumSize(160, 160)
         else:
             # Without this, QLabel's sizeHint() defaults to the pixmap's
             # native resolution (e.g. 1280x720) once a frame is set, so two
