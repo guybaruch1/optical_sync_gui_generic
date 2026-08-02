@@ -24,7 +24,7 @@ class ThresholdPreviewThread(QThread):
 
     def __init__(self, ctx, device_serial, pick_a, pick_b, camera_controls,
                  stream_a_xy, stream_b_xy, neighborhood_size=5,
-                 scan_direction=None, switch_time_ms=None, parent=None):
+                 scan_direction=None, switch_time_ms=None, display_stride=10, parent=None):
         super().__init__(parent)
         self.ctx = ctx
         self.device_serial = device_serial
@@ -39,6 +39,16 @@ class ThresholdPreviewThread(QThread):
         self._stream_b_safe_size = safe_neighborhood_size(stream_b_xy, neighborhood_size)
         self.scan_direction = scan_direction
         self.switch_time_ms = switch_time_ms
+        # How many frame-pairs between video-panel updates - every pair is
+        # still received, but brightness sampling + the frame_ready emit are
+        # both skipped in between, same reason SessionEngineThread throttles
+        # its own frame_ready: doing the (per-LED brightness-sampling +
+        # cross-thread Qt signal + overlay-drawing) work on EVERY single
+        # frame is exactly the unthrottled pattern that caused a real GUI
+        # freeze elsewhere in this app (see CLAUDE.md's Live Session
+        # pipeline section) - live-editable via this page's own toolbar
+        # spinbox, read fresh each time Start is clicked.
+        self.display_stride = display_stride
         self._stop_requested = False
         self._capture = None
 
@@ -90,14 +100,15 @@ class ThresholdPreviewThread(QThread):
             for stream_a_image, stream_b_image, _stream_a_ts_us, _stream_b_ts_us in self._capture.frames():
                 if self._stop_requested:
                     break
-                stream_a_bright = sample_all_neighborhood_brightness(
-                    stream_a_image, self.stream_a_xy, self._stream_a_safe_size
-                )
-                stream_b_bright = sample_all_neighborhood_brightness(
-                    stream_b_image, self.stream_b_xy, self._stream_b_safe_size
-                )
-                self.frame_ready.emit("stream_a", stream_a_image, frame_index, stream_a_bright)
-                self.frame_ready.emit("stream_b", stream_b_image, frame_index, stream_b_bright)
+                if frame_index % self.display_stride == 0:
+                    stream_a_bright = sample_all_neighborhood_brightness(
+                        stream_a_image, self.stream_a_xy, self._stream_a_safe_size
+                    )
+                    stream_b_bright = sample_all_neighborhood_brightness(
+                        stream_b_image, self.stream_b_xy, self._stream_b_safe_size
+                    )
+                    self.frame_ready.emit("stream_a", stream_a_image, frame_index, stream_a_bright)
+                    self.frame_ready.emit("stream_b", stream_b_image, frame_index, stream_b_bright)
                 frame_index += 1
         except Exception as exc:  # surfaced to the UI rather than crashing the worker thread silently
             self.error.emit(str(exc))

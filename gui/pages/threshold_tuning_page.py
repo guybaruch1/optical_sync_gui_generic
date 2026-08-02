@@ -16,11 +16,21 @@ mask is computed HERE, in _on_frame_ready, from whatever the relevant
 threshold-fraction spinbox currently reads, so a threshold change is
 reflected on the very next incoming frame with no thread restart needed.
 
-"Continue to Live Test" stops the preview thread and hands the tuned
-per-stream threshold arrays (domain.calibration.compute_threshold, applied
-to each stream's own calibrated on/off values) to MainWindow via the
-stream_a_threshold/stream_b_threshold properties - see main_window.py's
-_on_tuning_done."""
+Preview only runs between Start/Stop (not auto-started on arrival) - a
+"Frame Sample Interval" spinbox (same idea as Live Session's own, read
+fresh at Start) throttles how often the preview actually updates, in case
+full frame rate is more than the operator wants to watch. Stop is
+deliberately non-blocking (mirrors LiveSessionPage.stop_session -
+re-enabling happens off the thread's own `finished` signal, not
+immediately); "Continue to Live Test" is NOT - it blocks until the preview
+thread has genuinely finished (request_stop() + wait()) before handing off,
+so Live Session's own capture/LED-panel setup can never race this page's
+still-in-progress hardware cleanup.
+
+"Continue to Live Test" hands the tuned per-stream threshold arrays
+(domain.calibration.compute_threshold, applied to each stream's own
+calibrated on/off values) to MainWindow via the stream_a_threshold/
+stream_b_threshold properties - see main_window.py's _on_tuning_done."""
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QSpinBox, QDoubleSpinBox, QLabel, QFrame, QScrollArea,
@@ -109,12 +119,41 @@ class ThresholdTuningPage(QWidget):
         )
         control_row = QHBoxLayout(toolbar_frame)
         control_row.setContentsMargins(10, 8, 10, 8)
+        self.start_button = QPushButton("Start")
+        self.start_button.setStyleSheet(
+            "QPushButton { background-color: #2f6fed; color: white; border: 1px solid #2f6fed;"
+            " border-radius: 4px; padding: 5px 14px; }"
+            "QPushButton:disabled { background-color: #b7c7f0; color: #eef2fc; border: 1px solid #b7c7f0; }"
+        )
+        self.start_button.clicked.connect(self._on_start_clicked)
+        self.stop_button = QPushButton("Stop")
+        self.stop_button.clicked.connect(self._on_stop_clicked)
+        self.stop_button.setEnabled(False)
+        control_row.addWidget(self.start_button)
+        control_row.addWidget(self.stop_button)
+
         control_row.addWidget(QLabel("LED Switch Time (ms):"))
         self.switch_time_spinbox = QSpinBox()
         self.switch_time_spinbox.setRange(1, 10000)
         self.switch_time_spinbox.setValue(1)
         self.switch_time_spinbox.valueChanged.connect(self._on_switch_time_changed)
         control_row.addWidget(self.switch_time_spinbox)
+
+        control_row.addWidget(QLabel("Frame Sample Interval:"))
+        self.frame_sample_interval_spinbox = QSpinBox()
+        self.frame_sample_interval_spinbox.setRange(1, 2000)
+        # Matches Live Session's own frame_sample_interval default - how
+        # many frame-pairs between preview updates. Read fresh at Start
+        # (baked into the thread's constructor), so - like Live Session's
+        # own toolbar control - changing it mid-run wouldn't take effect
+        # until the next Start, hence locked while a preview is running.
+        self.frame_sample_interval_spinbox.setValue(10)
+        self.frame_sample_interval_spinbox.setToolTip(
+            "Frame-pairs between preview updates - lower to watch every frame, raise to slow "
+            "the preview down. Takes effect on the next Start."
+        )
+        control_row.addWidget(self.frame_sample_interval_spinbox)
+
         control_row.addStretch(1)
         self.continue_button = QPushButton("Continue to Live Test")
         self.continue_button.setStyleSheet(
@@ -148,26 +187,59 @@ class ThresholdTuningPage(QWidget):
         self.stream_a_title_label.setText("{} - {}".format(short_name, stream_a_label))
         self.stream_b_title_label.setText("{} - {}".format(short_name, stream_b_label))
         self.status_label.setText("")
-        self._start_preview()
+        # Defensive - a stale preview from a previous context (if
+        # set_context is ever called again) must not keep running against
+        # the new one's stream_a_xy/on/off arrays.
+        self._stop_preview_blocking()
 
-    def _start_preview(self):
-        self._stop_preview()
+    def _on_start_clicked(self):
         ctx = self._context
         self.preview_thread = ThresholdPreviewThread(
             ctx["ctx"], ctx["device_serial"], ctx["pick_a"], ctx["pick_b"], ctx["camera_controls"],
             stream_a_xy=ctx["stream_a_xy"], stream_b_xy=ctx["stream_b_xy"],
             neighborhood_size=ctx["neighborhood_size"], scan_direction=ctx["scan_direction"],
             switch_time_ms=self.switch_time_spinbox.value(),
+            display_stride=self.frame_sample_interval_spinbox.value(),
         )
         self.preview_thread.frame_ready.connect(self._on_frame_ready)
         self.preview_thread.error.connect(self._on_error)
+        # Gate re-enabling Start on the thread's own `finished` signal, not
+        # on the Stop button click itself - same reason
+        # LiveSessionPage.stop_session/_on_engine_thread_finished do this:
+        # `finished` only fires once run() (and its hardware-cleanup
+        # `finally` block) has actually completed, so a new Start can never
+        # race the old thread's still-in-progress camera/LED-panel teardown.
+        self.preview_thread.finished.connect(self._on_preview_thread_finished)
         self.preview_thread.start()
 
-    def _stop_preview(self):
+        self.status_label.setText("")
+        self.start_button.setEnabled(False)
+        self.stop_button.setEnabled(True)
+        self.frame_sample_interval_spinbox.setEnabled(False)
+
+    def _on_stop_clicked(self):
+        if self.preview_thread is not None:
+            self.preview_thread.request_stop()
+
+    def _on_preview_thread_finished(self):
+        self.preview_thread = None
+        self.start_button.setEnabled(True)
+        self.stop_button.setEnabled(False)
+        self.frame_sample_interval_spinbox.setEnabled(True)
+
+    def _stop_preview_blocking(self):
+        # Unlike _on_stop_clicked (non-blocking - the Stop button just asks
+        # nicely and lets `finished` re-enable things whenever cleanup
+        # actually completes), callers that need hardware to be genuinely
+        # free before proceeding (set_context's defensive stop,
+        # _on_continue_clicked below) must actually wait for it.
         if self.preview_thread is not None:
             self.preview_thread.request_stop()
             self.preview_thread.wait()
             self.preview_thread = None
+            self.start_button.setEnabled(True)
+            self.stop_button.setEnabled(False)
+            self.frame_sample_interval_spinbox.setEnabled(True)
 
     def _on_error(self, message):
         self.status_label.setText(message)
@@ -229,5 +301,5 @@ class ThresholdTuningPage(QWidget):
         return self.switch_time_spinbox.value()
 
     def _on_continue_clicked(self):
-        self._stop_preview()
+        self._stop_preview_blocking()
         self.tuning_done.emit()

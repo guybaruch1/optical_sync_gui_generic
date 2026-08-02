@@ -113,12 +113,14 @@ The window opens maximized. Walk through the wizard:
    `output/debug_infrared1_detection.png`, `output/debug_color_detection.png`)
    — these show the exact masked region and whatever was detected, even
    when zero LEDs were found.
-5. **Threshold Tuning** — a live video preview of both streams starts
-   automatically, each with the same on/off overlay Live Session uses. Drag
-   each stream's own Threshold Fraction (and LED Switch Time, shared by
-   both) while watching which LEDs are classified "on" right now, then click
-   **Continue to Live Test** once you're happy with both streams'
-   classification.
+5. **Threshold Tuning** — click **Start** for a live video preview of both
+   streams, each with the same on/off overlay Live Session uses (tune the
+   Frame Sample Interval first if you want it slower/faster - locked once
+   running). Drag each stream's own Threshold Fraction (and LED Switch
+   Time, shared by both) while watching which LEDs are classified "on"
+   right now, click **Stop** any time, then click **Continue to Live Test**
+   once you're happy with both streams' classification (this stops the
+   preview automatically if it's still running).
 6. **Live Session** — set an optional duration (0 = manual stop), tune the
    LED switch time and frame sample interval if needed (locked once a
    session is running), click **Start**, watch both video feeds (each with a

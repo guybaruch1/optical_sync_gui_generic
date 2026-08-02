@@ -5,26 +5,38 @@ import numpy as np
 from gui.pages.threshold_tuning_page import ThresholdTuningPage
 
 
+class _FakeSignal:
+    """Bare-bones stand-in for a Qt signal - records connected slots and lets
+    tests fire them on demand, so a fake thread's `finished` can be
+    triggered manually to simulate real hardware cleanup completing."""
+    def __init__(self):
+        self._slots = []
+
+    def connect(self, slot):
+        self._slots.append(slot)
+
+    def emit(self, *args, **kwargs):
+        for slot in self._slots:
+            slot(*args, **kwargs)
+
+
 class _FakePreviewThread:
-    """Stands in for ThresholdPreviewThread so set_context()'s auto-start
-    never touches real hardware - records the args/kwargs it was
-    constructed with so tests can assert on what actually got passed."""
+    """Stands in for ThresholdPreviewThread so Start never touches real
+    hardware - records the args/kwargs it was constructed with so tests can
+    assert on what actually got passed."""
     last_args = None
     last_kwargs = None
 
     def __init__(self, *args, **kwargs):
         _FakePreviewThread.last_args = args
         _FakePreviewThread.last_kwargs = kwargs
-        self.frame_ready = MagicMock()
-        self.error = MagicMock()
+        self.frame_ready = _FakeSignal()
+        self.error = _FakeSignal()
+        self.finished = _FakeSignal()
+        self.request_stop = MagicMock()
+        self.wait = MagicMock()
 
     def start(self):
-        pass
-
-    def request_stop(self):
-        pass
-
-    def wait(self):
         pass
 
 
@@ -53,6 +65,13 @@ def _page_with_context(**context_overrides):
     return page
 
 
+def _started_page(**context_overrides):
+    page = _page_with_context(**context_overrides)
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        page._on_start_clicked()
+    return page
+
+
 def test_set_context_prefills_both_threshold_fraction_spinboxes_independently(qapp):
     page = _page_with_context(
         stream_a_threshold_fraction_default=0.3, stream_b_threshold_fraction_default=0.6,
@@ -66,12 +85,58 @@ def test_set_context_prefills_switch_time_spinbox(qapp):
     assert page.switch_time_spinbox.value() == 7
 
 
-def test_set_context_auto_starts_preview_with_correct_args(qapp):
+def test_set_context_does_not_auto_start_preview(qapp):
+    page = _page_with_context()
+    assert page.preview_thread is None
+    assert page.start_button.isEnabled()
+    assert not page.stop_button.isEnabled()
+
+
+def test_start_button_starts_preview_with_correct_args(qapp):
     page = _page_with_context(device_serial="abc123", switch_time_ms=3, scan_direction=1)
+    page.frame_sample_interval_spinbox.setValue(5)
+
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        page._on_start_clicked()
+
     assert page.preview_thread is not None
     assert _FakePreviewThread.last_args[1] == "abc123"
     assert _FakePreviewThread.last_kwargs["switch_time_ms"] == 3
     assert _FakePreviewThread.last_kwargs["scan_direction"] == 1
+    assert _FakePreviewThread.last_kwargs["display_stride"] == 5
+
+
+def test_start_button_disables_itself_enables_stop_and_locks_frame_sample_interval(qapp):
+    page = _started_page()
+    assert not page.start_button.isEnabled()
+    assert page.stop_button.isEnabled()
+    assert not page.frame_sample_interval_spinbox.isEnabled()
+
+
+def test_stop_button_requests_stop_without_blocking(qapp):
+    page = _started_page()
+    thread = page.preview_thread
+
+    page._on_stop_clicked()
+
+    thread.request_stop.assert_called_once()
+    thread.wait.assert_not_called()
+    # Non-blocking - re-enabling only happens once `finished` actually fires,
+    # not immediately on the Stop click.
+    assert page.preview_thread is thread
+    assert not page.start_button.isEnabled()
+
+
+def test_finished_signal_reenables_start_and_unlocks_frame_sample_interval(qapp):
+    page = _started_page()
+    thread = page.preview_thread
+
+    thread.finished.emit()
+
+    assert page.preview_thread is None
+    assert page.start_button.isEnabled()
+    assert not page.stop_button.isEnabled()
+    assert page.frame_sample_interval_spinbox.isEnabled()
 
 
 def test_stream_a_threshold_property_reflects_current_spinbox_value(qapp):
@@ -113,11 +178,9 @@ def test_on_frame_ready_computes_mask_from_current_spinbox_value_not_the_origina
     assert captured["mask"] == [False, True]
 
 
-def test_continue_button_stops_preview_thread_and_emits_tuning_done(qapp):
-    page = _page_with_context()
+def test_continue_button_blocks_until_preview_thread_stopped_and_emits_tuning_done(qapp):
+    page = _started_page()
     thread = page.preview_thread
-    thread.request_stop = MagicMock()
-    thread.wait = MagicMock()
 
     received = []
     page.tuning_done.connect(lambda: received.append(True))
@@ -127,3 +190,14 @@ def test_continue_button_stops_preview_thread_and_emits_tuning_done(qapp):
     thread.wait.assert_called_once()
     assert received == [True]
     assert page.preview_thread is None
+    assert page.start_button.isEnabled()
+
+
+def test_continue_button_is_a_noop_stop_when_nothing_is_running(qapp):
+    page = _page_with_context()  # never started
+
+    received = []
+    page.tuning_done.connect(lambda: received.append(True))
+    page._on_continue_clicked()  # must not raise
+
+    assert received == [True]
