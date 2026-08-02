@@ -10,7 +10,7 @@ joins), which read as harsh/jagged on a live-updating chart."""
 from collections import deque
 
 import pyqtgraph as pg
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QSize
 from PySide6.QtWidgets import QSizePolicy
 
 # dataviz skill's dark-mode chart chrome (references/palette.md).
@@ -46,6 +46,22 @@ class LivePlot(pg.PlotWidget):
         self._curves = {}
         self._x_data = {}
         self._y_data = {}
+
+    def sizeHint(self):
+        # pg.PlotWidget's own sizeHint is 600x480 - harmless when this
+        # widget's real geometry comes straight from the parent's actual
+        # available space (Expanding just lets it grow into whatever's
+        # there), but LiveSessionPage's content now lives inside a
+        # QScrollArea, which sizes the content widget off each child's
+        # sizeHint whenever that exceeds the viewport - so the inherited
+        # 480px-tall default made every plot render at that oversized
+        # native size (and pull in a scrollbar) even on a normal/maximized
+        # screen. A modest sizeHint here is only a floor for "how much
+        # room to ask for before there's real space to grow into" - on
+        # any screen with actual room to spare, Expanding + the graphs
+        # column's stretch factors still let this widget fill it, exactly
+        # like before.
+        return QSize(400, 200)
 
     def add_series(self, name, color, display_name=None):
         pen = pg.mkPen(color=color, width=2)
