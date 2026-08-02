@@ -1,6 +1,6 @@
 """Wizard shell: Device select -> Stream config -> ROI select ->
-Calibration -> Live session, in a QStackedWidget, persisting choices to
-state.gui_state as the user moves through the wizard.
+Calibration -> Threshold tuning -> Live session, in a QStackedWidget,
+persisting choices to state.gui_state as the user moves through the wizard.
 
 Generalized from the old hardcoded IR/RGB-sensor version to the generic
 pick_a/pick_b stream picks the Stream Config page now produces (Task 18):
@@ -21,6 +21,7 @@ from gui.pages.device_select_page import DeviceSelectPage
 from gui.pages.stream_config_page import StreamConfigPage
 from gui.pages.roi_select_page import RoiSelectPage, stream_label
 from gui.pages.calibration_page import CalibrationPage
+from gui.pages.threshold_tuning_page import ThresholdTuningPage
 from gui.pages.live_session_page import LiveSessionPage
 from state.gui_state import GuiState, save_gui_state
 from engine.streams import (
@@ -46,8 +47,15 @@ class MainWindow(QMainWindow):
         self.stream_config_page = StreamConfigPage()
         self.roi_page = RoiSelectPage()
         self.calibration_page = CalibrationPage()
+        self.threshold_tuning_page = ThresholdTuningPage()
         self.live_session_page = LiveSessionPage()
         self._device_name = None
+        # Stashed in _on_calibration_done, consumed in _on_tuning_done -
+        # everything Live Session still needs that Threshold Tuning itself
+        # has no use for (CSV paths, output_dir, frame-drop/pairing-gap
+        # tuning, etc.). See module docstring for why this can't just live
+        # in GuiState/settings alone.
+        self._pending_ctx = None
         # Live pick_a/pick_b/camera_controls, stashed here in
         # _on_config_chosen and read back in _on_roi_chosen/
         # _on_calibration_done - GuiState alone can't round-trip these (it
@@ -59,13 +67,14 @@ class MainWindow(QMainWindow):
         self._camera_controls = None
 
         for page in (self.device_page, self.stream_config_page, self.roi_page,
-                     self.calibration_page, self.live_session_page):
+                     self.calibration_page, self.threshold_tuning_page, self.live_session_page):
             self.stack.addWidget(page)
 
         self.device_page.device_chosen.connect(self._on_device_chosen)
         self.stream_config_page.config_chosen.connect(self._on_config_chosen)
         self.roi_page.roi_chosen.connect(self._on_roi_chosen)
         self.calibration_page.calibration_done.connect(self._on_calibration_done)
+        self.threshold_tuning_page.tuning_done.connect(self._on_tuning_done)
 
         self.device_page.refresh_devices(self.ctx)
         self.stack.setCurrentWidget(self.device_page)
@@ -218,19 +227,12 @@ class MainWindow(QMainWindow):
         stream_b_off = np.array([stream_b_positions[i][3] for i in stream_b_ids])
 
         output_dir = ensure_output_dir(self.settings)
-        self.live_session_page.set_context(
-            self.ctx, self.gui_state.device_serial, pick_a, pick_b, camera_controls,
-            switch_time_ms=self.settings["test"]["switch_time_ms"],
+        # Everything Live Session will still need once tuning is done, but
+        # that Threshold Tuning itself has no use for - see _on_tuning_done.
+        self._pending_ctx = dict(
+            device_serial=self.gui_state.device_serial, pick_a=pick_a, pick_b=pick_b,
+            camera_controls=camera_controls,
             scan_direction=self.settings["test"]["scan_direction"],
-            # Raw calibrated on/off values, not a precomputed threshold -
-            # live_session_page.py recomputes the actual per-LED threshold
-            # fresh at start_session() time from its own live-editable
-            # Threshold Fraction toolbar spinbox (this settings.yaml value
-            # is only that spinbox's starting default), the same pattern
-            # switch_time_ms/frame_sample_interval already use.
-            stream_a_on=stream_a_on, stream_a_off=stream_a_off,
-            stream_b_on=stream_b_on, stream_b_off=stream_b_off,
-            threshold_fraction=self.settings["test"]["threshold_fraction"],
             stream_a_xy=stream_a_xy, stream_b_xy=stream_b_xy,
             num_leds=num_leds, neighborhood_size=self.settings["test"]["neighborhood_size"],
             frame_drop_threshold_factor=self.settings["test"]["frame_drop_threshold_factor"],
@@ -244,6 +246,47 @@ class MainWindow(QMainWindow):
             stream_a_roi=self.gui_state.stream_a_roi, stream_b_roi=self.gui_state.stream_b_roi,
             camera_name=camera_name,
             stream_a_label=stream_label(pick_a), stream_b_label=stream_label(pick_b),
+        )
+        self.threshold_tuning_page.set_context(
+            self.ctx, self.gui_state.device_serial, pick_a, pick_b, camera_controls,
+            stream_a_xy=stream_a_xy, stream_b_xy=stream_b_xy,
+            stream_a_on=stream_a_on, stream_a_off=stream_a_off,
+            stream_b_on=stream_b_on, stream_b_off=stream_b_off,
+            num_leds=num_leds, neighborhood_size=self.settings["test"]["neighborhood_size"],
+            scan_direction=self.settings["test"]["scan_direction"],
+            switch_time_ms=self.settings["test"]["switch_time_ms"],
+            stream_a_threshold_fraction_default=self.settings["test"]["stream_a_threshold_fraction"],
+            stream_b_threshold_fraction_default=self.settings["test"]["stream_b_threshold_fraction"],
+            stream_a_roi=self.gui_state.stream_a_roi, stream_b_roi=self.gui_state.stream_b_roi,
+            camera_name=camera_name,
+            stream_a_label=stream_label(pick_a), stream_b_label=stream_label(pick_b),
+        )
+        self.stack.setCurrentWidget(self.threshold_tuning_page)
+
+    def _on_tuning_done(self):
+        pending = self._pending_ctx
+        self.live_session_page.set_context(
+            self.ctx, pending["device_serial"], pending["pick_a"], pending["pick_b"], pending["camera_controls"],
+            # The tuned switch time (not settings.yaml's raw default) - this
+            # is what was actually previewed on the Threshold Tuning page,
+            # so it's the more accurate starting point for the real test.
+            switch_time_ms=self.threshold_tuning_page.switch_time_ms,
+            scan_direction=pending["scan_direction"],
+            stream_a_threshold=self.threshold_tuning_page.stream_a_threshold,
+            stream_b_threshold=self.threshold_tuning_page.stream_b_threshold,
+            stream_a_xy=pending["stream_a_xy"], stream_b_xy=pending["stream_b_xy"],
+            num_leds=pending["num_leds"], neighborhood_size=pending["neighborhood_size"],
+            frame_drop_threshold_factor=pending["frame_drop_threshold_factor"],
+            warmup_pairs_to_skip=pending["warmup_pairs_to_skip"],
+            pairing_gap_outlier_threshold_us=pending["pairing_gap_outlier_threshold_us"],
+            kept_csv_path=pending["kept_csv_path"],
+            dropped_csv_path=pending["dropped_csv_path"],
+            output_dir=pending["output_dir"],
+            snapshot_every_n_pairs=pending["snapshot_every_n_pairs"],
+            max_snapshots=pending["max_snapshots"],
+            stream_a_roi=pending["stream_a_roi"], stream_b_roi=pending["stream_b_roi"],
+            camera_name=pending["camera_name"],
+            stream_a_label=pending["stream_a_label"], stream_b_label=pending["stream_b_label"],
         )
         self.stack.setCurrentWidget(self.live_session_page)
 

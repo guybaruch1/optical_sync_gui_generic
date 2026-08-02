@@ -60,7 +60,11 @@ immediately, not discovered by data-cleaning after the fact.
 4. **Calibration** — detects every individual LED's pixel position and its
    on/off brightness threshold, with debug images saved automatically so a
    failed detection is diagnosable, not just a cryptic error.
-5. **Live Session** — runs the actual test: live IR/RGB video with a real-time
+5. **Threshold Tuning** — a live video preview of both streams, each with its
+   own independently-tunable on/off threshold (different sensors have
+   different brightness characteristics), so you can watch the live LED
+   detection and adjust before committing to the actual test.
+6. **Live Session** — runs the actual test: live IR/RGB video with a real-time
    LED on/off overlay, three live-scrolling graphs (HW TS Latency, Optical
    Sync, Frame Drops), a live stats sidebar with running min/avg/std/max, and
    Start/Stop with an optional fixed duration.

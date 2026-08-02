@@ -1,3 +1,6 @@
+from unittest.mock import MagicMock, patch
+
+import numpy as np
 import pyrealsense2 as rs
 from PySide6.QtWidgets import QMessageBox
 
@@ -162,3 +165,88 @@ def test_on_config_chosen_persists_last_test_name(qapp, monkeypatch):
     }))
 
     assert window.gui_state.last_test_name == "IR vs RGB sync"
+
+
+# --- Calibration -> Threshold Tuning -> Live Session handoff: threshold
+# tuning (per-stream, with a live detection preview) moved to its own page
+# between Calibration and Live Session - _on_calibration_done now populates
+# ThresholdTuningPage instead of LiveSessionPage directly, and a new
+# _on_tuning_done carries the tuned values the rest of the way. ---
+
+class _FakePreviewThread:
+    def __init__(self, *args, **kwargs):
+        self.frame_ready = MagicMock()
+        self.error = MagicMock()
+
+    def start(self):
+        pass
+
+    def request_stop(self):
+        pass
+
+    def wait(self):
+        pass
+
+
+def _full_settings(stream_options):
+    settings = _minimal_settings(stream_options)
+    settings["calibration"] = {"settle_frames": 15}
+    settings["paths"] = {
+        "config_path": "config.yaml", "raw_csv_path": "raw.csv", "frame_drop_csv_path": "drops.csv",
+    }
+    settings["test"] = {
+        "num_leds": 1, "scan_direction": 1, "switch_time_ms": 1, "neighborhood_size": 5,
+        "stream_a_threshold_fraction": 0.25, "stream_b_threshold_fraction": 0.25,
+        "frame_drop_threshold_factor": 1.5, "warmup_pairs_to_skip": 0,
+        "pairing_gap_outlier_threshold_us": 100000, "snapshot_every_n_pairs": 20, "max_snapshots": 15,
+    }
+    return settings
+
+
+def _window_after_config_chosen(qapp, monkeypatch, tmp_path):
+    settings = _full_settings({"Intel RealSense D455": [_ir_vs_rgb_test()]})
+    window = _make_window(qapp, settings)
+    monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [IR1, COLOR0])
+    monkeypatch.setattr(main_window_module, "save_gui_state", lambda state: None)
+    monkeypatch.setattr(window.roi_page, "set_context", lambda *a, **k: None)
+    monkeypatch.setattr(main_window_module, "ensure_output_dir", lambda settings: str(tmp_path))
+    monkeypatch.setattr(
+        main_window_module, "load_led_positions",
+        lambda *a, **k: ({"0": [1.0, 1.0, 300.0, 100.0, 200.0]}, {"0": [2.0, 2.0, 600.0, 200.0, 400.0]}),
+    )
+    window._on_device_chosen("SN123", "Intel RealSense D455")
+    window._on_config_chosen((IR1, COLOR0, {
+        "emitter_enabled": False, "auto_exposure": True, "exposure": None, "gain": None,
+    }))
+    return window
+
+
+def test_on_calibration_done_populates_threshold_tuning_page_and_switches_to_it(qapp, monkeypatch, tmp_path):
+    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+
+    assert window.stack.currentWidget() is window.threshold_tuning_page
+    # stream_a: off=100/on=300, settings default fraction 0.25 -> 100+0.25*200=150
+    assert list(window.threshold_tuning_page.stream_a_threshold) == [150.0]
+    # stream_b: off=200/on=600, same default fraction 0.25 -> 200+0.25*400=300
+    assert list(window.threshold_tuning_page.stream_b_threshold) == [300.0]
+
+
+def test_on_tuning_done_passes_tuned_per_stream_thresholds_to_live_session(qapp, monkeypatch, tmp_path):
+    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        # Tune each stream independently, away from the settings.yaml default.
+        window.threshold_tuning_page.stream_a_threshold_fraction_spinbox.setValue(0.5)
+        window.threshold_tuning_page.stream_b_threshold_fraction_spinbox.setValue(0.75)
+        window.threshold_tuning_page.switch_time_spinbox.setValue(5)
+        window._on_tuning_done()
+
+    assert window.stack.currentWidget() is window.live_session_page
+    ctx = window.live_session_page._context
+    assert list(ctx["stream_a_threshold"]) == [200.0]  # 100 + 0.5*200
+    assert list(ctx["stream_b_threshold"]) == [500.0]  # 200 + 0.75*400
+    assert ctx["switch_time_ms"] == 5

@@ -113,15 +113,21 @@ The window opens maximized. Walk through the wizard:
    `output/debug_infrared1_detection.png`, `output/debug_color_detection.png`)
    — these show the exact masked region and whatever was detected, even
    when zero LEDs were found.
-5. **Live Session** — set an optional duration (0 = manual stop), tune the
-   LED switch time, frame sample interval, and threshold fraction if needed
-   (locked once a session is running), click **Start**, watch both video
-   feeds (each with a live LED on/off overlay), the live plots (toggle
-   either metric series on/off), and the frame-drops plot. Click **Save
-   Debug Snapshot** any
-   time to check the LED on/off classification against the live video.
-   Click **Stop** (or let the duration elapse) to write the CSVs, a summary
-   plot image, and a final debug snapshot under `output/`.
+5. **Threshold Tuning** — a live video preview of both streams starts
+   automatically, each with the same on/off overlay Live Session uses. Drag
+   each stream's own Threshold Fraction (and LED Switch Time, shared by
+   both) while watching which LEDs are classified "on" right now, then click
+   **Continue to Live Test** once you're happy with both streams'
+   classification.
+6. **Live Session** — set an optional duration (0 = manual stop), tune the
+   LED switch time and frame sample interval if needed (locked once a
+   session is running), click **Start**, watch both video feeds (each with a
+   live LED on/off overlay, using the thresholds just tuned), the live plots
+   (toggle either metric series on/off), and the frame-drops plot. Click
+   **Save Debug Snapshot** any time to check the LED on/off classification
+   against the live video. Click **Stop** (or let the duration elapse) to
+   write the CSVs, a summary plot image, and a final debug snapshot under
+   `output/`.
 
 ## Configuration files
 
@@ -130,7 +136,9 @@ The window opens maximized. Walk through the wizard:
   (pre-selected in the Stream Config dropdowns, not enforced), calibration
   tuning (`settle_frames`, `row_gap_px`, `min_blob_area`,
   `neighborhood_size`, `min_acceptable_contrast`), and live-test tuning
-  (`scan_direction`, `switch_time_ms`, `num_leds`, `threshold_fraction`,
+  (`scan_direction`, `switch_time_ms`, `num_leds`,
+  `stream_a_threshold_fraction`/`stream_b_threshold_fraction` (starting
+  defaults for the Threshold Tuning page's per-stream spinboxes),
   `frame_drop_threshold_factor`, `warmup_pairs_to_skip`,
   `pairing_gap_outlier_threshold_us`). Nothing in the app writes to this
   file.

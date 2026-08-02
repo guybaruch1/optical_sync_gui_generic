@@ -4,6 +4,7 @@ import yaml
 from domain.calibration import (
     assign_grid_ids,
     build_positions_with_thresholds,
+    compute_threshold,
     update_config_leds,
     load_led_positions,
 )
@@ -38,6 +39,29 @@ def test_build_positions_with_thresholds_computes_midpoint():
     assert on_value == 200.0
     assert off_value == 100.0
     assert threshold == 150.0
+
+
+def test_compute_threshold_at_half_fraction_matches_calibrations_own_midpoint():
+    on_values = np.array([300.0, 300.0])
+    off_values = np.array([100.0, 100.0])
+    result = compute_threshold(on_values, off_values, fraction=0.5)
+    assert list(result) == [200.0, 200.0]
+
+
+def test_compute_threshold_scales_between_off_and_on():
+    on_values = np.array([300.0])
+    off_values = np.array([100.0])
+    result = compute_threshold(on_values, off_values, fraction=0.25)
+    assert list(result) == [150.0]
+
+
+def test_compute_threshold_is_independent_per_stream_for_different_brightness_ranges():
+    # Two streams with different brightness ranges (e.g. IR vs RGB) tuned
+    # at different fractions must not bleed into each other's result.
+    stream_a_threshold = compute_threshold(np.array([300.0]), np.array([100.0]), fraction=0.25)
+    stream_b_threshold = compute_threshold(np.array([600.0]), np.array([200.0]), fraction=0.75)
+    assert list(stream_a_threshold) == [150.0]
+    assert list(stream_b_threshold) == [500.0]
 
 
 def test_build_positions_with_thresholds_caps_window_at_safe_size_for_tight_spacing(monkeypatch):

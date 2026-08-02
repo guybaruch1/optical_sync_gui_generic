@@ -49,6 +49,18 @@ def build_positions_with_thresholds(xy_positions, on_frame, off_frame, neighborh
     return result
 
 
+def compute_threshold(on_values, off_values, fraction):
+    # Calibration itself (above) always assumes a full exposure and fixes
+    # fraction at 0.5. At runtime - live-tunable per stream on the
+    # Threshold Tuning wizard page - a faster LED switch time only reaches
+    # a FRACTION of that calibrated brightness, so the live on/off cutoff
+    # needs to be rescaled down from the same on/off values calibration
+    # already measured, per stream (different sensors' brightness/exposure
+    # characteristics differ, hence a per-stream fraction rather than one
+    # shared value).
+    return off_values + fraction * (on_values - off_values)
+
+
 def update_config_leds(config_path, camera_name, stream_a_slug, stream_a_positions, stream_a_res,
                         stream_b_slug, stream_b_positions, stream_b_res):
     with open(config_path, "r") as f:

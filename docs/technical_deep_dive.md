@@ -49,24 +49,40 @@ Per-LED, not one global constant — brightness varies across the panel with
 exposure, angle, and lens vignetting, so a single global cutoff would
 misclassify LEDs near the panel's edges.
 
-## 4. Live threshold: rescaled for switch speed
+## 4. Live threshold: rescaled for switch speed, tuned per stream
 
 Calibration's midpoint assumes an LED held on for a **full exposure**. A live
 session can run `switch_time_ms` far below the camera's frame interval (that's
 the point of the test — see §9), so within one exposure window an LED is only
 lit for a *fraction* of it, and never reaches its calibrated `on_value`.
-`gui/main_window.py`'s `_on_calibration_done` recomputes the threshold used
-during the actual test:
+`domain/calibration.py`'s `compute_threshold(on, off, fraction)` recomputes
+the threshold actually used:
 
 ```
-ir_threshold  = ir_off  + threshold_fraction * (ir_on  - ir_off)
-rgb_threshold = rgb_off + threshold_fraction * (rgb_on - rgb_off)
+stream_a_threshold = compute_threshold(stream_a_on, stream_a_off, stream_a_fraction)
+stream_b_threshold = compute_threshold(stream_b_on, stream_b_off, stream_b_fraction)
 ```
 
-`threshold_fraction` (`settings.yaml`: `test.threshold_fraction`, default
-`0.25`) is deliberately **below** calibration's fixed `0.5` — tune it down
-further for faster switch speeds relative to the camera's exposure time, up
-towards `0.5` if `switch_time_ms` is closer to a full frame interval.
+Each stream gets its **own** independently-tunable fraction — different
+sensors (IR vs RGB, or two different IR sensors) have different
+brightness/exposure characteristics, so one shared fraction across both
+streams would be wrong. Tuning happens on its own wizard page,
+**Threshold Tuning**, inserted between Calibration and Live Session:
+`gui/pages/threshold_tuning_page.py`'s `ThresholdTuningPage` shows a live
+video feed of both streams (via `engine/threshold_preview_thread.py`'s
+`ThresholdPreviewThread`, which streams raw per-LED brightness, not a
+precomputed mask) with the same on/off overlay Live Session draws, so you
+can drag each stream's fraction spinbox and see which LEDs are classified
+"on" right now, before committing to the actual test. `settings.yaml`'s
+`test.stream_a_threshold_fraction`/`stream_b_threshold_fraction` (default
+`0.25` each) are only that page's starting defaults — deliberately
+**below** calibration's fixed `0.5`, tuned down further for faster switch
+speeds relative to the camera's exposure time, up towards `0.5` if
+`switch_time_ms` is closer to a full frame interval. Once you click
+**Continue to Live Test**, `gui/main_window.py`'s `_on_tuning_done` passes
+the final tuned `stream_a_threshold`/`stream_b_threshold` arrays straight
+into Live Session — Live Session itself has no threshold-fraction control
+or on/off-to-threshold math of its own.
 
 ## 5. On/off classification, live
 
@@ -309,7 +325,7 @@ different callers:
 | `settings.yaml` key | Used in | Effect of increasing it |
 |---|---|---|
 | `test.switch_time_ms` | §7 gap_ms scale, LED panel real scan speed | Coarser but more robust position-gap resolution; live-editable per run (toolbar) |
-| `test.threshold_fraction` | §4 live on/off threshold | Higher = stricter "on" classification; must go lower as switch speed increases relative to exposure |
+| `test.stream_a_threshold_fraction` / `stream_b_threshold_fraction` | §4 live on/off threshold, tuned per stream on the Threshold Tuning page | Higher = stricter "on" classification; must go lower as switch speed increases relative to exposure |
 | `test.frame_drop_threshold_factor` | §9 drop detection | Higher = more tolerant of jitter, more likely to miss a real drop |
 | `test.warmup_pairs_to_skip` | §7 exclusion | Higher = more auto-exposure settling time excluded from stats, less early data |
 | `test.pairing_gap_outlier_threshold_us` | §8 exclusion | Higher = tolerates larger raw HW clock disagreement before flagging as unreliable |

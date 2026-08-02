@@ -1,0 +1,233 @@
+"""Wizard step 5 (of 6) - inserted between Calibration and Live Session:
+shows a LIVE video preview of both streams, each with the same green/red
+on-off detection-circle overlay Live Session draws
+(domain.realsense_utils.draw_led_state_overlay), so the operator can tune
+each stream's OWN threshold fraction while watching which LEDs the app
+currently classifies as "on" - before committing to an actual timed test
+run. LED Switch Time is also live-editable here (it directly affects how
+bright an LED gets before switching off, which is exactly what the
+threshold fraction has to compensate for), separately from Live Session's
+own switch-time control.
+
+Unlike SessionEngineThread (which drives a TestSession/PairingGapMetric/
+PositionGapMetric/CSV-recording run), engine.threshold_preview_thread's
+ThresholdPreviewThread only streams video + per-LED brightness - the on/off
+mask is computed HERE, in _on_frame_ready, from whatever the relevant
+threshold-fraction spinbox currently reads, so a threshold change is
+reflected on the very next incoming frame with no thread restart needed.
+
+"Continue to Live Test" stops the preview thread and hands the tuned
+per-stream threshold arrays (domain.calibration.compute_threshold, applied
+to each stream's own calibrated on/off values) to MainWindow via the
+stream_a_threshold/stream_b_threshold properties - see main_window.py's
+_on_tuning_done."""
+
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QSpinBox, QDoubleSpinBox, QLabel, QFrame, QScrollArea,
+)
+from PySide6.QtCore import Signal
+
+from gui.widgets.video_panel import VideoPanel
+from gui.pages.live_session_page import _short_camera_name
+from engine.threshold_preview_thread import ThresholdPreviewThread
+from engine.led_panel import LEDPanel
+from domain.calibration import compute_threshold
+from domain.realsense_utils import draw_led_state_overlay, crop_to_roi
+
+
+class ThresholdTuningPage(QWidget):
+    tuning_done = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._context = None
+        self.preview_thread = None
+
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.NoFrame)
+        content_widget = QWidget()
+        content_widget.setStyleSheet("QWidget { background-color: #f2f0ea; }")
+        layout = QVBoxLayout(content_widget)
+        scroll_area.setWidget(content_widget)
+        outer_layout.addWidget(scroll_area)
+
+        video_row = QHBoxLayout()
+        self.stream_a_panel = VideoPanel(force_square=True)
+        self.stream_b_panel = VideoPanel(force_square=True)
+        for panel in (self.stream_a_panel, self.stream_b_panel):
+            panel.setStyleSheet("background-color: #3a3a3a; border-radius: 4px;")
+        # Placeholder text until set_context() fills in the actual camera
+        # model name + stream label - stream identity isn't known until then.
+        self.stream_a_title_label = QLabel("Stream A")
+        self.stream_b_title_label = QLabel("Stream B")
+        for title_label in (self.stream_a_title_label, self.stream_b_title_label):
+            title_label.setStyleSheet(
+                "color: #555555; font-weight: 600; font-size: 9pt;"
+                "text-transform: uppercase; letter-spacing: 1px; border: none; background: transparent;"
+            )
+
+        self.stream_a_threshold_fraction_spinbox = QDoubleSpinBox()
+        self.stream_b_threshold_fraction_spinbox = QDoubleSpinBox()
+        for spinbox in (self.stream_a_threshold_fraction_spinbox, self.stream_b_threshold_fraction_spinbox):
+            spinbox.setRange(0.0, 1.0)
+            spinbox.setSingleStep(0.01)
+            spinbox.setDecimals(2)
+            spinbox.setValue(0.25)
+            spinbox.setToolTip(
+                "Fraction between this stream's calibrated off/on brightness used as the live "
+                "on/off cutoff: threshold = off + fraction*(on-off). Drag while watching the "
+                "preview above - each change is reflected on the very next frame."
+            )
+
+        stream_a_column = QVBoxLayout()
+        stream_a_column.addWidget(self.stream_a_title_label)
+        stream_a_column.addWidget(self.stream_a_panel)
+        stream_a_fraction_row = QHBoxLayout()
+        stream_a_fraction_row.addWidget(QLabel("Threshold Fraction:"))
+        stream_a_fraction_row.addWidget(self.stream_a_threshold_fraction_spinbox)
+        stream_a_column.addLayout(stream_a_fraction_row)
+
+        stream_b_column = QVBoxLayout()
+        stream_b_column.addWidget(self.stream_b_title_label)
+        stream_b_column.addWidget(self.stream_b_panel)
+        stream_b_fraction_row = QHBoxLayout()
+        stream_b_fraction_row.addWidget(QLabel("Threshold Fraction:"))
+        stream_b_fraction_row.addWidget(self.stream_b_threshold_fraction_spinbox)
+        stream_b_column.addLayout(stream_b_fraction_row)
+
+        video_row.addLayout(stream_a_column)
+        video_row.addLayout(stream_b_column)
+        video_row.addStretch(1)
+        layout.addLayout(video_row)
+
+        toolbar_frame = QFrame()
+        toolbar_frame.setStyleSheet(
+            "QFrame { background-color: #e9e7e1; border-top: 1px solid #d8d5cd; }"
+        )
+        control_row = QHBoxLayout(toolbar_frame)
+        control_row.setContentsMargins(10, 8, 10, 8)
+        control_row.addWidget(QLabel("LED Switch Time (ms):"))
+        self.switch_time_spinbox = QSpinBox()
+        self.switch_time_spinbox.setRange(1, 10000)
+        self.switch_time_spinbox.setValue(1)
+        self.switch_time_spinbox.valueChanged.connect(self._on_switch_time_changed)
+        control_row.addWidget(self.switch_time_spinbox)
+        control_row.addStretch(1)
+        self.continue_button = QPushButton("Continue to Live Test")
+        self.continue_button.setStyleSheet(
+            "QPushButton { background-color: #2f6fed; color: white; border: 1px solid #2f6fed;"
+            " border-radius: 4px; padding: 5px 14px; }"
+        )
+        self.continue_button.clicked.connect(self._on_continue_clicked)
+        control_row.addWidget(self.continue_button)
+        layout.addWidget(toolbar_frame)
+
+        self.status_label = QLabel("")
+        layout.addWidget(self.status_label)
+
+    def set_context(self, ctx, device_serial, pick_a, pick_b, camera_controls,
+                     stream_a_xy, stream_b_xy, stream_a_on, stream_a_off, stream_b_on, stream_b_off,
+                     num_leds, neighborhood_size, scan_direction, switch_time_ms,
+                     stream_a_threshold_fraction_default, stream_b_threshold_fraction_default,
+                     stream_a_roi, stream_b_roi, camera_name, stream_a_label, stream_b_label):
+        self._context = dict(
+            ctx=ctx, device_serial=device_serial, pick_a=pick_a, pick_b=pick_b, camera_controls=camera_controls,
+            stream_a_xy=stream_a_xy, stream_b_xy=stream_b_xy,
+            stream_a_on=stream_a_on, stream_a_off=stream_a_off,
+            stream_b_on=stream_b_on, stream_b_off=stream_b_off,
+            num_leds=num_leds, neighborhood_size=neighborhood_size, scan_direction=scan_direction,
+            stream_a_roi=stream_a_roi, stream_b_roi=stream_b_roi,
+        )
+        self.stream_a_threshold_fraction_spinbox.setValue(stream_a_threshold_fraction_default)
+        self.stream_b_threshold_fraction_spinbox.setValue(stream_b_threshold_fraction_default)
+        self.switch_time_spinbox.setValue(int(round(switch_time_ms)))
+        short_name = _short_camera_name(camera_name)
+        self.stream_a_title_label.setText("{} - {}".format(short_name, stream_a_label))
+        self.stream_b_title_label.setText("{} - {}".format(short_name, stream_b_label))
+        self.status_label.setText("")
+        self._start_preview()
+
+    def _start_preview(self):
+        self._stop_preview()
+        ctx = self._context
+        self.preview_thread = ThresholdPreviewThread(
+            ctx["ctx"], ctx["device_serial"], ctx["pick_a"], ctx["pick_b"], ctx["camera_controls"],
+            stream_a_xy=ctx["stream_a_xy"], stream_b_xy=ctx["stream_b_xy"],
+            neighborhood_size=ctx["neighborhood_size"], scan_direction=ctx["scan_direction"],
+            switch_time_ms=self.switch_time_spinbox.value(),
+        )
+        self.preview_thread.frame_ready.connect(self._on_frame_ready)
+        self.preview_thread.error.connect(self._on_error)
+        self.preview_thread.start()
+
+    def _stop_preview(self):
+        if self.preview_thread is not None:
+            self.preview_thread.request_stop()
+            self.preview_thread.wait()
+            self.preview_thread = None
+
+    def _on_error(self, message):
+        self.status_label.setText(message)
+
+    def _on_switch_time_changed(self, value):
+        # No thread restart needed - LEDPanel is a stateless static-method
+        # CLI wrapper (engine/led_panel.py), safe to call from the GUI
+        # thread while the preview thread's own capture loop keeps running,
+        # since it only talks to the LED panel hardware, never the camera.
+        try:
+            LEDPanel.set_speed_ms(value)
+        except Exception as exc:
+            self.status_label.setText("Failed to update LED switch time: {}".format(exc))
+
+    def _on_frame_ready(self, stream_name, image, frame_index, brightness):
+        if self._context is None:
+            return
+        if stream_name == "stream_a":
+            threshold = compute_threshold(
+                self._context["stream_a_on"], self._context["stream_a_off"],
+                self.stream_a_threshold_fraction_spinbox.value(),
+            )
+            xy = self._context["stream_a_xy"]
+        else:
+            threshold = compute_threshold(
+                self._context["stream_b_on"], self._context["stream_b_off"],
+                self.stream_b_threshold_fraction_spinbox.value(),
+            )
+            xy = self._context["stream_b_xy"]
+        mask = brightness > threshold
+        display_image = draw_led_state_overlay(image, xy, mask)
+        # Cropped AFTER the overlay is drawn, not before - same reason as
+        # LiveSessionPage._on_frame_ready: overlay circles are positioned in
+        # full-frame coordinates.
+        roi = self._context["stream_a_roi"] if stream_name == "stream_a" else self._context["stream_b_roi"]
+        if roi is not None and roi[2] > 0 and roi[3] > 0:
+            display_image = crop_to_roi(display_image, roi)
+        if stream_name == "stream_a":
+            self.stream_a_panel.set_frame(display_image)
+        else:
+            self.stream_b_panel.set_frame(display_image)
+
+    @property
+    def stream_a_threshold(self):
+        return compute_threshold(
+            self._context["stream_a_on"], self._context["stream_a_off"],
+            self.stream_a_threshold_fraction_spinbox.value(),
+        )
+
+    @property
+    def stream_b_threshold(self):
+        return compute_threshold(
+            self._context["stream_b_on"], self._context["stream_b_off"],
+            self.stream_b_threshold_fraction_spinbox.value(),
+        )
+
+    @property
+    def switch_time_ms(self):
+        return self.switch_time_spinbox.value()
+
+    def _on_continue_clicked(self):
+        self._stop_preview()
+        self.tuning_done.emit()

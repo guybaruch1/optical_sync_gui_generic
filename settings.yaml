@@ -90,12 +90,15 @@ test:
   # can't silently diverge from what calibration used even though the two
   # are two separately-edited settings.yaml keys.
   neighborhood_size: 5
-  # Calibration's stored threshold assumes an LED held steady for a full
-  # exposure. At fast switch times only a fraction of that brightness is
-  # achievable, so the runtime threshold is recomputed as
-  # off + threshold_fraction*(on-off). Tune this per your own testing -
-  # below the calibration default of 0.5 for fast speeds.
-  threshold_fraction: 0.25
+  # Starting default for each stream's own Threshold Tuning page spinbox -
+  # both independently live-editable there while watching the live on/off
+  # detection preview, before the actual test. Calibration's stored
+  # threshold assumes an LED held steady for a full exposure; at fast
+  # switch times only a fraction of that brightness is achievable, so the
+  # runtime threshold is off + fraction*(on-off) - tune per-sensor since
+  # different sensors' brightness/exposure characteristics differ.
+  stream_a_threshold_fraction: 0.25
+  stream_b_threshold_fraction: 0.25
   # Save a full-image on/off overlay snapshot every N frame-pairs, up to a cap.
   # Snapshot filenames use the same pair_index as the CSV's pair_index column,
   # so you can cross-check the algorithm's on/off calls against the real image.
