@@ -128,9 +128,12 @@ test:
 # one external USB relay that pulses a start trigger once both panels are
 # configured. See engine/dual_panel_control.py.
 dual_panel:
-  # Acroname downstream USB port number each panel is wired to.
-  panel_a_port: 0
-  panel_b_port: 1
+  # Acroname downstream USB port number each stream's OWN panel is wired
+  # to - NOT necessarily port 0 for stream_a/port 1 for stream_b; keyed
+  # explicitly by stream to avoid exactly that mix-up (on this rig,
+  # stream_a/IR is actually port 1 and stream_b/color is port 0).
+  stream_a_panel_port: 1
+  stream_b_panel_port: 0
   # Port the USB relay device itself is wired to - must be hub-enabled
   # before the relay can be triggered.
   relay_port: 6

@@ -116,7 +116,10 @@ The window opens maximized. Walk through the wizard:
    failure, check the debug images named after each stream's own slug (e.g.
    `output/debug_infrared1_detection.png`, `output/debug_color_detection.png`)
    — these show the exact masked region and whatever was detected, even
-   when zero LEDs were found.
+   when zero LEDs were found. With "Use dual LED panel" checked, each
+   stream is fully calibrated one at a time (its own panel on, capture, off,
+   capture) rather than both panels together, so the log will show this
+   happening sequentially per stream.
 5. **Threshold Tuning** — click **Start** for a live video preview of both
    streams, each with the same on/off overlay Live Session uses (tune the
    Frame Sample Interval first if you want it slower/faster - locked once
@@ -147,8 +150,9 @@ The window opens maximized. Walk through the wizard:
   defaults for the Threshold Tuning page's per-stream spinboxes),
   `frame_drop_threshold_factor`, `warmup_pairs_to_skip`,
   `pairing_gap_outlier_threshold_us`), and the optional dual-LED-panel rig's
-  wiring (`dual_panel.panel_a_port`/`panel_b_port`/`relay_port` - Acroname
-  hub USB port numbers, `relay_com_port`, `relay_pulse_duration_s`,
+  wiring (`dual_panel.stream_a_panel_port`/`stream_b_panel_port`/`relay_port`
+  - Acroname hub USB port numbers, keyed per STREAM since the mapping isn't
+  necessarily 0=A/1=B on your rig, `relay_com_port`, `relay_pulse_duration_s`,
   `hub_switch_settle_s` - only read when Device Select's "Use dual LED
   panel" checkbox is checked; the latter two are real-hardware-tuned
   guesses, keep raising them if panel commands still seem unreliable).

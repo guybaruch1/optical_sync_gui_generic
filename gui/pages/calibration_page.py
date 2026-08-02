@@ -24,8 +24,11 @@ from domain.realsense_utils import (
     detect_led_centroids, merge_close_centroids, apply_roi_mask, save_debug_detection_image,
     decode_frame,
 )
-from engine.streams import find_device_by_serial, resolve_and_group, capture_synced_frame_pair, stream_slug
-from engine.dual_panel_control import turn_all_leds_on, turn_all_leds_off
+from engine.streams import (
+    find_device_by_serial, resolve_and_group, capture_synced_frame_pair, stream_slug, group_for_pick,
+)
+from engine.led_panel import LEDPanel
+from engine.dual_panel_control import turn_all_leds_on, turn_all_leds_off, switched_to_stream_panel
 from gui.pages.roi_select_page import stream_label, _apply_camera_controls
 
 
@@ -85,52 +88,68 @@ class CalibrationPage(QWidget):
         for warning in _apply_camera_controls(groups, camera_controls):
             self._log(warning)
 
-        def turn_on_all_leds():
-            self._log("Turning on all LEDs...")
-            turn_all_leds_on(dual_panel_config)
-            time.sleep(0.5)  # let the panel(s) actually reach full brightness
+        if dual_panel_config is not None:
+            # 2 physically separate panels, one per stream - capturing
+            # both streams' on/off frames from one simultaneous moment
+            # needs both panels lit in perfect sync, which isn't reliable
+            # (and isn't even needed: calibration never compares timing
+            # across streams the way Live Session does). Simpler and more
+            # robust: fully calibrate one stream - panel on, capture, panel
+            # off, capture - then the other, only switching the Acroname
+            # hub once per stream instead of repeatedly mid-capture.
+            image_a_on, image_a_off = self._capture_on_off_for_stream(
+                groups, pick_a, "stream_a", dual_panel_config, settle_frames)
+            image_b_on, image_b_off = self._capture_on_off_for_stream(
+                groups, pick_b, "stream_b", dual_panel_config, settle_frames)
+        else:
+            def turn_on_all_leds():
+                self._log("Turning on all LEDs...")
+                turn_all_leds_on(dual_panel_config)
+                time.sleep(0.5)  # let the panel actually reach full brightness
 
-        # Same capture mechanism led_calibration.py actually used (raw
-        # per-sensor open/start, counting real callback deliveries to confirm
-        # settling) - NOT the rs.pipeline()-based ContinuousCapture used
-        # elsewhere in this app for continuous streaming, which produced
-        # spurious zero-LEDs-detected results when substituted in here. See
-        # roi_select_page.py's matching comment.
-        try:
-            frames_on = capture_synced_frame_pair(
+            # Same capture mechanism led_calibration.py actually used (raw
+            # per-sensor open/start, counting real callback deliveries to
+            # confirm settling) - NOT the rs.pipeline()-based
+            # ContinuousCapture used elsewhere in this app for continuous
+            # streaming, which produced spurious zero-LEDs-detected
+            # results when substituted in here. See roi_select_page.py's
+            # matching comment.
+            try:
+                frames_on = capture_synced_frame_pair(
+                    groups,
+                    on_both_streaming=turn_on_all_leds,
+                    settle_frames=settle_frames,
+                )
+            finally:
+                # Cleanup-only call: LEDPanel.all_leds_off() now raises if
+                # the panel command itself keeps failing (see
+                # LEDPanel._run). Swallow it here rather than letting it
+                # replace whatever exception the try block above may have
+                # raised (a finally-block exception always masks one from
+                # the try block in Python) - still surface it, since the
+                # operator needs to know to check the panel by hand.
+                try:
+                    turn_all_leds_off(dual_panel_config)
+                except Exception as exc:
+                    self._log("WARNING: failed to turn LEDs off during cleanup: {}".format(exc))
+
+            self._log("Turning LED panel off, capturing OFF-state frames...")
+            frames_off = capture_synced_frame_pair(
                 groups,
-                on_both_streaming=turn_on_all_leds,
+                on_both_streaming=None,
                 settle_frames=settle_frames,
             )
-        finally:
-            # Cleanup-only call: LEDPanel.all_leds_off() now raises if the
-            # panel command itself keeps failing (see LEDPanel._run). Swallow
-            # it here rather than letting it replace whatever exception the
-            # try block above may have raised (a finally-block exception
-            # always masks one from the try block in Python) - still surface
-            # it, since the operator needs to know to check the panel by hand.
-            try:
-                turn_all_leds_off(dual_panel_config)
-            except Exception as exc:
-                self._log("WARNING: failed to turn LEDs off during cleanup: {}".format(exc))
 
-        self._log("Turning LED panel off, capturing OFF-state frames...")
-        frames_off = capture_synced_frame_pair(
-            groups,
-            on_both_streaming=None,
-            settle_frames=settle_frames,
-        )
+            def decode(frames, pick):
+                return decode_frame(
+                    frames[(pick["stream_type"], pick["stream_index"])],
+                    pick["format"], pick["width"], pick["height"],
+                )
 
-        def decode(frames, pick):
-            return decode_frame(
-                frames[(pick["stream_type"], pick["stream_index"])],
-                pick["format"], pick["width"], pick["height"],
-            )
-
-        image_a_on = decode(frames_on, pick_a)
-        image_b_on = decode(frames_on, pick_b)
-        image_a_off = decode(frames_off, pick_a)
-        image_b_off = decode(frames_off, pick_b)
+            image_a_on = decode(frames_on, pick_a)
+            image_b_on = decode(frames_on, pick_b)
+            image_a_off = decode(frames_off, pick_a)
+            image_b_off = decode(frames_off, pick_b)
 
         label_a, label_b = stream_label(pick_a), stream_label(pick_b)
         slug_a, slug_b = stream_slug(pick_a), stream_slug(pick_b)
@@ -184,3 +203,38 @@ class CalibrationPage(QWidget):
             len(positions_a), label_a, slug_a, label_b, slug_b, config_path
         ))
         self.calibration_done.emit()
+
+    def _capture_on_off_for_stream(self, groups, pick, stream_name, dual_panel_config, settle_frames):
+        # Only this stream's own sensor needs to be opened/started - no
+        # need to involve the other stream's sensor, since calibration
+        # never compares timing across streams. Both captures happen
+        # inside the SAME switched_to_stream_panel block, so the Acroname
+        # hub is only switched once for this whole stream, not once per
+        # on/off toggle.
+        label = stream_label(pick)
+        group = group_for_pick(groups, pick)
+        with switched_to_stream_panel(dual_panel_config, stream_name):
+            self._log("Turning on {} LEDs...".format(label))
+            LEDPanel.stop()
+            LEDPanel.all_leds_on()
+            time.sleep(0.5)  # let the panel actually reach full brightness
+            try:
+                frames_on = capture_synced_frame_pair(group, settle_frames=settle_frames)
+            finally:
+                try:
+                    LEDPanel.all_leds_off()
+                except Exception as exc:
+                    self._log("WARNING: failed to turn {} LEDs off during cleanup: {}".format(label, exc))
+
+            self._log("Turning {} LEDs off, capturing OFF-state frame...".format(label))
+            frames_off = capture_synced_frame_pair(group, settle_frames=settle_frames)
+
+        image_on = decode_frame(
+            frames_on[(pick["stream_type"], pick["stream_index"])],
+            pick["format"], pick["width"], pick["height"],
+        )
+        image_off = decode_frame(
+            frames_off[(pick["stream_type"], pick["stream_index"])],
+            pick["format"], pick["width"], pick["height"],
+        )
+        return image_on, image_off

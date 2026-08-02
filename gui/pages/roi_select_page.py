@@ -31,10 +31,11 @@ from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QPushButton
 
 from domain.realsense_utils import decode_frame
 from engine.streams import (
-    find_device_by_serial, resolve_and_group, capture_synced_frame_pair,
+    find_device_by_serial, resolve_and_group, capture_synced_frame_pair, group_for_pick,
     set_emitter_enabled, enable_auto_exposure, set_manual_exposure,
 )
-from engine.dual_panel_control import turn_all_leds_on, turn_all_leds_off
+from engine.led_panel import LEDPanel
+from engine.dual_panel_control import turn_all_leds_on, turn_all_leds_off, switched_to_stream_panel
 
 
 _STREAM_TYPE_LABELS = {
@@ -156,39 +157,50 @@ class RoiSelectPage(QWidget):
         if warnings:
             self.status_label.setText("\n".join(warnings))
 
-        def turn_on_all_leds():
-            turn_all_leds_on(dual_panel_config)
-            time.sleep(0.5)  # let the panel(s) actually reach full brightness
+        if dual_panel_config is not None:
+            # 2 physically separate panels, one per stream - capturing
+            # both streams' "all on" frame from one simultaneous instant
+            # needs both panels lit in perfect sync, which isn't reliable
+            # (or necessary: ROI selection doesn't compare timing across
+            # streams). Simpler and more robust: capture each stream's own
+            # on-frame independently, one panel (and one sensor) at a time.
+            image_a = self._capture_one_stream_on_frame(groups, pick_a, "stream_a", dual_panel_config, settle_frames)
+            image_b = self._capture_one_stream_on_frame(groups, pick_b, "stream_b", dual_panel_config, settle_frames)
+        else:
+            def turn_on_all_leds():
+                turn_all_leds_on(dual_panel_config)
+                time.sleep(0.5)  # let the panel actually reach full brightness
 
-        # Same capture mechanism roi_picker.py actually used - see
-        # calibration_page.py's matching comment for why this replaced the
-        # rs.pipeline()-based ContinuousCapture that was here before.
-        try:
-            frames = capture_synced_frame_pair(
-                groups,
-                on_both_streaming=turn_on_all_leds,
-                settle_frames=settle_frames,
-            )
-        finally:
-            # Cleanup-only call: LEDPanel.all_leds_off() now raises if the
-            # panel command itself keeps failing (see LEDPanel._run). Swallow
-            # it here rather than letting it replace whatever exception the
-            # try block above may have raised (a finally-block exception
-            # always masks one from the try block in Python) - still surface
-            # it, since the operator needs to know to check the panel by hand.
+            # Same capture mechanism roi_picker.py actually used - see
+            # calibration_page.py's matching comment for why this replaced
+            # the rs.pipeline()-based ContinuousCapture that was here before.
             try:
-                turn_all_leds_off(dual_panel_config)
-            except Exception as exc:
-                self.status_label.setText("Warning: failed to turn LEDs off during cleanup: {}".format(exc))
+                frames = capture_synced_frame_pair(
+                    groups,
+                    on_both_streaming=turn_on_all_leds,
+                    settle_frames=settle_frames,
+                )
+            finally:
+                # Cleanup-only call: LEDPanel.all_leds_off() now raises if
+                # the panel command itself keeps failing (see
+                # LEDPanel._run). Swallow it here rather than letting it
+                # replace whatever exception the try block above may have
+                # raised (a finally-block exception always masks one from
+                # the try block in Python) - still surface it, since the
+                # operator needs to know to check the panel by hand.
+                try:
+                    turn_all_leds_off(dual_panel_config)
+                except Exception as exc:
+                    self.status_label.setText("Warning: failed to turn LEDs off during cleanup: {}".format(exc))
 
-        image_a = decode_frame(
-            frames[(pick_a["stream_type"], pick_a["stream_index"])],
-            pick_a["format"], pick_a["width"], pick_a["height"],
-        )
-        image_b = decode_frame(
-            frames[(pick_b["stream_type"], pick_b["stream_index"])],
-            pick_b["format"], pick_b["width"], pick_b["height"],
-        )
+            image_a = decode_frame(
+                frames[(pick_a["stream_type"], pick_a["stream_index"])],
+                pick_a["format"], pick_a["width"], pick_a["height"],
+            )
+            image_b = decode_frame(
+                frames[(pick_b["stream_type"], pick_b["stream_index"])],
+                pick_b["format"], pick_b["width"], pick_b["height"],
+            )
 
         label_a = stream_label(pick_a)
         label_b = stream_label(pick_b)
@@ -205,3 +217,24 @@ class RoiSelectPage(QWidget):
 
         self.status_label.setText("ROI selected: {}={} {}={}".format(label_a, roi_a, label_b, roi_b))
         self.roi_chosen.emit((roi_a, roi_b))
+
+    def _capture_one_stream_on_frame(self, groups, pick, stream_name, dual_panel_config, settle_frames):
+        # Only this stream's own sensor needs to be opened/started at all -
+        # ROI selection doesn't compare timing across streams, so there's
+        # no need to involve the other stream's sensor here.
+        group = group_for_pick(groups, pick)
+        with switched_to_stream_panel(dual_panel_config, stream_name):
+            LEDPanel.stop()
+            LEDPanel.all_leds_on()
+            time.sleep(0.5)  # let the panel actually reach full brightness
+            try:
+                frames = capture_synced_frame_pair(group, settle_frames=settle_frames)
+            finally:
+                try:
+                    LEDPanel.all_leds_off()
+                except Exception as exc:
+                    self.status_label.setText("Warning: failed to turn LEDs off during cleanup: {}".format(exc))
+        return decode_frame(
+            frames[(pick["stream_type"], pick["stream_index"])],
+            pick["format"], pick["width"], pick["height"],
+        )

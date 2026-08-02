@@ -201,7 +201,7 @@ def _full_settings(stream_options):
         "pairing_gap_outlier_threshold_us": 100000, "snapshot_every_n_pairs": 20, "max_snapshots": 15,
     }
     settings["dual_panel"] = {
-        "panel_a_port": 0, "panel_b_port": 1, "relay_port": 6,
+        "stream_a_panel_port": 1, "stream_b_panel_port": 0, "relay_port": 6,
         "relay_com_port": "COM6", "relay_pulse_duration_s": 0.2, "hub_switch_settle_s": 3.0,
     }
     return settings

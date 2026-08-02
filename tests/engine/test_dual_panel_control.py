@@ -1,11 +1,16 @@
 from unittest.mock import patch, call
 
 import engine.dual_panel_control as dual_panel_control
-from engine.dual_panel_control import turn_all_leds_on, turn_all_leds_off, start_scanning, stop_scanning
+from engine.dual_panel_control import (
+    turn_all_leds_on, turn_all_leds_off, start_scanning, stop_scanning, switched_to_stream_panel,
+)
 
 
+# Matches the real rig this was built for: stream_a (IR) is port 1,
+# stream_b (color) is port 0 - deliberately NOT 0/1 in stream order, so a
+# test that silently assumed "a=0, b=1" would fail loudly.
 DUAL_PANEL_CONFIG = {
-    "panel_a_port": 0, "panel_b_port": 1, "relay_port": 6,
+    "stream_a_panel_port": 1, "stream_b_panel_port": 0, "relay_port": 6,
     "relay_com_port": "COM6", "relay_pulse_duration_s": 0.2, "hub_switch_settle_s": 3.0,
 }
 
@@ -151,8 +156,11 @@ def test_run_on_both_panels_switches_hub_ports_and_calls_action_twice():
         # True would sweep-disable every OTHER port on the hub (e.g. the
         # camera, if it shares this hub), not just the 2 that should go off;
         # the very next disable_ports() call already narrowly targets those.
-        ("enable", [0], False), ("disable", [1, 6]),
-        ("enable", [1, 6], False), ("disable", [0]),
+        # stream_a_panel_port=1 first, then stream_b_panel_port=0 - NOT
+        # 0-then-1, confirming the fixture's real (reversed) port mapping
+        # is actually being read, not an assumed 0/1 order.
+        ("enable", [1], False), ("disable", [0, 6]),
+        ("enable", [0, 6], False), ("disable", [1]),
         "disconnect",
     ]
     # Every settling sleep uses the configured hub_switch_settle_s, not a
@@ -176,3 +184,107 @@ def test_run_on_both_panels_raises_if_hub_connection_fails():
             assert False, "expected RuntimeError"
         except RuntimeError:
             pass
+
+
+# --- switched_to_stream_panel: for callers (Calibration, ROI Select) that
+# calibrate/capture ONE stream at a time rather than driving both panels
+# together - switches to that stream's OWN panel once and stays there for
+# the whole `with` block. ---
+
+class _FakeHubForSwitch:
+    def __init__(self):
+        self.calls = []
+
+    def try_connect(self):
+        self.calls.append("try_connect")
+        return True
+
+    def enable_ports(self, ports, disable_other_ports, delay_in_seconds):
+        self.calls.append(("enable", list(ports), disable_other_ports))
+
+    def disable_ports(self, ports):
+        self.calls.append(("disable", list(ports)))
+
+    def disconnect(self):
+        self.calls.append("disconnect")
+
+
+def test_switched_to_stream_panel_is_a_noop_when_config_is_none():
+    entered = []
+    with switched_to_stream_panel(None, "stream_a"):
+        entered.append(True)
+    assert entered == [True]  # must not raise / must not touch any hub
+
+
+def test_switched_to_stream_panel_switches_to_stream_as_own_port():
+    fake_hub = _FakeHubForSwitch()
+
+    def fake_acroname_hub_module():
+        return type("module", (), {"AcronameHub": lambda: fake_hub})
+
+    with patch.dict("sys.modules", {"engine.acroname_hub": fake_acroname_hub_module()}), \
+         patch("time.sleep") as mock_sleep:
+        with switched_to_stream_panel(DUAL_PANEL_CONFIG, "stream_a"):
+            pass
+
+    # stream_a's own port is 1 (per the fixture's real, reversed mapping) -
+    # enabled; stream_b's port (0) + the relay port (6) disabled; only ONE
+    # hub switch for the whole block, not one per action inside it.
+    assert fake_hub.calls == [
+        "try_connect",
+        ("enable", [1], False), ("disable", [0, 6]),
+        "disconnect",
+    ]
+    mock_sleep.assert_called_once_with(3.0)
+
+
+def test_switched_to_stream_panel_switches_to_stream_bs_own_port():
+    fake_hub = _FakeHubForSwitch()
+
+    def fake_acroname_hub_module():
+        return type("module", (), {"AcronameHub": lambda: fake_hub})
+
+    with patch.dict("sys.modules", {"engine.acroname_hub": fake_acroname_hub_module()}), \
+         patch("time.sleep"):
+        with switched_to_stream_panel(DUAL_PANEL_CONFIG, "stream_b"):
+            pass
+
+    assert fake_hub.calls == [
+        "try_connect",
+        ("enable", [0], False), ("disable", [1, 6]),
+        "disconnect",
+    ]
+
+
+def test_switched_to_stream_panel_only_switches_once_for_multiple_actions_inside():
+    fake_hub = _FakeHubForSwitch()
+
+    def fake_acroname_hub_module():
+        return type("module", (), {"AcronameHub": lambda: fake_hub})
+
+    with patch.dict("sys.modules", {"engine.acroname_hub": fake_acroname_hub_module()}), \
+         patch("time.sleep") as mock_sleep:
+        with switched_to_stream_panel(DUAL_PANEL_CONFIG, "stream_a"):
+            pass  # caller would issue several plain LEDPanel calls here in real use
+
+    # Exactly one enable/disable pair and one settle sleep for the whole
+    # block - the whole point is NOT re-switching per action inside it.
+    assert fake_hub.calls.count(("enable", [1], False)) == 1
+    assert mock_sleep.call_count == 1
+
+
+def test_switched_to_stream_panel_disconnects_even_if_block_raises():
+    fake_hub = _FakeHubForSwitch()
+
+    def fake_acroname_hub_module():
+        return type("module", (), {"AcronameHub": lambda: fake_hub})
+
+    with patch.dict("sys.modules", {"engine.acroname_hub": fake_acroname_hub_module()}), \
+         patch("time.sleep"):
+        try:
+            with switched_to_stream_panel(DUAL_PANEL_CONFIG, "stream_a"):
+                raise ValueError("boom")
+        except ValueError:
+            pass
+
+    assert "disconnect" in fake_hub.calls

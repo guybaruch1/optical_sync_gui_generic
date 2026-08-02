@@ -95,18 +95,26 @@ wiring dict otherwise), then threaded through every downstream page's
 `set_context()` from ROI Select onward - unlike the single-panel case, a
 single `LEDPanel.*` call only ever reaches whichever panel is currently
 hub-exposed, so EVERY panel interaction (not just the actual timed test)
-needs the hub-switching dance repeated for both panels.
+needs the hub-switching dance repeated for both panels. `settings.yaml`'s
+`dual_panel.stream_a_panel_port`/`stream_b_panel_port` are keyed
+explicitly by STREAM, not by an arbitrary "first panel"/"second panel" -
+on the actual rig this was built for, stream_a (IR)'s panel is port 1 and
+stream_b (color)'s is port 0, the reverse of what the naming might
+suggest, so getting this mapping right matters once code depends on it
+(see below).
 
-`engine/dual_panel_control.py` centralizes all of this branching -
+`engine/dual_panel_control.py` centralizes all of this branching.
 `turn_all_leds_on`/`turn_all_leds_off`/`start_scanning`/`stop_scanning`
 each take a `dual_panel_config` and either call `engine/led_panel.py`'s
 `LEDPanel` directly (the `None`/single-panel case, byte-for-byte the same
 code path as before this existed) or route through
-`_run_on_both_panels`/`_pulse_relay`, which lazily import
+`_run_on_both_panels`/`_pulse_relay` (both panels together, for callers
+that genuinely need them lit/dark/stepping in lockstep - Threshold Tuning
+and Live Session's actual timed test). These lazily import
 `engine/acroname_hub.py` (a ported `AcronameHub` wrapper around the
-Acroname `brainstem` SDK) and `pyserial` respectively - lazily, so every
-normal single-panel test can import/run this module without either
-dependency installed. `start_scanning`'s dual-panel path additionally sends
+Acroname `brainstem` SDK) and `pyserial` respectively, so every normal
+single-panel test can import/run this module without either dependency
+installed. `start_scanning`'s dual-panel path additionally sends
 `LEDPanel.set_trigger_mode(2)`/`set_camera_trigger(True)` (new methods,
 layered on top of the exact same `--setMode 1`/`--setTime X` the
 single-panel case already sends, not a replacement) and never calls
@@ -118,12 +126,29 @@ call `LEDPanel.set_speed_ms()` directly and instantly (single-panel) or
 re-run `start_scanning()` in full (dual-panel, visibly slower - no way
 around the hardware constraint).
 
+**Calibration and ROI Select do NOT use `turn_all_leds_on`/`off`** for the
+dual-panel case - capturing both streams' on/off frame from one
+simultaneous "both panels lit together" moment turned out unreliable (and
+isn't actually needed: neither page compares timing across streams the way
+Live Session does). Instead both fully calibrate/capture one stream at a
+time - `engine/streams.py`'s `group_for_pick(groups, pick)` isolates just
+that stream's own resolved sensor group, and
+`engine/dual_panel_control.py`'s `switched_to_stream_panel(dual_panel_config,
+stream_name)` context manager switches to that stream's OWN panel port
+ONCE and stays there for the whole `with` block (unlike
+`_run_on_both_panels`, which always touches both) - the caller issues
+plain `LEDPanel.all_leds_on()`/`all_leds_off()` calls directly inside the
+block, since only one panel is hub-exposed anyway. This also means only 2
+hub switches happen for a whole calibration run (one per stream), not one
+per on/off toggle.
+
 No automated tests for `engine/acroname_hub.py`/`_run_on_both_panels`/
-`_pulse_relay` themselves (hardware-only, same "no tests by design" bucket
-as `engine/led_panel.py`/`engine/session_engine.py`) - but
-`turn_all_leds_on`/`off`/`start_scanning`/`stop_scanning`'s own branching
+`switched_to_stream_panel`/`_pulse_relay` themselves (hardware-only, same
+"no tests by design" bucket as `engine/led_panel.py`/
+`engine/session_engine.py`) - but `turn_all_leds_on`/`off`/
+`start_scanning`/`stop_scanning`/`switched_to_stream_panel`'s own branching
 logic IS tested (`tests/engine/test_dual_panel_control.py`), by mocking
-`_run_on_both_panels`/`_pulse_relay`/`LEDPanel`.
+`_run_on_both_panels`/`_pulse_relay`/`LEDPanel`/a fake Acroname hub.
 
 ### Threshold Tuning page (per-stream, with a live detection preview)
 
