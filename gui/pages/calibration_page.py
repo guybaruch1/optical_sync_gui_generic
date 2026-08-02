@@ -21,7 +21,7 @@ from PySide6.QtWidgets import QWidget, QVBoxLayout, QPlainTextEdit, QPushButton,
 
 from domain.calibration import assign_grid_ids, build_positions_with_thresholds, update_config_leds
 from domain.realsense_utils import (
-    detect_led_centroids, merge_close_centroids, apply_roi_mask, save_debug_detection_image,
+    detect_led_centroids, merge_close_centroids, crop_to_roi, save_debug_detection_image,
     decode_frame,
 )
 from engine.streams import (
@@ -30,6 +30,19 @@ from engine.streams import (
 from engine.led_panel import LEDPanel
 from engine.dual_panel_control import turn_all_leds_on, turn_all_leds_off, switched_to_stream_panel
 from gui.pages.roi_select_page import stream_label, _apply_camera_controls
+
+
+def _offset_positions(positions, roi):
+    """assign_grid_ids's centroids come from a crop_to_roi'd image, so
+    they're in that CROPPED image's own coordinates (origin at the ROI's
+    own top-left corner) - shifts every position back to full-frame
+    coordinates by the ROI's own (x, y) origin, since
+    build_positions_with_thresholds needs to sample brightness from the
+    full-frame on/off images, and everything downstream (Threshold Tuning,
+    Live Session) expects stream_a_xy/stream_b_xy in full-frame
+    coordinates too."""
+    roi_x, roi_y = roi[0], roi[1]
+    return {led_id: [x + roi_x, y + roi_y] for led_id, (x, y) in positions.items()}
 
 
 class CalibrationPage(QWidget):
@@ -155,29 +168,45 @@ class CalibrationPage(QWidget):
         slug_a, slug_b = stream_slug(pick_a), stream_slug(pick_b)
         res_a, res_b = (pick_a["width"], pick_a["height"]), (pick_b["width"], pick_b["height"])
 
-        masked_a = apply_roi_mask(image_a_on, stream_a_roi)
-        masked_b = apply_roi_mask(image_b_on, stream_b_roi)
+        # Cropped, not just masked - detect_led_centroids' Otsu threshold
+        # needs a histogram dominated by the LEDs and their own gaps, not
+        # diluted by a huge sea of masked-out zero pixels from the rest of
+        # the full frame (that was splitting "zero background" vs
+        # "everything inside the ROI" as the two classes, merging the
+        # entire LED grid into one blob instead of separating individual
+        # LEDs from the gaps between them).
+        cropped_a = crop_to_roi(image_a_on, stream_a_roi)
+        cropped_b = crop_to_roi(image_b_on, stream_b_roi)
 
         self._log("Detecting LEDs in {} frame...".format(label_a))
-        centroids_a, otsu_a = detect_led_centroids(masked_a, None, min_blob_area)
+        centroids_a, otsu_a = detect_led_centroids(cropped_a, None, min_blob_area)
         centroids_a = merge_close_centroids(centroids_a)
         self._log("Detected {} LED(s) in {} (Otsu threshold {}).".format(len(centroids_a), label_a, otsu_a))
         # Saved BEFORE assign_grid_ids, which raises on zero detections - this
-        # is exactly the case where seeing the masked crop matters most, so it
+        # is exactly the case where seeing the cropped ROI matters most, so it
         # must not be skipped by that exception.
         debug_path_a = os.path.join(output_dir, "debug_{}_detection.png".format(slug_a))
-        save_debug_detection_image(masked_a, centroids_a, debug_path_a)
-        self._log("Saved debug image (masked frame + detected LEDs circled): {}".format(debug_path_a))
+        save_debug_detection_image(cropped_a, centroids_a, debug_path_a)
+        self._log("Saved debug image (cropped ROI + detected LEDs circled): {}".format(debug_path_a))
         positions_a, row_layout_a = assign_grid_ids(centroids_a, row_gap_px)
+        # assign_grid_ids' centroids are in the CROPPED image's own
+        # coordinates (crop_to_roi's origin is the ROI's own top-left
+        # corner) - build_positions_with_thresholds below needs full-frame
+        # coordinates to sample brightness from the full-frame
+        # image_a_on/image_a_off, and everything downstream (Threshold
+        # Tuning, Live Session) expects stream_a_xy in full-frame
+        # coordinates too, so shift back by the ROI's own origin now.
+        positions_a = _offset_positions(positions_a, stream_a_roi)
 
         self._log("Detecting LEDs in {} frame...".format(label_b))
-        centroids_b, otsu_b = detect_led_centroids(masked_b, None, min_blob_area)
+        centroids_b, otsu_b = detect_led_centroids(cropped_b, None, min_blob_area)
         centroids_b = merge_close_centroids(centroids_b)
         self._log("Detected {} LED(s) in {} (Otsu threshold {}).".format(len(centroids_b), label_b, otsu_b))
         debug_path_b = os.path.join(output_dir, "debug_{}_detection.png".format(slug_b))
-        save_debug_detection_image(masked_b, centroids_b, debug_path_b)
-        self._log("Saved debug image (masked frame + detected LEDs circled): {}".format(debug_path_b))
+        save_debug_detection_image(cropped_b, centroids_b, debug_path_b)
+        self._log("Saved debug image (cropped ROI + detected LEDs circled): {}".format(debug_path_b))
         positions_b, row_layout_b = assign_grid_ids(centroids_b, row_gap_px)
+        positions_b = _offset_positions(positions_b, stream_b_roi)
 
         if row_layout_a != row_layout_b:
             self._log(

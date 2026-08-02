@@ -159,6 +159,40 @@ def test_detect_led_centroids_finds_bright_blob():
     assert 20 <= cy <= 30
 
 
+def test_detect_led_centroids_separates_multiple_blurred_blobs_on_a_cropped_image():
+    # Regression: a masked-but-not-cropped full frame (apply_roi_mask) has
+    # a histogram dominated by masked-out zero pixels outside the ROI
+    # (realistically, the ROI is a small fraction of a full camera frame,
+    # e.g. 200x200 within 1280x720), so Otsu splits "zero background" vs
+    # "everything inside the ROI" instead of "LED" vs "gap between LEDs" -
+    # merging an entire grid of separate, blurred (realistic camera glow)
+    # LEDs into ONE contour. Only exercising a single blob on an all-zero
+    # background (the older test above) never caught this - reproducing it
+    # needs multiple blobs, a non-zero gap background, blur, AND a
+    # realistically small ROI-to-full-frame ratio.
+    import cv2
+
+    roi = (500, 300, 200, 200)
+    roi_x, roi_y, roi_w, roi_h = roi
+    frame = np.zeros((720, 1280), dtype=np.uint8)
+    frame[roi_y:roi_y + roi_h, roi_x:roi_x + roi_w] = 40  # dim gray gap background
+    for row in range(10):
+        for col in range(10):
+            cy = roi_y + 10 + row * 18
+            cx = roi_x + 10 + col * 18
+            cv2.circle(frame, (cx, cy), 7, 230, -1)
+    frame = cv2.GaussianBlur(frame, (9, 9), sigmaX=3)
+
+    masked = apply_roi_mask(frame, roi)
+    cropped = crop_to_roi(frame, roi)
+
+    centroids_masked, _ = detect_led_centroids(masked, None, min_area=5)
+    centroids_cropped, _ = detect_led_centroids(cropped, None, min_area=5)
+
+    assert len(centroids_masked) == 1  # confirms the bug reproduces with apply_roi_mask
+    assert len(centroids_cropped) == 100  # crop_to_roi correctly separates all 100
+
+
 def test_save_debug_detection_image_writes_file_and_marks_centroids(tmp_path):
     image = np.zeros((50, 50), dtype=np.uint8)
     path = str(tmp_path / "debug.png")
