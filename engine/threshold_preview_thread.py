@@ -14,7 +14,7 @@ from engine.streams import (
     ContinuousCapture, find_device_by_serial, resolve_and_group,
     set_emitter_enabled, enable_auto_exposure, set_manual_exposure,
 )
-from engine.led_panel import LEDPanel
+from engine.dual_panel_control import start_scanning, stop_scanning
 from domain.realsense_utils import sample_all_neighborhood_brightness, safe_neighborhood_size
 
 
@@ -24,7 +24,8 @@ class ThresholdPreviewThread(QThread):
 
     def __init__(self, ctx, device_serial, pick_a, pick_b, camera_controls,
                  stream_a_xy, stream_b_xy, neighborhood_size=5,
-                 scan_direction=None, switch_time_ms=None, display_stride=10, parent=None):
+                 scan_direction=None, switch_time_ms=None, display_stride=10,
+                 dual_panel_config=None, parent=None):
         super().__init__(parent)
         self.ctx = ctx
         self.device_serial = device_serial
@@ -33,6 +34,7 @@ class ThresholdPreviewThread(QThread):
         self.camera_controls = camera_controls
         self.stream_a_xy = stream_a_xy
         self.stream_b_xy = stream_b_xy
+        self.dual_panel_config = dual_panel_config
         # See SessionEngineThread's identical comment - capped once here at
         # what's actually safe for THIS run's real measured LED spacing.
         self._stream_a_safe_size = safe_neighborhood_size(stream_a_xy, neighborhood_size)
@@ -87,11 +89,7 @@ class ThresholdPreviewThread(QThread):
                         )
 
             if self.switch_time_ms is not None:
-                LEDPanel.stop()
-                LEDPanel.response_time_measurement_mode()
-                LEDPanel.set_direction_single(self.scan_direction if self.scan_direction is not None else 1)
-                LEDPanel.set_speed_ms(self.switch_time_ms)
-                LEDPanel.start()
+                start_scanning(self.switch_time_ms, self.scan_direction, self.dual_panel_config)
 
             self._capture = ContinuousCapture(self.device_serial, self.pick_a, self.pick_b)
             self._capture.start()
@@ -116,6 +114,6 @@ class ThresholdPreviewThread(QThread):
             if self._capture is not None:
                 self._capture.stop()
             try:
-                LEDPanel.stop()
+                stop_scanning(self.dual_panel_config)
             except Exception as exc:
                 self.error.emit("Failed to stop LED panel during cleanup: {}".format(exc))

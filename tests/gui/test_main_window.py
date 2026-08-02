@@ -200,10 +200,14 @@ def _full_settings(stream_options):
         "frame_drop_threshold_factor": 1.5, "warmup_pairs_to_skip": 0,
         "pairing_gap_outlier_threshold_us": 100000, "snapshot_every_n_pairs": 20, "max_snapshots": 15,
     }
+    settings["dual_panel"] = {
+        "panel_a_port": 0, "panel_b_port": 1, "relay_port": 6,
+        "relay_com_port": "COM6", "relay_pulse_duration_s": 0.2,
+    }
     return settings
 
 
-def _window_after_config_chosen(qapp, monkeypatch, tmp_path):
+def _window_after_config_chosen(qapp, monkeypatch, tmp_path, dual_panel=False):
     settings = _full_settings({"Intel RealSense D455": [_ir_vs_rgb_test()]})
     window = _make_window(qapp, settings)
     monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [IR1, COLOR0])
@@ -214,6 +218,7 @@ def _window_after_config_chosen(qapp, monkeypatch, tmp_path):
         main_window_module, "load_led_positions",
         lambda *a, **k: ({"0": [1.0, 1.0, 300.0, 100.0, 200.0]}, {"0": [2.0, 2.0, 600.0, 200.0, 400.0]}),
     )
+    window.device_page.dual_panel_checkbox.setChecked(dual_panel)
     window._on_device_chosen("SN123", "Intel RealSense D455")
     window._on_config_chosen((IR1, COLOR0, {
         "emitter_enabled": False, "auto_exposure": True, "exposure": None, "gain": None,
@@ -250,3 +255,30 @@ def test_on_tuning_done_passes_tuned_per_stream_thresholds_to_live_session(qapp,
     assert list(ctx["stream_a_threshold"]) == [200.0]  # 100 + 0.5*200
     assert list(ctx["stream_b_threshold"]) == [500.0]  # 200 + 0.75*400
     assert ctx["switch_time_ms"] == 5
+
+
+# --- Dual LED panel: a manual Device Select checkbox, NOT inferred from
+# camera/test/hardware - self._dual_panel_config is None (identical to
+# today's default behavior) unless the operator checks the box, in which
+# case it's built from settings.yaml's dual_panel: section and threaded
+# through every downstream page's set_context(). ---
+
+def test_dual_panel_config_is_none_when_checkbox_unchecked(qapp, monkeypatch, tmp_path):
+    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path, dual_panel=False)
+    assert window._dual_panel_config is None
+
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+    assert window.threshold_tuning_page._context["dual_panel_config"] is None
+
+
+def test_dual_panel_config_built_from_settings_when_checkbox_checked(qapp, monkeypatch, tmp_path):
+    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path, dual_panel=True)
+    assert window._dual_panel_config == window.settings["dual_panel"]
+
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window._on_tuning_done()
+
+    assert window.threshold_tuning_page._context["dual_panel_config"] == window.settings["dual_panel"]
+    assert window.live_session_page._context["dual_panel_config"] == window.settings["dual_panel"]

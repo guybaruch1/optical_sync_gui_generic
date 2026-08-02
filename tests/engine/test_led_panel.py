@@ -43,3 +43,21 @@ def test_run_recovers_after_a_transient_failure():
     ) as mock_check_call, patch("time.sleep"):
         LEDPanel._run("--stop")  # succeeds on the 2nd attempt - must not raise
         assert mock_check_call.call_count == 2
+
+
+def test_set_trigger_mode_sends_set_trigger_mode_command():
+    with patch("engine.led_panel.check_call") as mock_check_call, patch("time.sleep"):
+        LEDPanel.set_trigger_mode(2)
+        mock_check_call.assert_called_once_with(["LED-Panel.exe", "--setTriggerMode", "2"])
+
+
+def test_set_camera_trigger_true_sends_1():
+    with patch("engine.led_panel.check_call") as mock_check_call, patch("time.sleep"):
+        LEDPanel.set_camera_trigger(True)
+        mock_check_call.assert_called_once_with(["LED-Panel.exe", "--setCameraTrigger", "1"])
+
+
+def test_set_camera_trigger_false_sends_0():
+    with patch("engine.led_panel.check_call") as mock_check_call, patch("time.sleep"):
+        LEDPanel.set_camera_trigger(False)
+        mock_check_call.assert_called_once_with(["LED-Panel.exe", "--setCameraTrigger", "0"])

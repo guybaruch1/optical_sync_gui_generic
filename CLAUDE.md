@@ -72,6 +72,59 @@ That `camera_controls` list is applied from four separate call sites, each of wh
 
 `config.yaml`'s LED positions are keyed per-stream by a slug (`engine/streams.py`'s `stream_slug(pick)`, e.g. `"infrared1"`, `"color"`, `"color2"` - `stream_index` 0 is omitted from the slug so a single-RGB camera's slug still just reads `"color"`) nested under the camera name, via `domain/calibration.py`'s `update_config_leds`/`load_led_positions`. This is simpler than a joined pair-key (e.g. `"infrared1_color"`): each stream's calibration data stands on its own, so recalibrating one stream of a pair doesn't invalidate the other's saved positions, and the same `"color"` slug's data is reusable across different Stream-A/Stream-B pairings that both happen to include it.
 
+### Optional dual-LED-panel mode (manual operator toggle, not camera/test-driven)
+
+Some rigs run two physically separate LED panels instead of one - one per
+camera stream, since IR and RGB (or two different IR sensors) are
+physically separate, non-co-located sensors that can't both look at a
+single panel from the same angle. Both panels share one Acroname USB hub
+(only ONE panel's USB connection is visible to the OS at a time -
+`LED-Panel.exe` always talks to whichever panel is currently hub-exposed,
+never a specific one by identity) and one external USB relay that pulses a
+brief hardware "start" trigger once both panels are configured into
+trigger mode, kicking off synchronized LED-stepping driven by the camera's
+own trigger signal from then on.
+
+This is a **manual operator choice**, not inferred from the camera model,
+not auto-detected from the hub, and not a per-named-test `settings.yaml`
+flag - Device Select's "Use dual LED panel" checkbox
+(`gui/pages/device_select_page.py`) is read once in
+`MainWindow._on_device_chosen` into `self._dual_panel_config` (`None` for
+the normal single-panel case; `settings["dual_panel"]`'s port/COM-port
+wiring dict otherwise), then threaded through every downstream page's
+`set_context()` from ROI Select onward - unlike the single-panel case, a
+single `LEDPanel.*` call only ever reaches whichever panel is currently
+hub-exposed, so EVERY panel interaction (not just the actual timed test)
+needs the hub-switching dance repeated for both panels.
+
+`engine/dual_panel_control.py` centralizes all of this branching -
+`turn_all_leds_on`/`turn_all_leds_off`/`start_scanning`/`stop_scanning`
+each take a `dual_panel_config` and either call `engine/led_panel.py`'s
+`LEDPanel` directly (the `None`/single-panel case, byte-for-byte the same
+code path as before this existed) or route through
+`_run_on_both_panels`/`_pulse_relay`, which lazily import
+`engine/acroname_hub.py` (a ported `AcronameHub` wrapper around the
+Acroname `brainstem` SDK) and `pyserial` respectively - lazily, so every
+normal single-panel test can import/run this module without either
+dependency installed. `start_scanning`'s dual-panel path additionally sends
+`LEDPanel.set_trigger_mode(2)`/`set_camera_trigger(True)` (new methods,
+layered on top of the exact same `--setMode 1`/`--setTime X` the
+single-panel case already sends, not a replacement) and never calls
+`.start()` at all - the relay pulse is what kicks off stepping, not
+`--start`. Any panel config change (e.g. switch time) needs this whole
+provisioning re-run - see `gui/pages/threshold_tuning_page.py`'s
+`_on_switch_time_changed`, which branches on `dual_panel_config` to either
+call `LEDPanel.set_speed_ms()` directly and instantly (single-panel) or
+re-run `start_scanning()` in full (dual-panel, visibly slower - no way
+around the hardware constraint).
+
+No automated tests for `engine/acroname_hub.py`/`_run_on_both_panels`/
+`_pulse_relay` themselves (hardware-only, same "no tests by design" bucket
+as `engine/led_panel.py`/`engine/session_engine.py`) - but
+`turn_all_leds_on`/`off`/`start_scanning`/`stop_scanning`'s own branching
+logic IS tested (`tests/engine/test_dual_panel_control.py`), by mocking
+`_run_on_both_panels`/`_pulse_relay`/`LEDPanel`.
+
 ### Threshold Tuning page (per-stream, with a live detection preview)
 
 Inserted between Calibration and Live Session: `gui/pages/threshold_tuning_page.py`'s `ThresholdTuningPage` shows a live video feed of both streams, each with its own independently-tunable "Threshold Fraction" spinbox (different sensors - IR vs RGB, or two different IR sensors - have different brightness/exposure characteristics, so one shared fraction across both streams is wrong) plus a shared LED Switch Time spinbox, all live-editable while watching the same green/red on-off detection-circle overlay Live Session draws (`domain/realsense_utils.py`'s `draw_led_state_overlay`).

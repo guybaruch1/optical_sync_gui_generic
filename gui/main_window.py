@@ -65,6 +65,14 @@ class MainWindow(QMainWindow):
         self._pick_a = None
         self._pick_b = None
         self._camera_controls = None
+        # Resolved once in _on_device_chosen from Device Select's manual
+        # "Use dual LED panel" checkbox - None for the normal single-panel
+        # case (every camera/test the operator hasn't opted into dual-panel
+        # mode for), settings.yaml's dual_panel: section dict otherwise.
+        # Threaded into every downstream page's set_context() from here on,
+        # since ROI Select is the very next wizard step and its LED-panel
+        # calls need this too.
+        self._dual_panel_config = None
 
         for page in (self.device_page, self.stream_config_page, self.roi_page,
                      self.calibration_page, self.threshold_tuning_page, self.live_session_page):
@@ -82,6 +90,9 @@ class MainWindow(QMainWindow):
     def _on_device_chosen(self, serial, name):
         self.gui_state.device_serial = serial
         self._device_name = name
+        self._dual_panel_config = (
+            self.settings["dual_panel"] if self.device_page.dual_panel_checkbox.isChecked() else None
+        )
         save_gui_state(self.gui_state)
         camera_settings = self.settings["camera"]
         raw_tests = camera_settings.get("stream_options", {}).get(name)
@@ -167,6 +178,7 @@ class MainWindow(QMainWindow):
         self.roi_page.set_context(
             self.ctx, self.gui_state.device_serial, pick_a, pick_b, camera_controls,
             settle_frames=self.settings["calibration"]["settle_frames"],
+            dual_panel_config=self._dual_panel_config,
         )
         self.stack.setCurrentWidget(self.roi_page)
 
@@ -189,6 +201,7 @@ class MainWindow(QMainWindow):
             neighborhood_size=calib_settings["neighborhood_size"],
             row_gap_px=calib_settings["row_gap_px"],
             min_acceptable_contrast=calib_settings["min_acceptable_contrast"],
+            dual_panel_config=self._dual_panel_config,
         )
         self.stack.setCurrentWidget(self.calibration_page)
 
@@ -246,6 +259,7 @@ class MainWindow(QMainWindow):
             stream_a_roi=self.gui_state.stream_a_roi, stream_b_roi=self.gui_state.stream_b_roi,
             camera_name=camera_name,
             stream_a_label=stream_label(pick_a), stream_b_label=stream_label(pick_b),
+            dual_panel_config=self._dual_panel_config,
         )
         self.threshold_tuning_page.set_context(
             self.ctx, self.gui_state.device_serial, pick_a, pick_b, camera_controls,
@@ -260,6 +274,7 @@ class MainWindow(QMainWindow):
             stream_a_roi=self.gui_state.stream_a_roi, stream_b_roi=self.gui_state.stream_b_roi,
             camera_name=camera_name,
             stream_a_label=stream_label(pick_a), stream_b_label=stream_label(pick_b),
+            dual_panel_config=self._dual_panel_config,
         )
         self.stack.setCurrentWidget(self.threshold_tuning_page)
 
@@ -287,6 +302,7 @@ class MainWindow(QMainWindow):
             stream_a_roi=pending["stream_a_roi"], stream_b_roi=pending["stream_b_roi"],
             camera_name=pending["camera_name"],
             stream_a_label=pending["stream_a_label"], stream_b_label=pending["stream_b_label"],
+            dual_panel_config=pending["dual_panel_config"],
         )
         self.stack.setCurrentWidget(self.live_session_page)
 

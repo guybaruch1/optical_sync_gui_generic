@@ -94,6 +94,21 @@ class LEDPanel:
         LEDPanel._run("--setDirectionSingle {}".format(mode))
 
     @staticmethod
+    def set_trigger_mode(mode):
+        # Slaves the panel's stepping to an external trigger signal (the
+        # camera's own trigger, once armed - see
+        # engine/dual_panel_control.py) instead of free-running on its own
+        # internal timer. Layered on top of response_time_measurement_mode
+        # (--setMode 1)/set_speed_ms, not a replacement for them - needed
+        # when 2 physically separate panels must stay in lockstep, since
+        # each free-running independently on its own would drift.
+        LEDPanel._run("--setTriggerMode {}".format(mode))
+
+    @staticmethod
+    def set_camera_trigger(enabled):
+        LEDPanel._run("--setCameraTrigger {}".format(1 if enabled else 0))
+
+    @staticmethod
     def all_leds_off():
         LEDPanel.stop()
         LEDPanel._run("--setMode 3")

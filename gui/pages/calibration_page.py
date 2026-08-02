@@ -25,7 +25,7 @@ from domain.realsense_utils import (
     decode_frame,
 )
 from engine.streams import find_device_by_serial, resolve_and_group, capture_synced_frame_pair, stream_slug
-from engine.led_panel import LEDPanel
+from engine.dual_panel_control import turn_all_leds_on, turn_all_leds_off
 from gui.pages.roi_select_page import stream_label, _apply_camera_controls
 
 
@@ -54,14 +54,14 @@ class CalibrationPage(QWidget):
     def set_context(self, ctx, device_serial, pick_a, pick_b, camera_controls, stream_a_roi, stream_b_roi,
                      config_path, camera_name, output_dir,
                      settle_frames=15, min_blob_area=20, neighborhood_size=5, row_gap_px=15,
-                     min_acceptable_contrast=20):
+                     min_acceptable_contrast=20, dual_panel_config=None):
         self._pending_args = dict(
             ctx=ctx, device_serial=device_serial, pick_a=pick_a, pick_b=pick_b,
             camera_controls=camera_controls, stream_a_roi=stream_a_roi, stream_b_roi=stream_b_roi,
             config_path=config_path, camera_name=camera_name, output_dir=output_dir,
             settle_frames=settle_frames, min_blob_area=min_blob_area,
             neighborhood_size=neighborhood_size, row_gap_px=row_gap_px,
-            min_acceptable_contrast=min_acceptable_contrast,
+            min_acceptable_contrast=min_acceptable_contrast, dual_panel_config=dual_panel_config,
         )
 
     def _on_run_clicked(self):
@@ -77,7 +77,8 @@ class CalibrationPage(QWidget):
 
     def _run_calibration(self, ctx, device_serial, pick_a, pick_b, camera_controls, stream_a_roi, stream_b_roi,
                           config_path, camera_name, output_dir, settle_frames,
-                          min_blob_area, neighborhood_size, row_gap_px, min_acceptable_contrast):
+                          min_blob_area, neighborhood_size, row_gap_px, min_acceptable_contrast,
+                          dual_panel_config):
         device = find_device_by_serial(ctx, device_serial)
         groups = resolve_and_group(device, pick_a, pick_b)
 
@@ -86,9 +87,8 @@ class CalibrationPage(QWidget):
 
         def turn_on_all_leds():
             self._log("Turning on all LEDs...")
-            LEDPanel.stop()
-            LEDPanel.all_leds_on()
-            time.sleep(0.5)  # let the panel actually reach full brightness
+            turn_all_leds_on(dual_panel_config)
+            time.sleep(0.5)  # let the panel(s) actually reach full brightness
 
         # Same capture mechanism led_calibration.py actually used (raw
         # per-sensor open/start, counting real callback deliveries to confirm
@@ -110,7 +110,7 @@ class CalibrationPage(QWidget):
             # always masks one from the try block in Python) - still surface
             # it, since the operator needs to know to check the panel by hand.
             try:
-                LEDPanel.all_leds_off()
+                turn_all_leds_off(dual_panel_config)
             except Exception as exc:
                 self._log("WARNING: failed to turn LEDs off during cleanup: {}".format(exc))
 

@@ -34,7 +34,7 @@ from engine.streams import (
     find_device_by_serial, resolve_and_group, capture_synced_frame_pair,
     set_emitter_enabled, enable_auto_exposure, set_manual_exposure,
 )
-from engine.led_panel import LEDPanel
+from engine.dual_panel_control import turn_all_leds_on, turn_all_leds_off
 
 
 _STREAM_TYPE_LABELS = {
@@ -127,10 +127,12 @@ class RoiSelectPage(QWidget):
         self.status_label = QLabel("")
         layout.addWidget(self.status_label)
 
-    def set_context(self, ctx, device_serial, pick_a, pick_b, camera_controls, settle_frames=15):
+    def set_context(self, ctx, device_serial, pick_a, pick_b, camera_controls, settle_frames=15,
+                     dual_panel_config=None):
         self._pending_args = dict(
             ctx=ctx, device_serial=device_serial, pick_a=pick_a, pick_b=pick_b,
             camera_controls=camera_controls, settle_frames=settle_frames,
+            dual_panel_config=dual_panel_config,
         )
         self.status_label.setText("")
 
@@ -145,7 +147,8 @@ class RoiSelectPage(QWidget):
         finally:
             self.capture_button.setEnabled(True)
 
-    def _capture_and_select(self, ctx, device_serial, pick_a, pick_b, camera_controls, settle_frames):
+    def _capture_and_select(self, ctx, device_serial, pick_a, pick_b, camera_controls, settle_frames,
+                             dual_panel_config):
         device = find_device_by_serial(ctx, device_serial)
         groups = resolve_and_group(device, pick_a, pick_b)
 
@@ -154,9 +157,8 @@ class RoiSelectPage(QWidget):
             self.status_label.setText("\n".join(warnings))
 
         def turn_on_all_leds():
-            LEDPanel.stop()
-            LEDPanel.all_leds_on()
-            time.sleep(0.5)  # let the panel actually reach full brightness
+            turn_all_leds_on(dual_panel_config)
+            time.sleep(0.5)  # let the panel(s) actually reach full brightness
 
         # Same capture mechanism roi_picker.py actually used - see
         # calibration_page.py's matching comment for why this replaced the
@@ -175,7 +177,7 @@ class RoiSelectPage(QWidget):
             # always masks one from the try block in Python) - still surface
             # it, since the operator needs to know to check the panel by hand.
             try:
-                LEDPanel.all_leds_off()
+                turn_all_leds_off(dual_panel_config)
             except Exception as exc:
                 self.status_label.setText("Warning: failed to turn LEDs off during cleanup: {}".format(exc))
 

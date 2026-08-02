@@ -382,7 +382,8 @@ class LiveSessionPage(QWidget):
                      stream_a_xy, stream_b_xy, num_leds, neighborhood_size,
                      frame_drop_threshold_factor, warmup_pairs_to_skip, pairing_gap_outlier_threshold_us,
                      kept_csv_path, dropped_csv_path, output_dir, snapshot_every_n_pairs, max_snapshots,
-                     stream_a_roi, stream_b_roi, camera_name, stream_a_label, stream_b_label):
+                     stream_a_roi, stream_b_roi, camera_name, stream_a_label, stream_b_label,
+                     dual_panel_config=None):
         self._context = dict(
             ctx=ctx, device_serial=device_serial, pick_a=pick_a, pick_b=pick_b, camera_controls=camera_controls,
             switch_time_ms=switch_time_ms, scan_direction=scan_direction,
@@ -400,6 +401,7 @@ class LiveSessionPage(QWidget):
             snapshot_every_n_pairs=snapshot_every_n_pairs, max_snapshots=max_snapshots,
             stream_a_roi=stream_a_roi, stream_b_roi=stream_b_roi,
             stream_a_label=stream_a_label, stream_b_label=stream_b_label,
+            dual_panel_config=dual_panel_config,
         )
         self.stats_panel.set_value("switch_time_ms", switch_time_ms)
         # settings.yaml's value is only the starting point shown in the
@@ -477,6 +479,7 @@ class LiveSessionPage(QWidget):
             stream_a_xy=ctx["stream_a_xy"], stream_b_xy=ctx["stream_b_xy"], neighborhood_size=ctx["neighborhood_size"],
             scan_direction=ctx["scan_direction"], switch_time_ms=switch_time_ms,
             display_stride=display_stride, position_gap_metric=position_gap_metric,
+            dual_panel_config=ctx["dual_panel_config"],
         )
         self.engine_thread.frame_ready.connect(self._on_frame_ready)
         self.engine_thread.row_ready.connect(self._on_row_ready)

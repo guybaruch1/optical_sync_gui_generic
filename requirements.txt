@@ -6,3 +6,11 @@ PySide6==6.11.1
 pyqtgraph==0.14.0
 matplotlib==3.11.1
 pytest==9.1.1
+# Only needed for the optional dual-LED-panel setup (Device Select's "Use
+# dual LED panel" checkbox) - engine/dual_panel_control.py imports both
+# lazily, so every normal single-panel run works without either installed.
+pyserial==3.5
+# Acroname's USB-hub SDK - NOT necessarily a plain PyPI install; confirm
+# the actual install method on the dev machine (Acroname sometimes
+# distributes this via their own installer rather than PyPI).
+brainstem

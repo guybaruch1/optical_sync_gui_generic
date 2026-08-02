@@ -34,6 +34,7 @@ stream_b_threshold properties - see main_window.py's _on_tuning_done."""
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QSpinBox, QDoubleSpinBox, QLabel, QFrame, QScrollArea,
+    QApplication,
 )
 from PySide6.QtCore import Signal
 
@@ -41,6 +42,7 @@ from gui.widgets.video_panel import VideoPanel
 from gui.pages.live_session_page import _short_camera_name
 from engine.threshold_preview_thread import ThresholdPreviewThread
 from engine.led_panel import LEDPanel
+from engine.dual_panel_control import start_scanning
 from domain.calibration import compute_threshold
 from domain.realsense_utils import draw_led_state_overlay, crop_to_roi
 
@@ -171,14 +173,15 @@ class ThresholdTuningPage(QWidget):
                      stream_a_xy, stream_b_xy, stream_a_on, stream_a_off, stream_b_on, stream_b_off,
                      num_leds, neighborhood_size, scan_direction, switch_time_ms,
                      stream_a_threshold_fraction_default, stream_b_threshold_fraction_default,
-                     stream_a_roi, stream_b_roi, camera_name, stream_a_label, stream_b_label):
+                     stream_a_roi, stream_b_roi, camera_name, stream_a_label, stream_b_label,
+                     dual_panel_config=None):
         self._context = dict(
             ctx=ctx, device_serial=device_serial, pick_a=pick_a, pick_b=pick_b, camera_controls=camera_controls,
             stream_a_xy=stream_a_xy, stream_b_xy=stream_b_xy,
             stream_a_on=stream_a_on, stream_a_off=stream_a_off,
             stream_b_on=stream_b_on, stream_b_off=stream_b_off,
             num_leds=num_leds, neighborhood_size=neighborhood_size, scan_direction=scan_direction,
-            stream_a_roi=stream_a_roi, stream_b_roi=stream_b_roi,
+            stream_a_roi=stream_a_roi, stream_b_roi=stream_b_roi, dual_panel_config=dual_panel_config,
         )
         self.stream_a_threshold_fraction_spinbox.setValue(stream_a_threshold_fraction_default)
         self.stream_b_threshold_fraction_spinbox.setValue(stream_b_threshold_fraction_default)
@@ -200,6 +203,7 @@ class ThresholdTuningPage(QWidget):
             neighborhood_size=ctx["neighborhood_size"], scan_direction=ctx["scan_direction"],
             switch_time_ms=self.switch_time_spinbox.value(),
             display_stride=self.frame_sample_interval_spinbox.value(),
+            dual_panel_config=ctx["dual_panel_config"],
         )
         self.preview_thread.frame_ready.connect(self._on_frame_ready)
         self.preview_thread.error.connect(self._on_error)
@@ -249,8 +253,22 @@ class ThresholdTuningPage(QWidget):
         # CLI wrapper (engine/led_panel.py), safe to call from the GUI
         # thread while the preview thread's own capture loop keeps running,
         # since it only talks to the LED panel hardware, never the camera.
+        dual_panel_config = self._context["dual_panel_config"] if self._context is not None else None
         try:
-            LEDPanel.set_speed_ms(value)
+            if dual_panel_config is not None:
+                # Unlike the single-panel case, a simple set_speed_ms() call
+                # only ever reaches whichever of the 2 panels is currently
+                # Acroname-hub-exposed - any config change needs the WHOLE
+                # per-panel provisioning dance (+ re-pulsing the relay)
+                # redone, per the operator's own confirmation. Visibly
+                # slower than the single-panel case's instant update - no
+                # way around the hardware constraint.
+                self.status_label.setText("Reconfiguring both LED panels...")
+                QApplication.processEvents()
+                start_scanning(value, self._context["scan_direction"], dual_panel_config)
+                self.status_label.setText("")
+            else:
+                LEDPanel.set_speed_ms(value)
         except Exception as exc:
             self.status_label.setText("Failed to update LED switch time: {}".format(exc))
 
