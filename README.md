@@ -47,9 +47,9 @@ sync test with a real-time video feed and graphs.
   stats sidebar (frame index, HW timestamp gap, position gap, LED switch
   time, per-stream frame-drop counts, and a min/avg/std/max table for the
   two gap metrics), Start/Stop with an optional fixed duration, per-run
-  editable LED switch time and frame sample interval, a "Save Debug
-  Snapshot" button for an on-demand LED on/off correctness check, and CSVs
-  plus a summary plot image written at the end.
+  editable LED switch time, frame sample interval, and on/off threshold
+  fraction, a "Save Debug Snapshot" button for an on-demand LED on/off
+  correctness check, and CSVs plus a summary plot image written at the end.
 
 ## Prerequisites
 
@@ -114,10 +114,11 @@ The window opens maximized. Walk through the wizard:
    — these show the exact masked region and whatever was detected, even
    when zero LEDs were found.
 5. **Live Session** — set an optional duration (0 = manual stop), tune the
-   LED switch time and frame sample interval if needed (locked once a
-   session is running), click **Start**, watch both video feeds (each with
-   a live LED on/off overlay), the live plots (toggle either metric series
-   on/off), and the frame-drops plot. Click **Save Debug Snapshot** any
+   LED switch time, frame sample interval, and threshold fraction if needed
+   (locked once a session is running), click **Start**, watch both video
+   feeds (each with a live LED on/off overlay), the live plots (toggle
+   either metric series on/off), and the frame-drops plot. Click **Save
+   Debug Snapshot** any
    time to check the LED on/off classification against the live video.
    Click **Stop** (or let the duration elapse) to write the CSVs, a summary
    plot image, and a final debug snapshot under `output/`.

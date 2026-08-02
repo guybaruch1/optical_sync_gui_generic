@@ -25,7 +25,12 @@ def _minimal_context(tmp_path, **overrides):
         pick_b={"stream_type": "color", "stream_index": 0, "width": 4, "height": 4, "fps": 30, "format": "bgr8"},
         camera_controls={},
         switch_time_ms=1.0, scan_direction=1,
-        stream_a_threshold=np.full(2, 150.0), stream_b_threshold=np.full(2, 150.0),
+        # off=100/on=300 with the default threshold_fraction=0.25 below
+        # gives the same effective threshold (150.0) the old fixed-threshold
+        # fixture used, for numeric consistency.
+        stream_a_on=np.full(2, 300.0), stream_a_off=np.full(2, 100.0),
+        stream_b_on=np.full(2, 300.0), stream_b_off=np.full(2, 100.0),
+        threshold_fraction=0.25,
         stream_a_xy=np.array([(1, 1), (2, 2)]), stream_b_xy=np.array([(1, 1), (2, 2)]),
         num_leds=2, neighborhood_size=5, frame_drop_threshold_factor=1.5,
         warmup_pairs_to_skip=0, pairing_gap_outlier_threshold_us=100000,
@@ -160,6 +165,12 @@ def test_set_context_prefills_switch_time_spinbox_from_settings_value(qapp, tmp_
     assert page.switch_time_spinbox.value() == 7
 
 
+def test_set_context_prefills_threshold_fraction_spinbox_from_settings_value(qapp, tmp_path):
+    page = LiveSessionPage()
+    page.set_context(**_minimal_context(tmp_path, threshold_fraction=0.4))
+    assert page.threshold_fraction_spinbox.value() == 0.4
+
+
 def test_start_session_passes_toolbar_switch_time_and_frame_sample_interval(qapp, tmp_path):
     page = LiveSessionPage()
     page.set_context(**_minimal_context(tmp_path, switch_time_ms=1))
@@ -173,7 +184,25 @@ def test_start_session_passes_toolbar_switch_time_and_frame_sample_interval(qapp
     assert _FakeEngineThread.last_kwargs["display_stride"] == 99
 
 
-def test_start_session_locks_duration_switch_time_and_frame_sample_interval(qapp, tmp_path):
+def test_start_session_recomputes_threshold_from_live_toolbar_fraction(qapp, tmp_path):
+    # off=100/on=300 (see _minimal_context) - a fraction of 0.5 (not the
+    # settings-default 0.25 used to populate the fixture/spinbox) should
+    # recompute the threshold to 100 + 0.5*(300-100) = 200, proving
+    # start_session() reads the LIVE spinbox value, not a fixed ctx
+    # threshold, the same tunable-per-run pattern as switch_time_ms.
+    page = LiveSessionPage()
+    page.set_context(**_minimal_context(tmp_path))
+    page.threshold_fraction_spinbox.setValue(0.5)
+
+    with patch("gui.pages.live_session_page.SessionEngineThread", _FakeEngineThread):
+        page.start_session()
+
+    position_gap_metric = _FakeEngineThread.last_kwargs["position_gap_metric"]
+    assert list(position_gap_metric.stream_a_threshold) == [200.0, 200.0]
+    assert list(position_gap_metric.stream_b_threshold) == [200.0, 200.0]
+
+
+def test_start_session_locks_duration_switch_time_frame_sample_interval_and_threshold_fraction(qapp, tmp_path):
     page = LiveSessionPage()
     page.set_context(**_minimal_context(tmp_path))
 
@@ -183,9 +212,11 @@ def test_start_session_locks_duration_switch_time_and_frame_sample_interval(qapp
     assert not page.duration_spinbox.isEnabled()
     assert not page.switch_time_spinbox.isEnabled()
     assert not page.frame_sample_interval_spinbox.isEnabled()
+    assert not page.threshold_fraction_spinbox.isEnabled()
 
     page._on_engine_thread_finished()
 
     assert page.duration_spinbox.isEnabled()
     assert page.switch_time_spinbox.isEnabled()
     assert page.frame_sample_interval_spinbox.isEnabled()
+    assert page.threshold_fraction_spinbox.isEnabled()
