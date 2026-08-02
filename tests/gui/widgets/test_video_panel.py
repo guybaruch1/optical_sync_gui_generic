@@ -19,6 +19,18 @@ def test_force_square_panel_is_expanding_not_fixed(qapp):
     assert panel.sizeHint().height() == 320
 
 
+def test_force_square_panel_never_grows_past_its_natural_square_size(qapp):
+    # Regression: on a page whose video row has nothing else competing for
+    # leftover vertical space (unlike Live Session's busier graphs/stats
+    # layout), an uncapped Expanding policy stretched this panel tall,
+    # rendering as a non-square rectangle instead of the mockup's fixed
+    # square. A maximum size caps growth while the minimum above still
+    # allows shrinking on a smaller screen.
+    panel = VideoPanel(force_square=True)
+    assert panel.maximumSize().width() == 320
+    assert panel.maximumSize().height() == 320
+
+
 def test_default_panel_is_expanding(qapp):
     panel = VideoPanel()
     assert panel.sizePolicy().horizontalPolicy() == QSizePolicy.Expanding
