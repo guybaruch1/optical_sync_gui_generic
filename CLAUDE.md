@@ -92,6 +92,17 @@ between closing/releasing it, wrongly assumed to be leftover debug timing
 rather than load-bearing) - real-hardware testing confirmed that was
 wrong: the hold time itself is what keeps the panels stepping.
 
+`_relay_on` also starts a background thread (`_relay_keepalive_loop`) that
+re-sends the same "ON" byte on the already-open connection every
+`_RELAY_KEEPALIVE_INTERVAL_S` (30s) for as long as the relay stays armed -
+a multi-minute test that holds the relay open but never writes to it
+again until the final OFF byte was observed to sometimes fail on its NEXT
+run, consistent with Windows USB Selective Suspend power-managing the
+idle USB-serial adapter and not cleanly recovering. `_relay_off` stops and
+joins this thread before it does anything else with the connection
+(pyserial's `Serial` isn't documented as safe for concurrent access from
+multiple threads).
+
 This is a **manual operator choice**, not inferred from the camera model,
 not auto-detected from the hub, and not a per-named-test `settings.yaml`
 flag - Device Select's "Use dual LED panel" checkbox

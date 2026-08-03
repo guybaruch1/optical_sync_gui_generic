@@ -1,8 +1,11 @@
+import threading
+import time
 from unittest.mock import patch, call
 
 import engine.dual_panel_control as dual_panel_control
 from engine.dual_panel_control import (
     turn_all_leds_on, turn_all_leds_off, start_scanning, stop_scanning, switched_to_stream_panel,
+    _relay_keepalive_loop,
 )
 
 
@@ -305,3 +308,58 @@ def test_switched_to_stream_panel_disconnects_even_if_block_raises():
             pass
 
     assert "disconnect" in fake_hub.calls
+
+
+# --- _relay_keepalive_loop: the one piece of the relay-holding machinery
+# that's genuinely testable without real hardware - a timed loop writing to
+# whatever connection object it's given, using a real threading.Event so
+# _relay_off()'s own stop-and-join behavior is exercised faithfully. ---
+
+class _FakeRelayConnection:
+    def __init__(self):
+        self.writes = []
+
+    def write(self, data):
+        self.writes.append(data)
+
+
+class _FailingRelayConnection:
+    def write(self, data):
+        raise OSError("simulated USB write failure")
+
+
+def test_relay_keepalive_loop_writes_periodically_until_stopped():
+    conn = _FakeRelayConnection()
+    stop_event = threading.Event()
+
+    def stop_after_a_few_intervals():
+        time.sleep(0.05)
+        stop_event.set()
+
+    stopper = threading.Thread(target=stop_after_a_few_intervals)
+    stopper.start()
+    _relay_keepalive_loop(conn, stop_event, interval_s=0.01)
+    stopper.join()
+
+    assert len(conn.writes) >= 2
+    assert all(w == bytes.fromhex("A00101A2") for w in conn.writes)
+
+
+def test_relay_keepalive_loop_exits_immediately_if_already_stopped():
+    conn = _FakeRelayConnection()
+    stop_event = threading.Event()
+    stop_event.set()
+
+    _relay_keepalive_loop(conn, stop_event, interval_s=10.0)
+
+    assert conn.writes == []
+
+
+def test_relay_keepalive_loop_stops_silently_on_write_error():
+    stop_event = threading.Event()
+
+    # Must return without raising, even though every write() call fails -
+    # an uncaught exception on this background thread would otherwise just
+    # print a traceback and die silently anyway; this does the same without
+    # the noise.
+    _relay_keepalive_loop(_FailingRelayConnection(), stop_event, interval_s=0.01)

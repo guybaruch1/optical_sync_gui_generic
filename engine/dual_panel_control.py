@@ -42,6 +42,7 @@ dual_panel_config takes) IS tested, by mocking
 _run_on_both_panels/_relay_on/_relay_off/LEDPanel - see
 tests/engine/test_dual_panel_control.py."""
 
+import threading
 import time
 from contextlib import contextmanager
 
@@ -210,7 +211,37 @@ def _connect_hub():
 # through every start_scanning/stop_scanning call site) since this
 # module's functions are plain module-level functions, not a class
 # instance every caller already carries around.
-_relay_connection = {"conn": None}
+_relay_connection = {"conn": None, "keepalive_thread": None, "keepalive_stop": None}
+
+# How often _relay_on's background thread re-sends the same "ON" byte on
+# the already-open connection, in seconds - real-hardware testing showed a
+# test that runs for several minutes with the relay held open but
+# UNTOUCHED (no further writes between the initial ON and the final OFF)
+# can fail on its NEXT run, while one interrupted early always works -
+# consistent with Windows USB Selective Suspend power-managing the
+# relay's USB-serial adapter into an idle state after some seconds with no
+# traffic, then not cleanly recovering. Re-asserting ON periodically resets
+# whatever idle timer is responsible, regardless of the exact mechanism -
+# well under typical USB idle-suspend timeouts (usually tens of seconds to
+# a couple of minutes).
+_RELAY_KEEPALIVE_INTERVAL_S = 30.0
+
+
+def _relay_keepalive_loop(conn, stop_event, interval_s=_RELAY_KEEPALIVE_INTERVAL_S):
+    """Runs on its own background thread for as long as the relay stays
+    armed - Event.wait() both sleeps AND doubles as the stop signal, so
+    _relay_off() setting stop_event wakes this immediately rather than
+    waiting out a full interval. Any write failure just ends the thread
+    quietly (rather than crashing it with an unhandled exception in a
+    background thread, or raising into whichever thread happens to be
+    running at the time) - the next real interaction with the relay
+    (_relay_off's own write, or the next run's _relay_on) is what actually
+    surfaces a genuinely dead connection."""
+    while not stop_event.wait(interval_s):
+        try:
+            conn.write(bytes.fromhex("A00101A2"))  # relay 1 ON - re-asserted, not a fresh trigger
+        except Exception:
+            return
 
 
 def _relay_on(dual_panel_config):
@@ -230,11 +261,31 @@ def _relay_on(dual_panel_config):
     s.write(bytes.fromhex("A00101A2"))  # relay 1 ON - kept open, not released, until _relay_off()
     _relay_connection["conn"] = s
 
+    stop_event = threading.Event()
+    thread = threading.Thread(target=_relay_keepalive_loop, args=(s, stop_event), daemon=True)
+    _relay_connection["keepalive_stop"] = stop_event
+    _relay_connection["keepalive_thread"] = thread
+    thread.start()
+
 
 def _relay_off():
     s = _relay_connection["conn"]
     if s is None:
         return
+
+    # Stop and join the keepalive thread BEFORE this thread touches the
+    # connection itself - pyserial's Serial isn't documented as safe for
+    # concurrent access from multiple threads, so the keepalive thread must
+    # have fully finished (not mid-write) before the final OFF write/close.
+    stop_event = _relay_connection["keepalive_stop"]
+    if stop_event is not None:
+        stop_event.set()
+    thread = _relay_connection["keepalive_thread"]
+    if thread is not None:
+        thread.join(timeout=5.0)
+
     s.write(bytes.fromhex("A00100A1"))  # relay 1 OFF
     s.close()
     _relay_connection["conn"] = None
+    _relay_connection["keepalive_stop"] = None
+    _relay_connection["keepalive_thread"] = None
