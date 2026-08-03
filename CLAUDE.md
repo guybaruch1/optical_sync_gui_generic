@@ -114,10 +114,17 @@ and Live Session's actual timed test). These lazily import
 `engine/acroname_hub.py` (a ported `AcronameHub` wrapper around the
 Acroname `brainstem` SDK) and `pyserial` respectively, so every normal
 single-panel test can import/run this module without either dependency
-installed. `start_scanning`'s dual-panel path additionally sends
-`LEDPanel.set_trigger_mode(2)`/`set_camera_trigger(True)` (new methods,
-layered on top of the exact same `--setMode 1`/`--setTime X` the
-single-panel case already sends, not a replacement) and never calls
+installed. `start_scanning`'s dual-panel path configures each panel with
+`LEDPanel.set_mode(1)`/`set_speed_ms()`/`set_trigger_mode(2)`/
+`set_camera_trigger(True)` - deliberately `set_mode(1)`, NOT
+`response_time_measurement_mode()` (which sends `--stop` first) and
+deliberately no `set_direction_single()` either: real-hardware testing
+(see `tools/diag_*.py`) confirmed that sending `--stop` before entering
+trigger mode prevents the panel from actually stepping once triggered,
+and the confirmed-working reference sequence
+(`docs/config_tigger_mode.bat`) never sets direction. This is the EXACT
+4-command sequence confirmed to produce continuous stepping - don't add
+either back without re-confirming on real hardware first. Never calls
 `.start()` at all - the relay pulse is what kicks off stepping, not
 `--start`. Any panel config change (e.g. switch time) needs this whole
 provisioning re-run - see `gui/pages/threshold_tuning_page.py`'s

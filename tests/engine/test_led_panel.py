@@ -19,6 +19,17 @@ def test_set_speed_ms_converts_to_seconds_string():
         mock_check_call.assert_called_once_with(["LED-Panel.exe", "--setTime", "0.0010"])
 
 
+def test_set_mode_sends_only_set_mode_no_preceding_stop():
+    # Unlike response_time_measurement_mode()/all_leds_on()/off()/
+    # rolling_shutter_mode() (which all send --stop first), set_mode()
+    # must NOT - confirmed via real-hardware testing that a --stop before
+    # entering dual-panel trigger mode prevents the panel from actually
+    # stepping once triggered.
+    with patch("engine.led_panel.check_call") as mock_check_call, patch("time.sleep"):
+        LEDPanel.set_mode(1)
+        mock_check_call.assert_called_once_with(["LED-Panel.exe", "--setMode", "1"])
+
+
 def test_run_retries_on_called_process_error_then_raises():
     with patch("engine.led_panel.check_call", side_effect=CalledProcessError(1, "cmd")) as mock_check_call, \
          patch("time.sleep"):

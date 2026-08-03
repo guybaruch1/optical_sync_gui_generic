@@ -77,10 +77,19 @@ def start_scanning(switch_time_ms, scan_direction, dual_panel_config):
         LEDPanel.set_speed_ms(switch_time_ms)
         LEDPanel.start()
     else:
+        # Deliberately NOT LEDPanel.stop()/response_time_measurement_mode()
+        # (which sends --stop before --setMode 1) and NOT
+        # set_direction_single() - confirmed via real-hardware testing that
+        # sending --stop before entering trigger mode prevents the panel
+        # from actually stepping once triggered (presumably --stop resets
+        # whatever internal state --setTriggerMode/--setCameraTrigger
+        # establish), and the confirmed-working reference sequence
+        # (docs/config_tigger_mode.bat) never sets direction either. This
+        # is the EXACT 4-command sequence confirmed to produce continuous
+        # stepping once triggered - do not add anything back without
+        # re-confirming on real hardware first.
         def configure_one_panel():
-            LEDPanel.stop()
-            LEDPanel.response_time_measurement_mode()
-            LEDPanel.set_direction_single(scan_direction if scan_direction is not None else 1)
+            LEDPanel.set_mode(1)  # response-time-measurement mode, no preceding --stop
             LEDPanel.set_speed_ms(switch_time_ms)
             LEDPanel.set_trigger_mode(2)
             LEDPanel.set_camera_trigger(True)

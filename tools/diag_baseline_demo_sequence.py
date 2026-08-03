@@ -51,7 +51,9 @@ def main():
     time.sleep(1)
     print("Configuring stream_a's panel: setMode 1, setTime {}ms, setTriggerMode 2, setCameraTrigger 1"
           .format(switch_time_ms))
-    LEDPanel.response_time_measurement_mode()
+    LEDPanel.set_mode(1)  # response-time-measurement mode - NOT response_time_measurement_mode(),
+    # which sends --stop first; confirmed via real-hardware testing that --stop
+    # before entering trigger mode prevents the panel from actually stepping.
     LEDPanel.set_speed_ms(switch_time_ms)
     LEDPanel.set_trigger_mode(2)
     LEDPanel.set_camera_trigger(True)
@@ -63,7 +65,9 @@ def main():
     time.sleep(1)
     print("Configuring stream_b's panel: setMode 1, setTime {}ms, setTriggerMode 2, setCameraTrigger 1"
           .format(switch_time_ms))
-    LEDPanel.response_time_measurement_mode()
+    LEDPanel.set_mode(1)  # response-time-measurement mode - NOT response_time_measurement_mode(),
+    # which sends --stop first; confirmed via real-hardware testing that --stop
+    # before entering trigger mode prevents the panel from actually stepping.
     LEDPanel.set_speed_ms(switch_time_ms)
     LEDPanel.set_trigger_mode(2)
     LEDPanel.set_camera_trigger(True)

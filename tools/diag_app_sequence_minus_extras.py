@@ -1,20 +1,15 @@
 """Diagnostic script - NOT part of the shipped app, no automated tests.
 
-Same hub-switching/relay plumbing as engine.dual_panel_control.start_scanning
-(reuses its actual _run_on_both_panels/_pulse_relay directly - real code,
-not a copy), but configures each panel with ONLY the 4 commands the
-confirmed-working demo script (docs/config_tigger_mode.bat) sends -
-response_time_measurement_mode, set_speed_ms, set_trigger_mode(2),
-set_camera_trigger(True) - deliberately WITHOUT the 2 extra commands
-engine.dual_panel_control.start_scanning's real configure_one_panel()
-closure currently adds (a leading LEDPanel.stop(), and
-LEDPanel.set_direction_single(scan_direction)) that aren't present in that
-known-good script.
-
-Purpose: isolate whether removing those two extra commands restores
-stepping. If THIS script makes the panels step but
-tools/diag_app_start_scanning.py doesn't, the fix is removing/reordering
-those two calls in engine/dual_panel_control.py's start_scanning.
+RESOLVED: real-hardware testing confirmed the root cause was
+LEDPanel.response_time_measurement_mode()'s hidden leading --stop call
+(this script originally called that convenience method here too, which
+meant it never actually tested what its own docstring claimed - a real
+lesson in double-checking what a "no side effects" convenience wrapper
+actually does). engine/dual_panel_control.py's start_scanning has since
+been fixed to use the new LEDPanel.set_mode(1) (no preceding --stop)
+instead. This script is kept as a way to re-verify the exact 4-command
+sequence in isolation from the rest of the app, using the app's real
+hub-switching plumbing (_run_on_both_panels/_pulse_relay).
 
 Run from the repo root: python tools/diag_app_sequence_minus_extras.py
 Watch the physical panels while it runs.
@@ -38,8 +33,11 @@ def main():
 
     def configure_one_panel_minimal():
         # Exactly the 4 commands docs/config_tigger_mode.bat sends, in the
-        # same order - nothing else.
-        LEDPanel.response_time_measurement_mode()
+        # same order - nothing else. set_mode(1), NOT
+        # response_time_measurement_mode() (which sends --stop first and
+        # was confirmed via real-hardware testing to break trigger-mode
+        # stepping).
+        LEDPanel.set_mode(1)
         LEDPanel.set_speed_ms(switch_time_ms)
         LEDPanel.set_trigger_mode(2)
         LEDPanel.set_camera_trigger(True)

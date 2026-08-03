@@ -69,6 +69,21 @@ class LEDPanel:
         LEDPanel._run("--setMode 1")
 
     @staticmethod
+    def set_mode(mode):
+        # Unlike response_time_measurement_mode()/all_leds_on()/off()/
+        # rolling_shutter_mode(), deliberately does NOT send --stop first.
+        # Confirmed via real-hardware testing (see engine/
+        # dual_panel_control.py's start_scanning): sending --stop before
+        # --setMode 1 in the dual-panel trigger-mode sequence prevents the
+        # panel from actually entering continuous stepping once triggered -
+        # --stop presumably resets whatever internal state
+        # --setTriggerMode/--setCameraTrigger need afterward. The
+        # single-panel scanning path doesn't use trigger mode and is
+        # unaffected - it still uses response_time_measurement_mode()'s
+        # --stop-then---setMode-1 sequence as before.
+        LEDPanel._run("--setMode {}".format(mode))
+
+    @staticmethod
     def set_display_brightness(brightness):
         LEDPanel._run("--setDisplayBrightness {}".format(str(brightness)))
 
@@ -95,13 +110,14 @@ class LEDPanel:
 
     @staticmethod
     def set_trigger_mode(mode):
-        # Slaves the panel's stepping to an external trigger signal (the
-        # camera's own trigger, once armed - see
-        # engine/dual_panel_control.py) instead of free-running on its own
-        # internal timer. Layered on top of response_time_measurement_mode
-        # (--setMode 1)/set_speed_ms, not a replacement for them - needed
-        # when 2 physically separate panels must stay in lockstep, since
-        # each free-running independently on its own would drift.
+        # Slaves the panel's stepping to an external trigger signal (this
+        # rig's shared USB relay - see engine/dual_panel_control.py - NOT
+        # the RealSense camera; nothing in this codebase configures the
+        # camera to emit a hardware trigger) instead of free-running on its
+        # own internal timer. Layered on top of set_mode(1)/set_speed_ms,
+        # not a replacement for them - needed when 2 physically separate
+        # panels must stay in lockstep, since each free-running
+        # independently on its own would drift.
         LEDPanel._run("--setTriggerMode {}".format(mode))
 
     @staticmethod
