@@ -68,14 +68,22 @@ PICK = {
     "fps": 30,
 }
 
+# Falls back to this if gui_state.json has no device_serial saved (i.e. the
+# wizard's Device Select page has never been run on this machine). Leave as
+# None to require gui_state.json; set to your camera's serial (a string,
+# e.g. "123456789012") to bypass it entirely.
+DEVICE_SERIAL = None
+
 
 def resolve_device_serial():
+    if DEVICE_SERIAL:
+        return DEVICE_SERIAL
     gui_state = load_gui_state(os.path.join(REPO_ROOT, "gui_state.json"))
     if gui_state.device_serial:
         return gui_state.device_serial
     raise RuntimeError(
         "No device_serial found in gui_state.json (run the wizard's Device Select page at least "
-        "once) - or edit this script to set DEVICE_SERIAL directly."
+        "once) - or edit this script's DEVICE_SERIAL constant directly."
     )
 
 
