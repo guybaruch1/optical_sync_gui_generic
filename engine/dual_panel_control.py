@@ -102,8 +102,17 @@ def stop_scanning(dual_panel_config):
     if dual_panel_config is None:
         LEDPanel.stop()
     else:
-        _run_on_both_panels(dual_panel_config, LEDPanel.stop)
+        # _relay_off() FIRST, before _run_on_both_panels touches the hub
+        # again - _run_on_both_panels's own port-switching dance disables
+        # relay_port while it switches to panel A first, which would yank
+        # the USB device backing our already-open relay connection out from
+        # under it (a real hardware failure: "WriteFile failed - Access is
+        # denied" on the now-stale handle) if it ran before we release the
+        # relay. relay_port is still in start_scanning's last-known-enabled
+        # state here, untouched since the run began, so releasing it now is
+        # safe.
         _relay_off()
+        _run_on_both_panels(dual_panel_config, LEDPanel.stop)
 
 
 def _run_on_both_panels(dual_panel_config, action):
