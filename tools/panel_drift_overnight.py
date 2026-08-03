@@ -155,11 +155,29 @@ def _archive_run_output(output_dir, run_dir):
     return archived
 
 
+def _clear_stale_output(output_dir):
+    """Deletes any pre-existing panel_drift_raw.csv/panel_drift_frame_drops.csv
+    in output_dir BEFORE launching the next run. Without this, a run that
+    crashes before ever writing fresh CSVs would leave _archive_run_output
+    silently picking up STALE files left over from an earlier, unrelated
+    session - which is exactly what happened the first time this script
+    ran: every run crashed immediately (output/panel_drift_calibration.yaml
+    was missing), but leftover CSVs from hours-old manual testing were
+    still sitting in output_dir and got archived/reported as if they were
+    that run's own fresh, successful result."""
+    for name in ("panel_drift_raw.csv", "panel_drift_frame_drops.csv"):
+        path = os.path.join(output_dir, name)
+        if os.path.exists(path):
+            os.remove(path)
+
+
 def run_once(run_index, output_dir, archive_dir):
     print("--- Run {} starting at {} ---".format(run_index, time.strftime("%Y-%m-%d %H:%M:%S")))
     run_dir = os.path.join(archive_dir, "run_{:03d}".format(run_index))
     os.makedirs(run_dir, exist_ok=True)
     log_path = os.path.join(run_dir, "console.log")
+
+    _clear_stale_output(output_dir)
 
     exit_code = None
     try:
@@ -187,11 +205,21 @@ def run_once(run_index, output_dir, archive_dir):
 
     summary = summarize_drift(rows, bin_seconds=BIN_SECONDS) if rows else None
     stepped = bool(summary and summary["transitions"])
+    # Distinguishes WHY a run failed - a crash (exit_code != 0, e.g. the
+    # calibration file was missing, before any hardware was even touched)
+    # is a completely different problem from "it ran to completion but the
+    # panels never actually stepped" (rows exist, no transitions) - both
+    # show up as stepped=False, but need different fixes, so keep both
+    # signals in the result rather than collapsing them into one flag.
+    crashed = exit_code not in (0, None)
 
-    print("Run {}: exit_code={}, {} row(s), stepped={}".format(run_index, exit_code, len(rows), stepped))
+    print("Run {}: exit_code={}, {} row(s), stepped={}{}".format(
+        run_index, exit_code, len(rows), stepped,
+        " (CRASHED - see {})".format(log_path) if crashed else "",
+    ))
 
     return {"run_index": run_index, "exit_code": exit_code, "n_rows": len(rows),
-            "stepped": stepped, "summary": summary}
+            "stepped": stepped, "crashed": crashed, "summary": summary}
 
 
 def main():
@@ -200,6 +228,18 @@ def main():
     dual_panel_config = settings["dual_panel"]
     archive_dir = os.path.join(output_dir, "overnight_runs")
     os.makedirs(archive_dir, exist_ok=True)
+
+    # Fails fast, before burning the whole batch on the same crash
+    # repeated N_RUNS times overnight - tools/panel_drift_measure.py can't
+    # do anything at all without this (it crashes immediately, before
+    # touching the camera/relay/panels), so there's no point starting.
+    calibration_path = os.path.join(output_dir, "panel_drift_calibration.yaml")
+    if not os.path.exists(calibration_path):
+        print(
+            "ERROR: {} does not exist - tools/panel_drift_measure.py cannot run at all without "
+            "it. Run tools/panel_drift_calibrate.py first, then re-run this script.".format(calibration_path)
+        )
+        return
 
     print("Starting overnight batch: up to {} run(s), max {:.1f}h total.".format(
         N_RUNS, MAX_TOTAL_RUNTIME_S / 3600.0
@@ -228,20 +268,31 @@ def main():
         time.sleep(DELAY_BETWEEN_RUNS_S)
 
     n_stepped = sum(1 for r in results if r["stepped"])
+    n_crashed = sum(1 for r in results if r["crashed"])
     n_total = len(results)
     print()
     print("=== Overnight batch summary ===")
-    print("{}/{} run(s) stepped (LEDs actually moved).".format(n_stepped, n_total))
-    print("Pass/fail pattern: {}".format("".join("P" if r["stepped"] else "F" for r in results)))
+    print("{}/{} run(s) stepped (LEDs actually moved). {} crashed before/without producing usable data.".format(
+        n_stepped, n_total, n_crashed
+    ))
+    # P = stepped, C = crashed (see that run's own console.log - e.g. a
+    # missing output/panel_drift_calibration.yaml crashes before any
+    # hardware is even touched, a completely different problem from the
+    # panels just not stepping), N = completed but never stepped.
+    pattern = "".join("P" if r["stepped"] else ("C" if r["crashed"] else "N") for r in results)
+    print("Pass/fail pattern: {}  (P=stepped, C=crashed, N=completed but never stepped)".format(pattern))
 
     rates = []
     for r in results:
         rate = r["summary"]["overall_slope_per_s"] if (r["stepped"] and r["summary"]) else None
         rates.append((r["run_index"], rate))
-        print("  run {}: {}".format(
-            r["run_index"],
-            "{:.4f} ms/s".format(rate) if rate is not None else "FAILED (no stepping detected)",
-        ))
+        if rate is not None:
+            status = "{:.4f} ms/s".format(rate)
+        elif r["crashed"]:
+            status = "CRASHED - see output/overnight_runs/run_{:03d}/console.log".format(r["run_index"])
+        else:
+            status = "completed but panels never stepped"
+        print("  run {}: {}".format(r["run_index"], status))
 
     valid_rates = [r for _, r in rates if r is not None]
     if valid_rates:
