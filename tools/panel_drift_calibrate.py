@@ -140,14 +140,24 @@ def _switch_to_panel(dual_panel_config, which):
 
 def turn_panel_on(dual_panel_config, which):
     _switch_to_panel(dual_panel_config, which)
-    LEDPanel.stop()
-    LEDPanel.all_leds_on()
+    # set_mode(5), NOT all_leds_on() (which sends --stop before --setMode 5) -
+    # confirmed via real-hardware testing (see engine/led_panel.py's
+    # set_mode docstring / engine/dual_panel_control.py's start_scanning)
+    # that ANY --stop sent to a panel poisons it out of trigger-mode
+    # stepping until a full power cycle, even if the --stop happened
+    # earlier in an unrelated call (here, during calibration) rather than
+    # immediately before the trigger-mode sequence itself. This calibration
+    # step runs before tools/panel_drift_measure.py's start_scanning() call,
+    # so it must never send --stop either, or the later trigger-mode arming
+    # silently fails to actually step even though start_scanning() itself
+    # looks correct in isolation.
+    LEDPanel.set_mode(5)  # all LEDs on
     time.sleep(0.5)  # let the panel actually reach full brightness
 
 
 def turn_panel_off(dual_panel_config, which):
     _switch_to_panel(dual_panel_config, which)
-    LEDPanel.all_leds_off()
+    LEDPanel.set_mode(3)  # all LEDs off - same no-stop reasoning as turn_panel_on
 
 
 def capture_frame(groups, pick, settle_frames):
