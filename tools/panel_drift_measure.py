@@ -33,9 +33,13 @@ constant (deliberately NOT settings.yaml's test.duration_s - this test is
 run far longer than a normal live session, and the two must not be
 coupled through one shared config value), or press Ctrl+C to stop early.
 Writes output/panel_drift_raw.csv, output/panel_drift_frame_drops.csv,
-and output/panel_drift_plot.png (position_gap_ms/pairing_gap_us over the
-run, via the same domain.plot_export.export_session_plot every live
-session already uses).
+output/panel_drift_plot.png (position_gap_ms/pairing_gap_us over pair
+index, via the same domain.plot_export.export_session_plot every live
+session already uses), and output/panel_drift_over_time.png - a SECOND,
+drift-specific plot against actual elapsed seconds (from the camera's own
+HW frame timestamps, not an assumed constant fps), with each step change
+marked and a linear best-fit drift-rate line. A console summary lists
+every step-change's elapsed time and an overall ms/s drift-rate estimate.
 
 Pops up a live OpenCV preview window (reusing domain.realsense_utils.
 draw_led_state_overlay unchanged - the same green/on-red/off circle
@@ -143,6 +147,75 @@ def positions_to_arrays(positions):
     on_values = np.array([positions[i][2] for i in ids])
     off_values = np.array([positions[i][3] for i in ids])
     return xy, on_values, off_values
+
+
+def export_drift_over_time_plot(rows, path):
+    """A second, drift-specific plot on top of domain.plot_export.
+    export_session_plot's existing pair-index one - that one shares an axis
+    with pairing_gap_us (always ~0 here, not useful) and plots against
+    pair_index rather than real time. This one uses the camera's own HW
+    frame timestamps (stream_a_ts_us - accurate regardless of any assumed
+    constant fps) for an actual elapsed-seconds x-axis, marks every point
+    where the measured gap changes value (each one is exactly one more
+    switch_time_ms step of accumulated clock skew between the 2 panels),
+    and fits a straight line through the non-excluded samples to estimate
+    an overall drift rate. Returns a summary dict (elapsed_s range, the
+    list of step changes, and the fitted ms/s rate) for the caller to print
+    - None if there's nothing to plot."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    timestamped = [r for r in rows if r.get("stream_a_ts_us") is not None]
+    if not timestamped:
+        return None
+
+    t0 = timestamped[0]["stream_a_ts_us"]
+    elapsed_s = [(r["stream_a_ts_us"] - t0) / 1_000_000.0 for r in timestamped]
+    gap_ms = [
+        r["position_gap_ms"] if (r.get("position_gap_ms") is not None and not r.get("position_gap_ms_excluded"))
+        else float("nan")
+        for r in timestamped
+    ]
+
+    valid = [(t, v) for t, v in zip(elapsed_s, gap_ms) if not np.isnan(v)]
+    changes = []
+    prev_v = None
+    for t, v in valid:
+        if prev_v is not None and v != prev_v:
+            changes.append((t, prev_v, v))
+        prev_v = v
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(elapsed_s, gap_ms, color="tab:green", marker=".", markersize=3, label="Position gap (ms)")
+    for t, _, _ in changes:
+        ax.axvline(t, color="tab:red", linestyle="--", alpha=0.3)
+
+    slope_ms_per_s = None
+    if len(valid) >= 2:
+        ts = np.array([t for t, _ in valid])
+        vs = np.array([v for _, v in valid])
+        if ts[-1] > ts[0]:
+            slope_ms_per_s, intercept = np.polyfit(ts, vs, 1)
+            ax.plot(
+                ts, slope_ms_per_s * ts + intercept, color="tab:orange", linestyle=":",
+                label="Linear fit: {:.4f} ms/s ({:.2f} ms/min)".format(slope_ms_per_s, slope_ms_per_s * 60),
+            )
+
+    ax.set_xlabel("Elapsed time (s)")
+    ax.set_ylabel("Position gap (ms) - panel A vs panel B")
+    ax.set_title("Panel-to-panel drift over time (dashed = step change)")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
+
+    return {
+        "elapsed_s_range": (valid[0][0], valid[-1][0]) if valid else None,
+        "changes": changes,
+        "slope_ms_per_s": slope_ms_per_s,
+    }
 
 
 def frame_source(pipeline, panel_a_xy, panel_b_xy, neighborhood_size):
@@ -295,6 +368,30 @@ def main():
         plot_path = os.path.join(output_dir, "panel_drift_plot.png")
         export_session_plot(rows, plot_path)
         print("Saved drift plot to {}".format(plot_path))
+
+        over_time_path = os.path.join(output_dir, "panel_drift_over_time.png")
+        summary = export_drift_over_time_plot(rows, over_time_path)
+        print("Saved time-based drift plot to {}".format(over_time_path))
+        if summary is None:
+            print("No timestamped samples to summarize.")
+        else:
+            if summary["elapsed_s_range"] is not None:
+                start_s, end_s = summary["elapsed_s_range"]
+                print("Covered {:.1f}s of non-excluded samples ({:.1f}s to {:.1f}s elapsed).".format(
+                    end_s - start_s, start_s, end_s
+                ))
+            if summary["changes"]:
+                print("{} step change(s) - each is one more switch_time_ms of accumulated skew:".format(
+                    len(summary["changes"])
+                ))
+                for t, old, new in summary["changes"]:
+                    print("  at {:.2f}s: {} ms -> {} ms".format(t, old, new))
+            else:
+                print("No step changes detected - either no measurable drift in this run, or not enough elapsed time.")
+            if summary["slope_ms_per_s"] is not None:
+                print("Linear drift-rate estimate: {:.4f} ms/s ({:.2f} ms/min).".format(
+                    summary["slope_ms_per_s"], summary["slope_ms_per_s"] * 60
+                ))
 
     gaps = [row["position_gap_ms"] for row in rows
             if row.get("position_gap_ms") is not None and not row.get("position_gap_ms_excluded")]
