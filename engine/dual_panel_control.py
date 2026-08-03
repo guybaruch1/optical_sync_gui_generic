@@ -10,8 +10,8 @@ camera/test that hasn't had the operator check "Use dual LED panel" on
 Device Select) - every function below takes that exact same code path it
 always has for `None`, so nothing changes for the common case. When it's a
 dict (settings.yaml's `dual_panel:` section - stream_a_panel_port,
-stream_b_panel_port, relay_port, relay_com_port, relay_pulse_duration_s,
-hub_switch_settle_s), these functions instead route through
+stream_b_panel_port, relay_port, relay_com_port, hub_switch_settle_s),
+these functions instead route through
 _run_on_both_panels: only ONE of 2 physically separate LED panels is ever
 visible over USB at a time (they share one Acroname hub), so a single
 LEDPanel.* call only ever reaches whichever panel currently happens to be
@@ -33,13 +33,13 @@ repeated hub-switch+settle cost per call. Unlike turn_all_leds_on/off
 lit/dark together), this is for the "one stream's calibration doesn't
 depend on the other stream's panel state at all" case.
 
-_run_on_both_panels/switched_to_stream_panel/_pulse_relay have NO automated
-tests - they need the real Acroname `brainstem` SDK, a physically
+_run_on_both_panels/switched_to_stream_panel/_relay_on/_relay_off have NO
+automated tests - they need the real Acroname `brainstem` SDK, a physically
 connected hub, and the actual USB relay, same "no tests by design" bucket
 as engine/acroname_hub.py/engine/led_panel.py. turn_all_leds_on/off/
 start_scanning/stop_scanning's own BRANCHING (which path a given
 dual_panel_config takes) IS tested, by mocking
-_run_on_both_panels/_pulse_relay/LEDPanel - see
+_run_on_both_panels/_relay_on/_relay_off/LEDPanel - see
 tests/engine/test_dual_panel_control.py."""
 
 import time
@@ -66,7 +66,7 @@ def turn_all_leds_off(dual_panel_config):
 def start_scanning(switch_time_ms, scan_direction, dual_panel_config):
     """The stepping/cycling mode Threshold Tuning + Live Session use. For
     the dual-panel case, this must run again in full - both panels
-    reconfigured, relay re-pulsed - any time switch_time_ms/scan_direction
+    reconfigured, relay re-closed - any time switch_time_ms/scan_direction
     change, since there's no way to update a single already-running panel
     live the way the single-panel case can (see
     gui/pages/threshold_tuning_page.py's _on_switch_time_changed)."""
@@ -95,7 +95,7 @@ def start_scanning(switch_time_ms, scan_direction, dual_panel_config):
             LEDPanel.set_camera_trigger(True)
 
         _run_on_both_panels(dual_panel_config, configure_one_panel)
-        _pulse_relay(dual_panel_config)
+        _relay_on(dual_panel_config)
 
 
 def stop_scanning(dual_panel_config):
@@ -103,6 +103,7 @@ def stop_scanning(dual_panel_config):
         LEDPanel.stop()
     else:
         _run_on_both_panels(dual_panel_config, LEDPanel.stop)
+        _relay_off()
 
 
 def _run_on_both_panels(dual_panel_config, action):
@@ -186,19 +187,45 @@ def _connect_hub():
     return hub
 
 
-def _pulse_relay(dual_panel_config):
+# The relay is a GATE, not a one-shot start pulse: real-hardware testing
+# confirmed both panels only keep stepping WHILE the relay stays closed
+# (energized) - releasing it freezes them wherever they happen to be. An
+# earlier version of this code treated it as a brief kickoff (~0.2s pulse
+# then release), assuming that matched docs/acroname_hub.py's reference
+# script's 100s hold only because that script's author was watching it by
+# eye, not because 100s was itself load-bearing - that assumption was
+# wrong; the hold time IS load-bearing, for as long as continuous stepping
+# is wanted. start_scanning's dual-panel branch now closes the relay and
+# leaves it closed; stop_scanning is what releases it. The open serial
+# connection is kept at module level (rather than threading a handle back
+# through every start_scanning/stop_scanning call site) since this
+# module's functions are plain module-level functions, not a class
+# instance every caller already carries around.
+_relay_connection = {"conn": None}
+
+
+def _relay_on(dual_panel_config):
     # Imported here for the same reason _connect_hub imports AcronameHub
     # lazily - pyserial only needs to be installed on a machine that
     # actually uses dual-panel mode.
     import serial
 
+    # Closes any stale still-open connection first - e.g.
+    # gui/pages/threshold_tuning_page.py's _on_switch_time_changed calls
+    # start_scanning() again in full without an intervening stop_scanning()
+    # whenever switch_time_ms changes mid-run.
+    _relay_off()
     com_port = dual_panel_config["relay_com_port"]
-    pulse_duration_s = dual_panel_config["relay_pulse_duration_s"]
     s = serial.Serial(com_port, 9600, timeout=1)
-    try:
-        time.sleep(2)  # let the board finish reset after DTR toggle
-        s.write(bytes.fromhex("A00101A2"))  # relay 1 ON - starts both panels stepping in lockstep
-        time.sleep(pulse_duration_s)
-        s.write(bytes.fromhex("A00100A1"))  # relay 1 OFF
-    finally:
-        s.close()
+    time.sleep(2)  # let the board finish reset after DTR toggle
+    s.write(bytes.fromhex("A00101A2"))  # relay 1 ON - kept open, not released, until _relay_off()
+    _relay_connection["conn"] = s
+
+
+def _relay_off():
+    s = _relay_connection["conn"]
+    if s is None:
+        return
+    s.write(bytes.fromhex("A00100A1"))  # relay 1 OFF
+    s.close()
+    _relay_connection["conn"] = None

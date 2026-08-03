@@ -125,8 +125,10 @@ test:
 # Only read when the operator checks Device Select's "Use dual LED panel"
 # box - two physically separate LED panels sharing one Acroname USB hub
 # (only one panel's USB connection can be visible to the OS at a time) and
-# one external USB relay that pulses a start trigger once both panels are
-# configured. See engine/dual_panel_control.py.
+# one external USB relay that must stay closed (energized) for as long as
+# continuous stepping is wanted - it's a gate, not a one-shot start pulse;
+# releasing it freezes both panels wherever they happen to be. See
+# engine/dual_panel_control.py's start_scanning/stop_scanning.
 dual_panel:
   # Acroname downstream USB port number each stream's OWN panel is wired
   # to - NOT necessarily port 0 for stream_a/port 1 for stream_b; keyed
@@ -138,12 +140,6 @@ dual_panel:
   # before the relay can be triggered.
   relay_port: 6
   relay_com_port: "COM6"
-  # How long the relay's "on" pulse lasts before switching back off, in
-  # seconds - UNVERIFIED, needs tuning on the real rig. The original demo
-  # script waited 100s between on/off, which was leftover debug timing,
-  # not a real requirement - this is a brief start trigger, not something
-  # that stays on for the whole session.
-  relay_pulse_duration_s: 0.2
   # How long to wait after switching which panel's USB port is hub-enabled
   # before sending it any command - UNVERIFIED, needs tuning on the real
   # rig. Bumped up from an initial 1s guess since a full USB re-enumeration
