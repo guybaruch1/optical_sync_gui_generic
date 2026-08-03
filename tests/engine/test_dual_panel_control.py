@@ -11,7 +11,7 @@ from engine.dual_panel_control import (
 # test that silently assumed "a=0, b=1" would fail loudly.
 DUAL_PANEL_CONFIG = {
     "stream_a_panel_port": 1, "stream_b_panel_port": 0, "relay_port": 6,
-    "relay_com_port": "COM6", "relay_pulse_duration_s": 0.2, "hub_switch_settle_s": 3.0,
+    "relay_com_port": "COM6", "hub_switch_settle_s": 3.0,
 }
 
 
@@ -39,7 +39,7 @@ def test_turn_all_leds_off_with_none_config_calls_ledpanel_directly():
 def test_start_scanning_with_none_config_calls_ledpanel_directly_no_trigger_mode():
     with patch("engine.dual_panel_control.LEDPanel") as mock_led_panel, \
          patch.object(dual_panel_control, "_run_on_both_panels") as mock_run_on_both, \
-         patch.object(dual_panel_control, "_pulse_relay") as mock_pulse_relay:
+         patch.object(dual_panel_control, "_relay_on") as mock_relay_on:
         start_scanning(5, 1, None)
         mock_led_panel.stop.assert_called_once()
         mock_led_panel.response_time_measurement_mode.assert_called_once()
@@ -50,13 +50,13 @@ def test_start_scanning_with_none_config_calls_ledpanel_directly_no_trigger_mode
         mock_led_panel.set_trigger_mode.assert_not_called()
         mock_led_panel.set_camera_trigger.assert_not_called()
         mock_run_on_both.assert_not_called()
-        mock_pulse_relay.assert_not_called()
+        mock_relay_on.assert_not_called()
 
 
 def test_start_scanning_defaults_scan_direction_to_1_when_none():
     with patch("engine.dual_panel_control.LEDPanel") as mock_led_panel, \
          patch.object(dual_panel_control, "_run_on_both_panels"), \
-         patch.object(dual_panel_control, "_pulse_relay"):
+         patch.object(dual_panel_control, "_relay_on"):
         start_scanning(5, None, None)
         mock_led_panel.set_direction_single.assert_called_once_with(1)
 
@@ -70,8 +70,8 @@ def test_stop_scanning_with_none_config_calls_ledpanel_stop_directly():
 
 
 # --- A non-None dual_panel_config routes through _run_on_both_panels/
-# _pulse_relay instead - these are mocked here (no real hardware); the
-# actual Acroname-hub/relay mechanics are hardware-only, untested by
+# _relay_on/_relay_off instead - these are mocked here (no real hardware);
+# the actual Acroname-hub/relay mechanics are hardware-only, untested by
 # design, same as engine/led_panel.py/engine/acroname_hub.py. ---
 
 def test_turn_all_leds_on_with_dual_panel_config_routes_through_run_on_both_panels():
@@ -87,10 +87,10 @@ def test_turn_all_leds_off_with_dual_panel_config_routes_through_run_on_both_pan
         mock_run_on_both.assert_called_once_with(DUAL_PANEL_CONFIG, dual_panel_control.LEDPanel.all_leds_off)
 
 
-def test_start_scanning_with_dual_panel_config_configures_both_panels_and_pulses_relay():
+def test_start_scanning_with_dual_panel_config_configures_both_panels_and_closes_relay():
     with patch("engine.dual_panel_control.LEDPanel") as mock_led_panel, \
          patch.object(dual_panel_control, "_run_on_both_panels") as mock_run_on_both, \
-         patch.object(dual_panel_control, "_pulse_relay") as mock_pulse_relay:
+         patch.object(dual_panel_control, "_relay_on") as mock_relay_on:
         start_scanning(5, 1, DUAL_PANEL_CONFIG)
 
         mock_run_on_both.assert_called_once()
@@ -112,16 +112,21 @@ def test_start_scanning_with_dual_panel_config_configures_both_panels_and_pulses
         mock_led_panel.set_trigger_mode.assert_called_once_with(2)
         mock_led_panel.set_camera_trigger.assert_called_once_with(True)
         # .start() is never called for the dual-panel/trigger-mode case -
-        # the relay pulse is what kicks off stepping, not --start.
+        # closing the relay is what kicks off stepping, not --start.
         mock_led_panel.start.assert_not_called()
 
-        mock_pulse_relay.assert_called_once_with(DUAL_PANEL_CONFIG)
+        mock_relay_on.assert_called_once_with(DUAL_PANEL_CONFIG)
 
 
-def test_stop_scanning_with_dual_panel_config_routes_through_run_on_both_panels():
-    with patch.object(dual_panel_control, "_run_on_both_panels") as mock_run_on_both:
+def test_stop_scanning_with_dual_panel_config_routes_through_run_on_both_panels_and_releases_relay():
+    with patch.object(dual_panel_control, "_run_on_both_panels") as mock_run_on_both, \
+         patch.object(dual_panel_control, "_relay_off") as mock_relay_off:
         stop_scanning(DUAL_PANEL_CONFIG)
         mock_run_on_both.assert_called_once_with(DUAL_PANEL_CONFIG, dual_panel_control.LEDPanel.stop)
+        # The relay is what actually keeps the panels stepping (a gate, not
+        # a one-shot pulse) - stop_scanning must release it, or they'd keep
+        # stepping after the "stop" LEDPanel command too.
+        mock_relay_off.assert_called_once()
 
 
 def test_run_on_both_panels_switches_hub_ports_and_calls_action_twice():

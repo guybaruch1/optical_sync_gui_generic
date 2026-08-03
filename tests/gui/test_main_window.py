@@ -202,7 +202,7 @@ def _full_settings(stream_options):
     }
     settings["dual_panel"] = {
         "stream_a_panel_port": 1, "stream_b_panel_port": 0, "relay_port": 6,
-        "relay_com_port": "COM6", "relay_pulse_duration_s": 0.2, "hub_switch_settle_s": 3.0,
+        "relay_com_port": "COM6", "hub_switch_settle_s": 3.0,
     }
     return settings
 

@@ -80,10 +80,17 @@ physically separate, non-co-located sensors that can't both look at a
 single panel from the same angle. Both panels share one Acroname USB hub
 (only ONE panel's USB connection is visible to the OS at a time -
 `LED-Panel.exe` always talks to whichever panel is currently hub-exposed,
-never a specific one by identity) and one external USB relay that pulses a
-brief hardware "start" trigger once both panels are configured into
-trigger mode, kicking off synchronized LED-stepping driven by the camera's
-own trigger signal from then on.
+never a specific one by identity) and one external USB relay that both
+panels' trigger inputs are wired to (NOT the camera - nothing in this
+codebase configures the camera to emit a hardware trigger). The relay is
+a **gate, not a one-shot start pulse**: once both panels are configured
+into trigger mode, they only keep stepping in lockstep WHILE the relay
+stays closed (energized) - releasing it freezes both wherever they happen
+to be. An earlier version of this code treated it as a brief ~0.2s
+kickoff pulse (modeled on a reference demo script's `time.sleep(100)`
+between closing/releasing it, wrongly assumed to be leftover debug timing
+rather than load-bearing) - real-hardware testing confirmed that was
+wrong: the hold time itself is what keeps the panels stepping.
 
 This is a **manual operator choice**, not inferred from the camera model,
 not auto-detected from the hub, and not a per-named-test `settings.yaml`
@@ -108,9 +115,13 @@ suggest, so getting this mapping right matters once code depends on it
 each take a `dual_panel_config` and either call `engine/led_panel.py`'s
 `LEDPanel` directly (the `None`/single-panel case, byte-for-byte the same
 code path as before this existed) or route through
-`_run_on_both_panels`/`_pulse_relay` (both panels together, for callers
-that genuinely need them lit/dark/stepping in lockstep - Threshold Tuning
-and Live Session's actual timed test). These lazily import
+`_run_on_both_panels`/`_relay_on`/`_relay_off` (both panels together, for
+callers that genuinely need them lit/dark/stepping in lockstep -
+Threshold Tuning and Live Session's actual timed test). `_relay_on` keeps
+its serial connection to the relay open at module level (rather than
+threading a handle back through every `start_scanning`/`stop_scanning`
+call site) and leaves the relay closed; `stop_scanning` is what calls
+`_relay_off()` to actually release it. These lazily import
 `engine/acroname_hub.py` (a ported `AcronameHub` wrapper around the
 Acroname `brainstem` SDK) and `pyserial` respectively, so every normal
 single-panel test can import/run this module without either dependency
@@ -125,13 +136,15 @@ and the confirmed-working reference sequence
 (`docs/config_tigger_mode.bat`) never sets direction. This is the EXACT
 4-command sequence confirmed to produce continuous stepping - don't add
 either back without re-confirming on real hardware first. Never calls
-`.start()` at all - the relay pulse is what kicks off stepping, not
+`.start()` at all - closing the relay is what kicks off stepping, not
 `--start`. Any panel config change (e.g. switch time) needs this whole
 provisioning re-run - see `gui/pages/threshold_tuning_page.py`'s
 `_on_switch_time_changed`, which branches on `dual_panel_config` to either
 call `LEDPanel.set_speed_ms()` directly and instantly (single-panel) or
 re-run `start_scanning()` in full (dual-panel, visibly slower - no way
-around the hardware constraint).
+around the hardware constraint); since this re-runs `start_scanning()`
+without an intervening `stop_scanning()`, `_relay_on()` closes any stale
+still-open connection from a previous call before opening its own.
 
 **Calibration and ROI Select do NOT use `turn_all_leds_on`/`off`** for the
 dual-panel case - capturing both streams' on/off frame from one
@@ -150,12 +163,12 @@ hub switches happen for a whole calibration run (one per stream), not one
 per on/off toggle.
 
 No automated tests for `engine/acroname_hub.py`/`_run_on_both_panels`/
-`switched_to_stream_panel`/`_pulse_relay` themselves (hardware-only, same
-"no tests by design" bucket as `engine/led_panel.py`/
+`switched_to_stream_panel`/`_relay_on`/`_relay_off` themselves
+(hardware-only, same "no tests by design" bucket as `engine/led_panel.py`/
 `engine/session_engine.py`) - but `turn_all_leds_on`/`off`/
 `start_scanning`/`stop_scanning`/`switched_to_stream_panel`'s own branching
 logic IS tested (`tests/engine/test_dual_panel_control.py`), by mocking
-`_run_on_both_panels`/`_pulse_relay`/`LEDPanel`/a fake Acroname hub.
+`_run_on_both_panels`/`_relay_on`/`_relay_off`/`LEDPanel`/a fake Acroname hub.
 
 ### Threshold Tuning page (per-stream, with a live detection preview)
 

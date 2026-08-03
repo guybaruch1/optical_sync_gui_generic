@@ -1,15 +1,24 @@
 """Diagnostic script - NOT part of the shipped app, no automated tests.
 
-RESOLVED: real-hardware testing confirmed the root cause was
+RESOLVED (part 1): real-hardware testing confirmed one root cause was
 LEDPanel.response_time_measurement_mode()'s hidden leading --stop call
 (this script originally called that convenience method here too, which
 meant it never actually tested what its own docstring claimed - a real
 lesson in double-checking what a "no side effects" convenience wrapper
 actually does). engine/dual_panel_control.py's start_scanning has since
 been fixed to use the new LEDPanel.set_mode(1) (no preceding --stop)
-instead. This script is kept as a way to re-verify the exact 4-command
-sequence in isolation from the rest of the app, using the app's real
-hub-switching plumbing (_run_on_both_panels/_pulse_relay).
+instead.
+
+RESOLVED (part 2): a second, separate root cause - the relay is a GATE,
+not a one-shot start pulse. It must stay closed (energized) for as long as
+continuous stepping is wanted; releasing it freezes both panels wherever
+they happen to be. engine/dual_panel_control.py's _pulse_relay (which
+closed it again after a brief relay_pulse_duration_s) has been replaced
+with _relay_on (closes it, leaves it closed)/_relay_off (releases it).
+
+This script is kept as a way to re-verify the exact 4-command sequence in
+isolation from the rest of the app, using the app's real hub-switching
+plumbing (_run_on_both_panels/_relay_on/_relay_off).
 
 Run from the repo root: python tools/diag_app_sequence_minus_extras.py
 Watch the physical panels while it runs.
@@ -45,11 +54,13 @@ def main():
     print("Running the minimal (4-command, no stop()/set_direction_single()) sequence "
           "through the app's real hub-switching plumbing...")
     dual_panel_control._run_on_both_panels(dual_panel_config, configure_one_panel_minimal)
-    print("Both panels configured. Pulsing relay...")
-    dual_panel_control._pulse_relay(dual_panel_config)
-    print("Relay pulsed - WATCH THE PANELS NOW. Should see one LED stepping continuously on each.")
+    print("Both panels configured. Closing relay (kept closed, not just pulsed)...")
+    dual_panel_control._relay_on(dual_panel_config)
+    print("Relay closed - WATCH THE PANELS NOW. Should see one LED stepping continuously on each.")
     print("Waiting 10s...")
     time.sleep(10)
+    print("Releasing relay...")
+    dual_panel_control._relay_off()
     print("Done - report what you observed on the physical panels (did they step? how many positions, if any?).")
 
 
