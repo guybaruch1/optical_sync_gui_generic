@@ -6,6 +6,7 @@ import pytest
 from domain.panel_drift_analysis import (
     parse_gap_series, linear_fit_rate, bin_series, find_transitions, compute_local_rates,
     summarize_drift, export_drift_over_time_plot, export_local_rate_plot,
+    export_rate_consistency_plot, export_overlay_plot,
 )
 
 
@@ -156,4 +157,53 @@ def test_export_local_rate_plot_false_with_no_transitions(tmp_path):
     result = export_local_rate_plot(summary, path)
 
     assert result is False
+    assert not os.path.exists(path)
+
+
+def test_export_rate_consistency_plot_writes_a_file_with_mixed_pass_fail(tmp_path):
+    rates = [(1, 0.003), (2, None), (3, 0.0032), (4, None), (5, 0.0029)]
+    path = str(tmp_path / "consistency.png")
+
+    result = export_rate_consistency_plot(rates, path)
+
+    assert result is True
+    assert os.path.exists(path)
+    assert os.path.getsize(path) > 0
+
+
+def test_export_rate_consistency_plot_handles_all_failed_runs(tmp_path):
+    # Every run failed - must not crash trying to plot a mean of zero
+    # successful rates.
+    rates = [(1, None), (2, None)]
+    path = str(tmp_path / "consistency.png")
+
+    result = export_rate_consistency_plot(rates, path)
+
+    assert result is True
+    assert os.path.exists(path)
+
+
+def test_export_rate_consistency_plot_false_for_empty_rates(tmp_path):
+    path = str(tmp_path / "consistency.png")
+    assert export_rate_consistency_plot([], path) is False
+    assert not os.path.exists(path)
+
+
+def test_export_overlay_plot_writes_a_file(tmp_path):
+    run_series = [
+        (1, [0.0, 10.0, 20.0], [0.0, 1.0, 1.0]),
+        (2, [0.0, 10.0, 20.0], [0.0, 0.0, 1.0]),
+    ]
+    path = str(tmp_path / "overlay.png")
+
+    result = export_overlay_plot(run_series, path)
+
+    assert result is True
+    assert os.path.exists(path)
+    assert os.path.getsize(path) > 0
+
+
+def test_export_overlay_plot_false_for_empty_series(tmp_path):
+    path = str(tmp_path / "overlay.png")
+    assert export_overlay_plot([], path) is False
     assert not os.path.exists(path)

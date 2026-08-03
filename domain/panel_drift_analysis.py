@@ -222,3 +222,78 @@ def export_local_rate_plot(summary, path):
     fig.savefig(path)
     plt.close(fig)
     return True
+
+
+def export_rate_consistency_plot(rates, path):
+    """rates: [(run_index, slope_ms_per_s_or_None), ...] - one entry per
+    attempted run of a repeated (e.g. overnight) batch, None for a run
+    where no stepping was detected at all (some rigs show the panels
+    stepping only every other run - a hardware issue this function doesn't
+    try to explain, just surface). Plots successful runs' rates as points
+    with a mean +/-1 stdev band, and marks failed runs distinctly along
+    the same chart so the pass/fail pattern stays visible too, not just
+    the rate of the runs that worked. Returns True if anything was
+    plotted, False for an empty rates list."""
+    if not rates:
+        return False
+
+    successful = [(i, r) for i, r in rates if r is not None]
+    failed_indices = [i for i, r in rates if r is None]
+
+    fig, ax = plt.subplots(figsize=(max(8, len(rates) * 0.3), 5))
+
+    if successful:
+        xs = [i for i, _ in successful]
+        ys = [r for _, r in successful]
+        ax.plot(xs, ys, "o-", color="tab:blue", label="Measured drift rate (ms/s)")
+        mean_rate = float(np.mean(ys))
+        ax.axhline(mean_rate, color="tab:orange", linestyle=":", label="Mean: {:.4f} ms/s".format(mean_rate))
+        if len(ys) > 1:
+            std_rate = float(np.std(ys, ddof=1))
+            ax.axhspan(mean_rate - std_rate, mean_rate + std_rate, color="tab:orange", alpha=0.15,
+                        label="+/-1 stdev: {:.4f} ms/s".format(std_rate))
+
+    if failed_indices:
+        # Marked at the bottom of the successful runs' own range (or at 0
+        # if nothing succeeded at all) - visible without distorting the
+        # y-axis scale that matters for the successful rates.
+        y_for_fail = min((r for _, r in successful), default=0.0)
+        ax.plot(failed_indices, [y_for_fail] * len(failed_indices), "rx", markersize=10,
+                 label="Failed (no stepping detected)")
+
+    ax.set_xlabel("Run number")
+    ax.set_ylabel("Measured drift rate (ms/s)")
+    ax.set_title("Drift-rate consistency across {} run(s)".format(len(rates)))
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
+    return True
+
+
+def export_overlay_plot(run_series, path):
+    """run_series: [(label, elapsed_s, values), ...] - overlays every
+    successful run's own raw position_gap_ms(t) series on one chart (each
+    already starts at its own t=0, from parse_gap_series/summarize_drift's
+    own elapsed_s), to visually compare whether independent runs follow a
+    similar trend/rate. Returns True if anything was plotted, False for an
+    empty run_series."""
+    if not run_series:
+        return False
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    cmap = plt.get_cmap("tab20")
+    for idx, (label, elapsed_s, values) in enumerate(run_series):
+        ax.plot(elapsed_s, values, alpha=0.6, linewidth=1, color=cmap(idx % 20), label="Run {}".format(label))
+
+    ax.set_xlabel("Elapsed time (s)")
+    ax.set_ylabel("Position gap (ms)")
+    ax.set_title("All successful runs overlaid ({} run(s))".format(len(run_series)))
+    ax.grid(True, alpha=0.3)
+    if len(run_series) <= 15:
+        ax.legend(fontsize=8, ncol=2)
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
+    return True
