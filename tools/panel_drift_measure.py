@@ -28,9 +28,14 @@ small custom single-stream rs.pipeline() loop directly.
 
 Run from the repo root: python tools/panel_drift_measure.py
 Requires output/panel_drift_calibration.yaml (see
-tools/panel_drift_calibrate.py). Runs for settings.yaml's test.duration_s,
-or press Ctrl+C to stop early. Writes
-output/panel_drift_raw.csv/output/panel_drift_frame_drops.csv.
+tools/panel_drift_calibrate.py). Runs for this script's own DURATION_S
+constant (deliberately NOT settings.yaml's test.duration_s - this test is
+run far longer than a normal live session, and the two must not be
+coupled through one shared config value), or press Ctrl+C to stop early.
+Writes output/panel_drift_raw.csv, output/panel_drift_frame_drops.csv,
+and output/panel_drift_plot.png (position_gap_ms/pairing_gap_us over the
+run, via the same domain.plot_export.export_session_plot every live
+session already uses).
 """
 
 import os
@@ -53,6 +58,7 @@ from engine.acquisition_loop import AcquisitionLoop, AcquisitionCallbacks
 from domain.calibration import compute_threshold
 from domain.realsense_utils import decode_frame, sample_all_neighborhood_brightness
 from domain.csv_export import export_session_csvs
+from domain.plot_export import export_session_plot
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SETTINGS_PATH = os.path.join(REPO_ROOT, "settings.yaml")
@@ -73,6 +79,13 @@ PICK = {
 # None to require gui_state.json; set to your camera's serial (a string,
 # e.g. "123456789012") to bypass it entirely.
 DEVICE_SERIAL = None
+
+# How long to run the actual drift measurement, in seconds - deliberately
+# a constant here, not settings.yaml's test.duration_s (that key is shared
+# with the real wizard's Live Session, which should stay independently
+# tunable from this occasional, much-longer-running niche test). None
+# means "no auto-stop - run until Ctrl+C".
+DURATION_S = 180.0
 
 
 def resolve_device_serial():
@@ -189,7 +202,7 @@ def main():
     ]
     session_config = TestSessionConfig(
         metrics=metrics,
-        duration_s=test_settings["duration_s"],
+        duration_s=DURATION_S,
         stream_a_fps=PICK["fps"],
         stream_b_fps=PICK["fps"],
         frame_drop_threshold_factor=test_settings["frame_drop_threshold_factor"],
@@ -238,7 +251,7 @@ def main():
             display_stride=10,
         )
         start_time = time.time()
-        print("Measuring for {}s (Ctrl+C to stop early)...".format(test_settings["duration_s"]))
+        print("Measuring for {}s (Ctrl+C to stop early)...".format(DURATION_S))
         rows = loop.run_until_stopped(
             is_stop_requested=lambda: stop_requested["flag"],
             elapsed_s_fn=lambda: time.time() - start_time,
@@ -254,6 +267,11 @@ def main():
     print("Wrote {} kept row(s) to {}, {} dropped-frame row(s) to {}".format(
         n_kept, kept_path, n_dropped, dropped_path
     ))
+
+    if rows:
+        plot_path = os.path.join(output_dir, "panel_drift_plot.png")
+        export_session_plot(rows, plot_path)
+        print("Saved drift plot to {}".format(plot_path))
 
     gaps = [row["position_gap_ms"] for row in rows
             if row.get("position_gap_ms") is not None and not row.get("position_gap_ms_excluded")]
