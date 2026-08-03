@@ -118,15 +118,22 @@ def test_start_scanning_with_dual_panel_config_configures_both_panels_and_closes
         mock_relay_on.assert_called_once_with(DUAL_PANEL_CONFIG)
 
 
-def test_stop_scanning_with_dual_panel_config_routes_through_run_on_both_panels_and_releases_relay():
-    with patch.object(dual_panel_control, "_run_on_both_panels") as mock_run_on_both, \
-         patch.object(dual_panel_control, "_relay_off") as mock_relay_off:
+def test_stop_scanning_with_dual_panel_config_releases_relay_before_touching_hub_again():
+    call_order = []
+    with patch.object(dual_panel_control, "_run_on_both_panels",
+                       side_effect=lambda *a: call_order.append("_run_on_both_panels")) as mock_run_on_both, \
+         patch.object(dual_panel_control, "_relay_off",
+                       side_effect=lambda: call_order.append("_relay_off")) as mock_relay_off:
         stop_scanning(DUAL_PANEL_CONFIG)
         mock_run_on_both.assert_called_once_with(DUAL_PANEL_CONFIG, dual_panel_control.LEDPanel.stop)
-        # The relay is what actually keeps the panels stepping (a gate, not
-        # a one-shot pulse) - stop_scanning must release it, or they'd keep
-        # stepping after the "stop" LEDPanel command too.
         mock_relay_off.assert_called_once()
+        # _relay_off() MUST run before _run_on_both_panels - that function's
+        # own hub-port-switching dance disables relay_port while switching
+        # to panel A first, which would yank the USB device backing an
+        # already-open relay connection out from under it (a real hardware
+        # failure: "WriteFile failed - Access is denied" on the now-stale
+        # handle) if it ran first.
+        assert call_order == ["_relay_off", "_run_on_both_panels"]
 
 
 def test_run_on_both_panels_switches_hub_ports_and_calls_action_twice():
