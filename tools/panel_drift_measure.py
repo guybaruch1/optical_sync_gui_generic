@@ -100,6 +100,20 @@ DEVICE_SERIAL = None
 # means "no auto-stop - run until Ctrl+C".
 DURATION_S = 180.0
 
+# How many frame-pairs between console prints/live-view window updates.
+# Every pair's data is ALWAYS captured into the CSV/plots regardless of
+# this value - it only throttles how often something gets printed/redrawn.
+# 1 (print/redraw every single pair) is fine for a short run, but at 30fps
+# a 10-15 minute run is 18,000-27,000 pairs - that many print() calls can
+# make a slow console (PyCharm's GUI console especially) become the
+# bottleneck, which risks *actually* slowing the capture loop down enough
+# to induce real frame drops (see domain/realsense_utils.py's
+# sample_all_neighborhood_brightness docstring for the same class of
+# self-induced-slowness symptom). 30 (~once/second at 30fps) is a
+# reasonable default for longer runs; drop to 1 for a short, closely-watched
+# run.
+DISPLAY_STRIDE = 30
+
 
 def resolve_device_serial():
     if DEVICE_SERIAL:
@@ -186,7 +200,12 @@ def export_drift_over_time_plot(rows, path):
             changes.append((t, prev_v, v))
         prev_v = v
 
-    fig, ax = plt.subplots(figsize=(10, 5))
+    # Scales with the actual run length so a 10-15 minute run doesn't cram
+    # its whole timeline into the same width as a 3-minute one - clamped so
+    # it doesn't keep growing unreasonably for very long runs.
+    total_elapsed_s = elapsed_s[-1] - elapsed_s[0] if len(elapsed_s) > 1 else 0
+    fig_width = min(20, max(10, total_elapsed_s / 60.0 * 1.5))
+    fig, ax = plt.subplots(figsize=(fig_width, 5))
     ax.plot(elapsed_s, gap_ms, color="tab:green", marker=".", markersize=3, label="Position gap (ms)")
     for t, _, _ in changes:
         ax.axvline(t, color="tab:red", linestyle="--", alpha=0.3)
@@ -338,12 +357,10 @@ def main():
             frame_source(pipeline, panel_a_xy, panel_b_xy, test_settings["neighborhood_size"]),
             test_session,
             AcquisitionCallbacks(on_frames=on_frames, on_row=on_row, on_stats=on_stats),
-            # 1, not the GUI wizard's default 10 - this is a plain console
-            # script driving its own synchronous loop (no Qt cross-thread
-            # signal marshalling to worry about, unlike
-            # gui/pages/live_session_page.py's own display_stride), so
-            # printing/showing every single pair is cheap here.
-            display_stride=1,
+            # See DISPLAY_STRIDE's own comment - every pair's data reaches
+            # the CSV/plots regardless of this value; it only throttles
+            # console prints/live-view redraws.
+            display_stride=DISPLAY_STRIDE,
         )
         start_time = time.time()
         print("Measuring for {}s (Ctrl+C to stop early, or press 'q' in the live view window)...".format(DURATION_S))
