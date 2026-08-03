@@ -36,6 +36,12 @@ Writes output/panel_drift_raw.csv, output/panel_drift_frame_drops.csv,
 and output/panel_drift_plot.png (position_gap_ms/pairing_gap_us over the
 run, via the same domain.plot_export.export_session_plot every live
 session already uses).
+
+Pops up a live OpenCV preview window (reusing domain.realsense_utils.
+draw_led_state_overlay unchanged - the same green/on-red/off circle
+overlay Live Session's debug snapshots use) showing every captured frame
+with both panels' calibrated LED positions circled - press 'q' in that
+window (or Ctrl+C in the console) to stop early.
 """
 
 import os
@@ -45,6 +51,7 @@ import signal
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import cv2
 import yaml
 import numpy as np
 import pyrealsense2 as rs
@@ -56,9 +63,11 @@ from engine.metrics import PairingGapMetric, PositionGapMetric
 from engine.test_session import TestSession, TestSessionConfig
 from engine.acquisition_loop import AcquisitionLoop, AcquisitionCallbacks
 from domain.calibration import compute_threshold
-from domain.realsense_utils import decode_frame, sample_all_neighborhood_brightness
+from domain.realsense_utils import decode_frame, sample_all_neighborhood_brightness, draw_led_state_overlay
 from domain.csv_export import export_session_csvs
 from domain.plot_export import export_session_plot
+
+LIVE_VIEW_WINDOW = "Panel Drift - Live Capture (green=on, red=off, q=quit)"
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SETTINGS_PATH = os.path.join(REPO_ROOT, "settings.yaml")
@@ -190,15 +199,16 @@ def main():
 
     device_serial = resolve_device_serial()
 
+    position_gap_metric = PositionGapMetric(
+        stream_a_threshold=panel_a_threshold,
+        stream_b_threshold=panel_b_threshold,
+        num_leds=num_leds,
+        switch_time_ms=test_settings["switch_time_ms"],
+        warmup_pairs_to_skip=test_settings["warmup_pairs_to_skip"],
+    )
     metrics = [
         PairingGapMetric(outlier_threshold_us=test_settings["pairing_gap_outlier_threshold_us"]),
-        PositionGapMetric(
-            stream_a_threshold=panel_a_threshold,
-            stream_b_threshold=panel_b_threshold,
-            num_leds=num_leds,
-            switch_time_ms=test_settings["switch_time_ms"],
-            warmup_pairs_to_skip=test_settings["warmup_pairs_to_skip"],
-        ),
+        position_gap_metric,
     ]
     session_config = TestSessionConfig(
         metrics=metrics,
@@ -218,7 +228,14 @@ def main():
     signal.signal(signal.SIGINT, handle_sigint)
 
     def on_frames(image_a, image_b, pair_index):
-        pass
+        # image_a/image_b are the SAME frame here (see frame_source's own
+        # comment) - drawing panel A's overlay first, then panel B's on top
+        # of the result, puts both panels' on/off circles on one window.
+        overlay = draw_led_state_overlay(image_a, panel_a_xy, position_gap_metric.last_stream_a_on_mask)
+        overlay = draw_led_state_overlay(overlay, panel_b_xy, position_gap_metric.last_stream_b_on_mask)
+        cv2.imshow(LIVE_VIEW_WINDOW, overlay)
+        if (cv2.waitKey(1) & 0xFF) == ord("q"):
+            stop_requested["flag"] = True
 
     def on_row(row):
         pass
@@ -248,16 +265,22 @@ def main():
             frame_source(pipeline, panel_a_xy, panel_b_xy, test_settings["neighborhood_size"]),
             test_session,
             AcquisitionCallbacks(on_frames=on_frames, on_row=on_row, on_stats=on_stats),
-            display_stride=10,
+            # 1, not the GUI wizard's default 10 - this is a plain console
+            # script driving its own synchronous loop (no Qt cross-thread
+            # signal marshalling to worry about, unlike
+            # gui/pages/live_session_page.py's own display_stride), so
+            # printing/showing every single pair is cheap here.
+            display_stride=1,
         )
         start_time = time.time()
-        print("Measuring for {}s (Ctrl+C to stop early)...".format(DURATION_S))
+        print("Measuring for {}s (Ctrl+C to stop early, or press 'q' in the live view window)...".format(DURATION_S))
         rows = loop.run_until_stopped(
             is_stop_requested=lambda: stop_requested["flag"],
             elapsed_s_fn=lambda: time.time() - start_time,
         )
     finally:
         pipeline.stop()
+        cv2.destroyAllWindows()
         print("Disarming dual-panel scanning...")
         dual_panel_control.stop_scanning(dual_panel_config)
 
