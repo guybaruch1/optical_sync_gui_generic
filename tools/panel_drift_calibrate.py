@@ -27,6 +27,14 @@ Run from the repo root: python tools/panel_drift_calibrate.py
 Writes output/panel_drift_calibration.yaml, consumed by
 tools/panel_drift_measure.py. Re-run this whenever the panels/camera are
 physically moved.
+
+For each panel, an ROI-select window comes up first, then a threshold-
+select window (see select_threshold_interactively) with a live trackbar -
+drag it until the overlaid detected-LED count/circles look right for
+THIS frame's actual exposure, then Space/Enter to confirm. Deliberately
+NOT an automatic Otsu threshold (domain.realsense_utils.detect_led_centroids's
+default) - real-hardware testing showed Otsu can fail badly on one
+panel's frame while working fine on the other in the same run.
 """
 
 import os
@@ -35,6 +43,8 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import cv2
+import numpy as np
 import yaml
 import pyrealsense2 as rs
 
@@ -43,7 +53,7 @@ from state.gui_state import load_gui_state
 from engine.streams import find_device_by_serial, capture_synced_frame_pair
 from engine.led_panel import LEDPanel
 from domain.realsense_utils import (
-    crop_to_roi, detect_led_centroids, merge_close_centroids, decode_frame, save_debug_detection_image,
+    crop_to_roi, merge_close_centroids, decode_frame, save_debug_detection_image,
 )
 from domain.calibration import assign_grid_ids, build_positions_with_thresholds
 from gui.pages.roi_select_page import _select_roi
@@ -176,6 +186,67 @@ def _offset_positions(positions, roi):
     return {led_id: [x + roi_x, y + roi_y] for led_id, (x, y) in positions.items()}
 
 
+def _detect_centroids_at_threshold(gray, threshold_value, min_area, kernel):
+    _, binary = cv2.threshold(gray, threshold_value, 255, cv2.THRESH_BINARY)
+    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    centroids = []
+    for cnt in contours:
+        if cv2.contourArea(cnt) < min_area:
+            continue
+        (cx, cy), _ = cv2.minEnclosingCircle(cnt)
+        centroids.append((cx, cy))
+    return centroids
+
+
+def select_threshold_interactively(image, min_area, window_title, initial_threshold=127):
+    """domain.realsense_utils.detect_led_centroids always uses Otsu's
+    automatic threshold and ignores whatever threshold value is passed to
+    it - fine most of the time, but real-hardware testing showed it can
+    fail badly on a frame whose exposure/contrast doesn't fit Otsu's
+    bimodal assumption (one panel's frame found only 25/100 LEDs via Otsu
+    while the other found 99/100, same rig, same run). Lets the operator
+    drag a trackbar and see the live detected-blob count/overlay update
+    immediately, to dial in a threshold that actually works for THIS
+    frame's exposure instead of trusting an automatic guess picked in
+    advance. Space/Enter confirms; 'c' cancels (returns None, None)."""
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image.copy()
+    kernel = np.ones((3, 3), np.uint8)
+
+    cv2.namedWindow(window_title)
+    cv2.createTrackbar("Threshold", window_title, initial_threshold, 255, lambda _: None)
+    print(
+        "Adjust the 'Threshold' slider in the '{}' window until the detected LED count looks "
+        "right, then press SPACE/ENTER to confirm (or 'c' to cancel).".format(window_title)
+    )
+
+    chosen_threshold = None
+    while True:
+        threshold_value = cv2.getTrackbarPos("Threshold", window_title)
+        centroids = _detect_centroids_at_threshold(gray, threshold_value, min_area, kernel)
+
+        display = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+        for (x, y) in centroids:
+            cv2.circle(display, (int(x), int(y)), 4, (0, 255, 0), 1)
+        cv2.putText(
+            display, "threshold={} detected={}".format(threshold_value, len(centroids)),
+            (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2,
+        )
+        cv2.imshow(window_title, display)
+
+        key = cv2.waitKey(30) & 0xFF
+        if key in (13, 32):  # Enter or Space
+            chosen_threshold = threshold_value
+            break
+        if key == ord("c"):
+            break
+
+    cv2.destroyWindow(window_title)
+    if chosen_threshold is None:
+        return None, None
+    return _detect_centroids_at_threshold(gray, chosen_threshold, min_area, kernel), chosen_threshold
+
+
 def calibrate_one_panel(label, on_frame, off_frame, min_blob_area, row_gap_px, neighborhood_size,
                          min_acceptable_contrast, output_dir, slug):
     roi = _select_roi(on_frame, "Select ROI for {} (panel lit)".format(label))
@@ -184,9 +255,13 @@ def calibrate_one_panel(label, on_frame, off_frame, min_blob_area, row_gap_px, n
 
     cropped = crop_to_roi(on_frame, roi)
     print("Detecting LEDs in {} frame...".format(label))
-    centroids, otsu_threshold = detect_led_centroids(cropped, None, min_blob_area)
+    centroids, chosen_threshold = select_threshold_interactively(
+        cropped, min_blob_area, "Adjust threshold for {} (panel lit)".format(label),
+    )
+    if centroids is None:
+        raise RuntimeError("Threshold selection for {} was cancelled.".format(label))
     centroids = merge_close_centroids(centroids)
-    print("Detected {} LED(s) in {} (Otsu threshold {}).".format(len(centroids), label, otsu_threshold))
+    print("Detected {} LED(s) in {} (threshold {}, manually chosen).".format(len(centroids), label, chosen_threshold))
 
     debug_path = os.path.join(output_dir, "debug_panel_drift_{}_detection.png".format(slug))
     save_debug_detection_image(cropped, centroids, debug_path)
