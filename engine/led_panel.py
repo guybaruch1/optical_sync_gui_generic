@@ -12,7 +12,7 @@ mode numbers and the all_leds_off-vs-stop distinction.
 
 import logging
 import time
-from subprocess import check_call, CalledProcessError
+from subprocess import check_call, check_output, CalledProcessError
 
 _logger = logging.getLogger(__name__)
 
@@ -49,6 +49,34 @@ class LEDPanel:
                 "LEDPanel command failed after {} retries: {} ({})".format(
                     3, cmd, last_error
                 )
+            )
+        finally:
+            time.sleep(LEDPanel.cmd_delay)
+
+    @staticmethod
+    def _query(args):
+        """Like _run, but for read-only --get*/--isRunning commands that
+        print their answer to stdout instead of just succeeding/failing.
+        Returns the raw stripped stdout text - deliberately not parsed
+        into an int/bool, since the exact output format for each of these
+        query commands hasn't been confirmed against real hardware yet;
+        callers/diagnostic scripts print it as-is."""
+        cmd = [LEDPanel.exe_name] + args.split()
+        retries = 3
+        _logger.info("Querying cmd: %s", " ".join(cmd))
+        last_error = None
+        try:
+            while retries > 0:
+                try:
+                    return check_output(cmd, text=True).strip()
+                except (CalledProcessError, FileNotFoundError) as e:
+                    last_error = e
+                    retries -= 1
+                    _logger.error("Query returned with an error: %s", e)
+                    if retries > 0:
+                        time.sleep(0.5)
+            raise RuntimeError(
+                "LEDPanel query failed after {} retries: {} ({})".format(3, cmd, last_error)
             )
         finally:
             time.sleep(LEDPanel.cmd_delay)
@@ -122,7 +150,61 @@ class LEDPanel:
 
     @staticmethod
     def set_camera_trigger(enabled):
-        LEDPanel._run("--setCameraTrigger {}".format(1 if enabled else 0))
+        # LED-Panel.exe --help documents --setCameraTrigger <bool> as
+        # [0] Enable, [1] Disable - the REVERSE of the intuitive "1=on"
+        # convention this code had been using since it was written. Every
+        # call site that calls set_camera_trigger(True) intending to
+        # ENABLE it (e.g. engine/dual_panel_control.py's start_scanning)
+        # was actually sending 1 and DISABLING it instead.
+        LEDPanel._run("--setCameraTrigger {}".format(0 if enabled else 1))
+
+    @staticmethod
+    def set_stop_trigger(enabled):
+        # Same [0]=Enable/[1]=Disable convention as set_camera_trigger,
+        # per LED-Panel.exe --help. Not currently called from anywhere -
+        # exposed for diagnostics/future use (tools/diag_panel_query_state.py
+        # checks its current state via get_stop_trigger/get_stop_trigger_state).
+        LEDPanel._run("--setStopTrigger {}".format(0 if enabled else 1))
+
+    @staticmethod
+    def is_running():
+        """[0] not running, [1] running - per LED-Panel.exe --help."""
+        return LEDPanel._query("--isRunning")
+
+    @staticmethod
+    def get_current_led():
+        """Currently activated LED, [0-999] - e.g. 344 means LED 44 in a
+        10x10 array's row 3 (per LED-Panel.exe --help)."""
+        return LEDPanel._query("--getCurrentLED")
+
+    @staticmethod
+    def get_mode():
+        return LEDPanel._query("--getMode")
+
+    @staticmethod
+    def get_trigger_mode():
+        return LEDPanel._query("--getTriggerMode")
+
+    @staticmethod
+    def get_camera_trigger():
+        return LEDPanel._query("--getCameraTrigger")
+
+    @staticmethod
+    def get_camera_trigger_state():
+        """[0] Inactive, [1] Active - whether a camera-trigger pulse is
+        CURRENTLY being seen, not whether the feature is enabled (that's
+        get_camera_trigger) - per LED-Panel.exe --help."""
+        return LEDPanel._query("--getCameraTriggerState")
+
+    @staticmethod
+    def get_stop_trigger():
+        return LEDPanel._query("--getStopTrigger")
+
+    @staticmethod
+    def get_stop_trigger_state():
+        """[0] Inactive, [1] Active - same distinction as
+        get_camera_trigger_state, for the separate Stop Trigger signal."""
+        return LEDPanel._query("--getStopTriggerState")
 
     @staticmethod
     def all_leds_off():

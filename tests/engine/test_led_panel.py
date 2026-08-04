@@ -62,13 +62,61 @@ def test_set_trigger_mode_sends_set_trigger_mode_command():
         mock_check_call.assert_called_once_with(["LED-Panel.exe", "--setTriggerMode", "2"])
 
 
-def test_set_camera_trigger_true_sends_1():
+def test_set_camera_trigger_true_sends_0():
+    # LED-Panel.exe --help documents --setCameraTrigger as [0] Enable,
+    # [1] Disable - the reverse of the intuitive "1=on" this project's own
+    # code had backwards until this was checked against the real CLI help.
     with patch("engine.led_panel.check_call") as mock_check_call, patch("time.sleep"):
         LEDPanel.set_camera_trigger(True)
+        mock_check_call.assert_called_once_with(["LED-Panel.exe", "--setCameraTrigger", "0"])
+
+
+def test_set_camera_trigger_false_sends_1():
+    with patch("engine.led_panel.check_call") as mock_check_call, patch("time.sleep"):
+        LEDPanel.set_camera_trigger(False)
         mock_check_call.assert_called_once_with(["LED-Panel.exe", "--setCameraTrigger", "1"])
 
 
-def test_set_camera_trigger_false_sends_0():
+def test_set_stop_trigger_true_sends_0():
+    # Same [0]=Enable/[1]=Disable convention as set_camera_trigger.
     with patch("engine.led_panel.check_call") as mock_check_call, patch("time.sleep"):
-        LEDPanel.set_camera_trigger(False)
-        mock_check_call.assert_called_once_with(["LED-Panel.exe", "--setCameraTrigger", "0"])
+        LEDPanel.set_stop_trigger(True)
+        mock_check_call.assert_called_once_with(["LED-Panel.exe", "--setStopTrigger", "0"])
+
+
+def test_set_stop_trigger_false_sends_1():
+    with patch("engine.led_panel.check_call") as mock_check_call, patch("time.sleep"):
+        LEDPanel.set_stop_trigger(False)
+        mock_check_call.assert_called_once_with(["LED-Panel.exe", "--setStopTrigger", "1"])
+
+
+def test_query_returns_stripped_stdout():
+    with patch("engine.led_panel.check_output", return_value="1\n") as mock_check_output, patch("time.sleep"):
+        result = LEDPanel._query("--isRunning")
+        assert result == "1"
+        mock_check_output.assert_called_once_with(["LED-Panel.exe", "--isRunning"], text=True)
+
+
+def test_query_retries_on_called_process_error_then_raises():
+    with patch("engine.led_panel.check_output", side_effect=CalledProcessError(1, "cmd")) as mock_check_output, \
+         patch("time.sleep"):
+        with pytest.raises(RuntimeError):
+            LEDPanel._query("--isRunning")
+        assert mock_check_output.call_count == 3
+
+
+@pytest.mark.parametrize("method_name, expected_args", [
+    ("is_running", ["LED-Panel.exe", "--isRunning"]),
+    ("get_current_led", ["LED-Panel.exe", "--getCurrentLED"]),
+    ("get_mode", ["LED-Panel.exe", "--getMode"]),
+    ("get_trigger_mode", ["LED-Panel.exe", "--getTriggerMode"]),
+    ("get_camera_trigger", ["LED-Panel.exe", "--getCameraTrigger"]),
+    ("get_camera_trigger_state", ["LED-Panel.exe", "--getCameraTriggerState"]),
+    ("get_stop_trigger", ["LED-Panel.exe", "--getStopTrigger"]),
+    ("get_stop_trigger_state", ["LED-Panel.exe", "--getStopTriggerState"]),
+])
+def test_query_methods_send_the_right_command(method_name, expected_args):
+    with patch("engine.led_panel.check_output", return_value="0\n") as mock_check_output, patch("time.sleep"):
+        result = getattr(LEDPanel, method_name)()
+        assert result == "0"
+        mock_check_output.assert_called_once_with(expected_args, text=True)
