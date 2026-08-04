@@ -331,20 +331,29 @@ class _FailingRelayConnection:
         raise OSError("simulated USB write failure")
 
 
+class _FakeStopEvent:
+    """Deterministic stand-in for threading.Event - wait() returns False
+    (keep looping) for the first `false_count` calls, then True (stop) -
+    avoids racing real wall-clock timing between two threads, which was
+    flaky under load (a slow scheduler tick can make fewer iterations fit
+    in a fixed real-time window than expected)."""
+
+    def __init__(self, false_count):
+        self.calls = 0
+        self.false_count = false_count
+
+    def wait(self, timeout):
+        self.calls += 1
+        return self.calls > self.false_count
+
+
 def test_relay_keepalive_loop_writes_periodically_until_stopped():
     conn = _FakeRelayConnection()
-    stop_event = threading.Event()
+    stop_event = _FakeStopEvent(false_count=3)
 
-    def stop_after_a_few_intervals():
-        time.sleep(0.05)
-        stop_event.set()
-
-    stopper = threading.Thread(target=stop_after_a_few_intervals)
-    stopper.start()
     _relay_keepalive_loop(conn, stop_event, interval_s=0.01)
-    stopper.join()
 
-    assert len(conn.writes) >= 2
+    assert len(conn.writes) == 3
     assert all(w == bytes.fromhex("A00101A2") for w in conn.writes)
 
 
