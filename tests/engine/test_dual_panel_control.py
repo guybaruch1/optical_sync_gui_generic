@@ -99,41 +99,29 @@ def test_start_scanning_with_dual_panel_config_configures_both_panels_and_closes
         mock_run_on_both.assert_called_once()
         assert mock_run_on_both.call_args[0][0] == DUAL_PANEL_CONFIG
         # Actually invoke the action callback _run_on_both_panels was given,
-        # to confirm it sends start() FIRST - deliberately mimicking what an
-        # interrupted run leaves behind (isRunning='1' from before,
-        # never cleared since stop_scanning() never ran) - THEN reset()
-        # (unconditionally clearing whatever state the panel was left in),
-        # then set_mode/set_speed_ms, then forces a real transition on
-        # set_camera_trigger (False, THEN True) and set_trigger_mode (1,
-        # THEN 2) rather than a single call each - a run following one that
-        # completed normally leaves both already at their target value
-        # (stop_scanning() never resets either), so a single call risks
-        # being a same-value no-op instead of a real edge (mirrors
-        # _relay_on's own OFF-before-ON fix, one layer further down - see
-        # this module's start_scanning comment). No --stop
-        # (response_time_measurement_mode()/stop() bake one in, confirmed
-        # via real-hardware testing to break trigger-mode stepping) and no
-        # set_direction_single (absent from the confirmed-working reference
-        # sequence too).
+        # to confirm it sends reset() first (a cheap "known starting
+        # position" step), then the plain docs/config_tigger_mode.bat
+        # sequence - set_mode/set_speed_ms/set_trigger_mode/
+        # set_camera_trigger, nothing more. A long investigation piled a lot
+        # of extra complexity onto this (start() in 3 positions, forced
+        # transitions on set_camera_trigger/set_trigger_mode) chasing a bug
+        # that turned out to live entirely in stop_scanning()'s own
+        # LEDPanel.stop() call instead - see stop_scanning's own test/
+        # comment. No --stop (response_time_measurement_mode()/stop() bake
+        # one in, confirmed via real-hardware testing to break trigger-mode
+        # stepping) and no set_direction_single (absent from the
+        # confirmed-working reference sequence too).
         action = mock_run_on_both.call_args[0][1]
         action()
         mock_led_panel.reset.assert_called_once()
         mock_led_panel.stop.assert_not_called()
         mock_led_panel.response_time_measurement_mode.assert_not_called()
         mock_led_panel.set_direction_single.assert_not_called()
+        mock_led_panel.start.assert_not_called()
         mock_led_panel.set_mode.assert_called_once_with(1)
         mock_led_panel.set_speed_ms.assert_called_once_with(5)
-        assert mock_led_panel.set_trigger_mode.call_args_list == [call(1), call(2)]
-        assert mock_led_panel.set_camera_trigger.call_args_list == [call(False), call(True)]
-        mock_led_panel.start.assert_called_once()
-
-        # Order matters for this experiment - start() must land BEFORE
-        # reset() and everything else, not mixed in later.
-        call_names = [c[0] for c in mock_led_panel.mock_calls]
-        assert call_names == [
-            "start", "reset", "set_mode", "set_speed_ms",
-            "set_camera_trigger", "set_trigger_mode", "set_trigger_mode", "set_camera_trigger",
-        ]
+        mock_led_panel.set_trigger_mode.assert_called_once_with(2)
+        mock_led_panel.set_camera_trigger.assert_called_once_with(True)
 
         mock_relay_on.assert_called_once_with(DUAL_PANEL_CONFIG)
 
@@ -145,7 +133,17 @@ def test_stop_scanning_with_dual_panel_config_releases_relay_before_touching_hub
          patch.object(dual_panel_control, "_relay_off",
                        side_effect=lambda: call_order.append("_relay_off")) as mock_relay_off:
         stop_scanning(DUAL_PANEL_CONFIG)
-        mock_run_on_both.assert_called_once_with(DUAL_PANEL_CONFIG, dual_panel_control.LEDPanel.stop)
+        # LEDPanel.reset(), NOT LEDPanel.stop() - --stop was confirmed (via
+        # tools/diag_arm_sequence_sweep.py's exhaustive testing of the
+        # arm-sequence side) to be the actual root cause of the "only steps
+        # once, or after an interrupted run" bug: it sets some internal
+        # panel state nothing in start_scanning's arm sequence can undo.
+        # The relay release (right below) is what actually freezes both
+        # panels in place - a documented gate, not a one-shot pulse - so
+        # --stop's own "stop" behavior was always redundant here; reset()
+        # still returns the LEDs to a clean starting position without the
+        # poisoning.
+        mock_run_on_both.assert_called_once_with(DUAL_PANEL_CONFIG, dual_panel_control.LEDPanel.reset)
         mock_relay_off.assert_called_once()
         # _relay_off() MUST run before _run_on_both_panels - that function's
         # own hub-port-switching dance disables relay_port while switching

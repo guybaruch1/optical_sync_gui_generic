@@ -82,113 +82,37 @@ def start_scanning(switch_time_ms, scan_direction, dual_panel_config):
         # (which sends --stop before --setMode 1) and NOT
         # set_direction_single() - confirmed via real-hardware testing that
         # sending --stop before entering trigger mode prevents the panel
-        # from actually stepping once triggered (presumably --stop resets
-        # whatever internal state --setTriggerMode/--setCameraTrigger
-        # establish), and the confirmed-working reference sequence
-        # (docs/config_tigger_mode.bat) never sets direction either. Do not
-        # add either of those back without re-confirming on real hardware
-        # first.
+        # from actually stepping once triggered, and the confirmed-working
+        # reference sequence (docs/config_tigger_mode.bat) never sets
+        # direction either. Do not add either of those back without
+        # re-confirming on real hardware first.
         #
-        # LEDPanel.reset() ("--reset": reset to starting position WITHOUT
-        # stopping it - distinct from --stop, which does both) runs first,
-        # unconditionally. Confirmed via real-hardware testing (isolating
-        # stop_scanning()'s cleanup into its 3 separate pieces - releasing
-        # the relay, toggling Acroname hub exposure to reach each panel,
-        # and sending LEDPanel.stop() to each one - via tools/
-        # diag_isolate_stop_scanning.py) that the relay release and hub
-        # toggle are BOTH innocent on their own; only LEDPanel.stop()
-        # (--stop) breaks the next run. reset() alone did NOT fix that (the
-        # pattern persisted with it added), but is left in as a harmless,
-        # cheap "known starting position" step - it did not regress the
-        # working "interrupted run" case either.
+        # This is deliberately the plain, minimal sequence -
+        # docs/config_tigger_mode.bat's own 4 commands, plus reset() as a
+        # cheap "known starting position" step. A long investigation (see
+        # git history around tools/diag_panel_query_state.py and
+        # tools/diag_arm_sequence_sweep.py for the full trail) piled a lot
+        # more onto this - LEDPanel.start() in 3 different positions,
+        # forcing a real transition on set_camera_trigger/set_trigger_mode,
+        # forcing a real transition on the relay itself - all of it chasing
+        # the actual bug: a run following one that completed NORMALLY never
+        # stepped on its next arm, while a run following one that was
+        # INTERRUPTED before stop_scanning() ran always did. An automated
+        # sweep of 12 variants (tools/diag_arm_sequence_sweep.py) confirmed
+        # none of that arm-sequence complexity ever fixed it - the ONLY
+        # variant that produced stepping was calling --start right after
+        # entering External trigger mode, which free-runs the panel on its
+        # own clock immediately, breaking lockstep between the 2 panels.
         #
-        # LEDPanel.start() ("--start": Start the LED Panel) was first tried
-        # AFTER set_camera_trigger(True) (i.e. after already being placed
-        # into External trigger mode), on the theory that it might restore
-        # whatever internal "running" state a prior --stop clears -
-        # confirmed via tools/diag_panel_query_state.py that this internal
-        # state (LEDPanel.is_running(), queried via --isRunning) really is
-        # the deciding factor: a run following one that completed normally
-        # (--stop clears it to '0') never gets it back, since nothing in
-        # this sequence used to set it; a run following one that was
-        # interrupted before stop_scanning() ran (leaving isRunning='1'
-        # from before) always worked, with getCurrentLED visibly changing
-        # between queries - objective proof it was really stepping.
-        #
-        # That first position was reverted: calling --start once already
-        # in External trigger mode made a panel begin stepping immediately
-        # on its own internal clock, regardless of the trigger mode just
-        # configured - since configure_one_panel runs separately per panel
-        # (hub-switched, one at a time), panel A started the moment its own
-        # --start ran, and panel B started later, whenever the hub got to
-        # it - bypassing the shared relay pulse meant to start both at the
-        # same instant in lockstep.
-        #
-        # Also tried BEFORE set_trigger_mode(2)/set_camera_trigger(True) -
-        # also reverted: real-hardware testing (tools/diag_panel_query_state.py)
-        # showed isRunning stayed '0' even with --start sent in this
-        # position, so it provided no measurable benefit either way -
-        # removed rather than kept as unproven complexity.
-        #
-        # _relay_on's own guaranteed OFF-before-ON transition was tried next -
-        # confirmed via tools/diag_panel_query_state.py that the panel DOES
-        # electrically detect that transition (getCameraTriggerState flips
-        # 0->1 right after arming), but isRunning still stayed '0' and the
-        # panel still didn't step. So the missing edge isn't the relay
-        # wiring.
-        #
-        # Forcing a real transition on set_camera_trigger/set_trigger_mode
-        # themselves (toggling through a different value first, mirroring
-        # _relay_on's fix one layer down - False->True, 1->2 below) was
-        # tried next too - also confirmed via tools/diag_panel_query_state.py
-        # to make no difference: isRunning still stayed '0', panel still
-        # didn't step, getCameraTriggerState still flipped 0->1 same as
-        # without this toggle. Kept anyway - forcing a real transition here
-        # is still more correct than relying on whatever value a previous
-        # run's --stop happened to leave behind, and it's confirmed
-        # harmless, even though it didn't fix this bug either.
-        #
-        # Both confirmed theories (relay edge, config-command edge) rule out
-        # everything upstream of the panel's own internal isRunning flag -
-        # the panel demonstrably SEES the trigger (getCameraTriggerState),
-        # it's just not translating that into stepping. --start is the only
-        # command ever observed to set isRunning=1, but calling it alone
-        # (either position tried so far) free-runs the panel immediately on
-        # its own clock instead of waiting for the trigger, breaking
-        # lockstep.
-        #
-        # Calling --start, THEN immediately re-applying set_trigger_mode(2)
-        # right after it, was tried next - also confirmed via
-        # tools/diag_panel_query_state.py to make no difference: isRunning
-        # read '0' again in the post-arm query, same as every other
-        # attempt. This means set_trigger_mode(2) itself (re-)clears
-        # isRunning back to '0' the moment it's called, no matter when -
-        # i.e. isRunning and "waiting for an external trigger" are mutually
-        # exclusive states on this firmware, not something --start can force
-        # to coexist.
-        #
-        # UNCONFIRMED as of this commit, different structure: --start as the
-        # very FIRST command, before reset()/anything else - deliberately
-        # mimicking what an interrupted run leaves behind (isRunning='1'
-        # from before, never cleared since stop_scanning() never ran) -
-        # then letting the exact same reset/mode/speed/trigger-toggle
-        # sequence run on top of that already-running state, since THAT
-        # sequence is the one already confirmed (via the interrupt trick)
-        # to correctly re-arm trigger-wait when starting from isRunning='1'.
-        # Same lockstep-drift risk as the previous --start attempts (each
-        # panel briefly free-runs during its own hub-switched turn, before
-        # the other panel is even reached) - unconfirmed whether the
-        # trailing reset/trigger-mode sequence re-syncs both panels back
-        # onto the shared relay trigger regardless of that head start, or
-        # whether it also just clears isRunning back to '0' like the
-        # previous position did.
+        # The actual root cause was never in this function - it's
+        # LEDPanel.stop() (--stop), which stop_scanning() used to send at
+        # the end of every dual-panel run. See stop_scanning's own comment
+        # for the fix. This function no longer needs to compensate for that
+        # poisoning at all, so it's back to the plain sequence.
         def configure_one_panel():
-            LEDPanel.start()
             LEDPanel.reset()
             LEDPanel.set_mode(1)  # response-time-measurement mode, no preceding --stop
             LEDPanel.set_speed_ms(switch_time_ms)
-            LEDPanel.set_camera_trigger(False)  # guarantee a real False->True transition below
-            LEDPanel.set_trigger_mode(1)  # guarantee a real mode transition below (1=Continuous)
             LEDPanel.set_trigger_mode(2)
             LEDPanel.set_camera_trigger(True)
 
@@ -209,8 +133,21 @@ def stop_scanning(dual_panel_config):
         # relay. relay_port is still in start_scanning's last-known-enabled
         # state here, untouched since the run began, so releasing it now is
         # safe.
+        #
+        # LEDPanel.reset() ("--reset": reset to starting position WITHOUT
+        # stopping it), NOT LEDPanel.stop() ("--stop": stop AND reset to
+        # starting position) - this was the actual root cause of the whole
+        # "only steps once, or after an interrupted run" bug (see
+        # start_scanning's own comment for the long trail that went into
+        # confirming this). --stop sets some internal panel state that
+        # nothing in start_scanning's own arm sequence can undo - relay
+        # release is what actually freezes both panels in place (a
+        # documented gate, not a one-shot pulse - see this module's own
+        # docstring history), so --stop's extra "stop" behavior was always
+        # redundant here anyway. reset() still returns the LEDs to a clean
+        # starting position for the next run, without poisoning it.
         _relay_off()
-        _run_on_both_panels(dual_panel_config, LEDPanel.stop)
+        _run_on_both_panels(dual_panel_config, LEDPanel.reset)
 
 
 def _run_on_both_panels(dual_panel_config, action):

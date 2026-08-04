@@ -137,29 +137,61 @@ call site) and leaves the relay closed; `stop_scanning` is what calls
 Acroname `brainstem` SDK) and `pyserial` respectively, so every normal
 single-panel test can import/run this module without either dependency
 installed. `start_scanning`'s dual-panel path configures each panel with
-`LEDPanel.set_mode(1)`/`set_speed_ms()`/`set_trigger_mode(2)`/
-`set_camera_trigger(True)` - deliberately `set_mode(1)`, NOT
-`response_time_measurement_mode()` (which sends `--stop` first) and
-deliberately no `set_direction_single()` either: real-hardware testing
-(see `tools/diag_*.py`) confirmed that sending `--stop` before entering
+`LEDPanel.reset()` then `set_mode(1)`/`set_speed_ms()`/
+`set_trigger_mode(2)`/`set_camera_trigger(True)` - deliberately
+`set_mode(1)`, NOT `response_time_measurement_mode()` (which sends
+`--stop` first) and deliberately no `set_direction_single()` either:
+real-hardware testing confirmed that sending `--stop` before entering
 trigger mode prevents the panel from actually stepping once triggered,
 and the confirmed-working reference sequence
 (`docs/config_tigger_mode.bat`) never sets direction. Don't add either
-back without re-confirming on real hardware first. Also calls
-`LEDPanel.reset()` first (unconditionally - real-hardware testing showed
-it's harmless but didn't fix anything on its own). `LEDPanel.start()` was
-also tried, after `set_camera_trigger` - isolating stop_scanning's cleanup
-(`tools/diag_isolate_stop_scanning.py`) confirmed neither releasing the
-relay nor toggling Acroname hub port-exposure breaks the next run, only
-`LEDPanel.stop()` (`--stop`) does, so `start()` was an attempt to
-explicitly restore whatever internal "running" state `--stop` clears -
-but reverted after real-hardware testing showed `--start` makes a panel
-begin stepping immediately on its own internal clock regardless of the
-External trigger mode just configured, and since `configure_one_panel`
-runs separately per panel (hub-switched, one at a time), that broke
-lockstep entirely (panel A visibly started well before panel B). Do not
-add `--start` back here without re-confirming lockstep is preserved. Any
-panel config change (e.g. switch time)
+back without re-confirming on real hardware first.
+
+**The "only steps once, or right after an interrupted run" bug and its
+actual fix.** A run following one that completed NORMALLY never stepped
+on its next arm, while a run following one that was INTERRUPTED before
+`stop_scanning()` ran always did. A long investigation chased this from
+the `start_scanning` side - trying `LEDPanel.start()` in 3 different
+positions, forcing a real transition on `set_camera_trigger`/
+`set_trigger_mode`, forcing a real transition on the relay itself - all
+confirmed via `tools/diag_panel_query_state.py` (queries `LED-Panel.exe`'s
+own `--isRunning`/`--getCurrentLED`/etc., via a `pywin32`
+`win32console`-based reader, since these commands write via the low-level
+`WriteConsole` API and produce nothing under redirection - only works from
+a real, native Windows console, not an IDE-integrated one) to make no
+difference: `isRunning` never got set, and the panel never stepped.
+`tools/diag_arm_sequence_sweep.py` then automated an exhaustive sweep of
+12 arm-sequence variants (each starting from a `stop_scanning()`-forced
+"just stopped" precondition, detecting actual stepping automatically via
+`getCurrentLED` changing between 2 samples) and confirmed NONE of that
+`start_scanning`-side complexity ever fixed it - the only variant that
+produced stepping was calling `--start` right after entering External
+trigger mode, which free-runs the panel on its own internal clock
+immediately, bypassing the shared relay trigger entirely and breaking
+lockstep (since `configure_one_panel` runs separately per panel,
+hub-switched one at a time - panel A would start well before panel B).
+
+The actual root cause was never in `start_scanning` at all: it was
+`stop_scanning`'s own `LEDPanel.stop()` call (`--stop`: "stop AND reset to
+starting position"), which sets some internal panel state that nothing in
+`start_scanning`'s arm sequence can undo. The fix - confirmed by comparing
+against the original reference workflow (`docs/acroname_hub.py`'s
+`__main__` demo), which "always works" specifically because it never
+calls `--stop` at all - is that `stop_scanning`'s dual-panel path now
+calls `LEDPanel.reset()` ("--reset": reset to starting position WITHOUT
+stopping it) instead of `LEDPanel.stop()`. The relay release (which
+`stop_scanning` already does first) is what actually freezes both panels
+in place - a documented gate, not a one-shot pulse (see below) - so
+`--stop`'s own "stop" behavior was always redundant here; `reset()` still
+returns the LEDs to a clean starting position for the next run, just
+without the poisoning. `start_scanning`'s own arm sequence is back to the
+plain sequence above - none of the accumulated complexity was ever needed
+once this was fixed at its actual source. Do not add `LEDPanel.stop()`
+back into the dual-panel `stop_scanning` path without re-confirming on
+real hardware first (`tools/diag_panel_query_state.py`, checking
+`isRunning` after the NEXT arm).
+
+Any panel config change (e.g. switch time)
 needs this whole provisioning re-run - see `gui/pages/threshold_tuning_page.py`'s
 `_on_switch_time_changed`, which branches on `dual_panel_config` to either
 call `LEDPanel.set_speed_ms()` directly and instantly (single-panel) or
