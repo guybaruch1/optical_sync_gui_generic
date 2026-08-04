@@ -1,5 +1,19 @@
 """Diagnostic script - NOT part of the shipped app, no automated tests.
 
+RESOLVED: this sweep's own results (11 of 12 variants showed no movement;
+the only one that stepped free-ran the panel immediately, breaking
+lockstep) are what proved no start_scanning-side fix exists at all - the
+actual root cause was stop_scanning()'s own LEDPanel.stop() call, fixed by
+switching it to LEDPanel.reset() instead (see engine/dual_panel_control.py's
+stop_scanning comment, and CLAUDE.md's dual-panel section for the full
+trail). Re-running this script TODAY will very likely show ALL 12
+variants "STEPPED", including baseline_4cmd - NOT because any arm-sequence
+hypothesis below became correct, but because the "force the broken
+precondition" step (run_variant calling stop_scanning()) no longer
+actually poisons anything, since that's exactly what got fixed. Kept as a
+reusable sweep harness for isolating a similar issue in the future, not
+because this investigation is still open.
+
 Automates the single-variable "try one arm sequence, test on real
 hardware, report back, try the next one" loop this whole investigation has
 been doing by hand - every variant tried so far in

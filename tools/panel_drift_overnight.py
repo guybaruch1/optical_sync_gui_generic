@@ -15,22 +15,35 @@ Does NOT modify tools/panel_drift_measure.py at all - it's invoked as an
 opaque subprocess, unchanged, using whatever PICK/DURATION_S/DEVICE_SERIAL/
 etc. are already configured there.
 
-KNOWN ISSUE this script works AROUND, not fixes: the dual-panel LED
-stepping was observed to succeed only every other run (fail, succeed,
-fail, succeed...) when run as separate fresh processes - root cause not
-yet confirmed (a crash was seen but its traceback was never captured). A
-naive loop would silently corrupt the "is the rate consistent" question
-with failed-run garbage, so each run's own resulting CSV is inspected
-afterward (via domain.panel_drift_analysis.summarize_drift) to classify
-PASS (at least one real transition detected) vs FAIL (no transitions -
-the panels never stepped), independently of whether the subprocess itself
-crashed or completed silently. Failed runs are excluded from the
-rate-consistency numbers/plots but still counted and reported, so the
-pass/fail pattern itself is visible in the results too. An extra
-dual_panel_control.stop_scanning() safety call runs between iterations
-regardless of the just-finished run's outcome, to maximize the chance the
-panels are actually released before the next attempt (belt-and-suspenders
-beyond whatever panel_drift_measure.py's own cleanup already tried).
+RESOLVED (the alternating-failure pattern): the dual-panel LED stepping
+was observed to succeed only every other run (fail, succeed, fail,
+succeed...) when run as separate fresh processes - root cause confirmed to
+be engine/dual_panel_control.py's stop_scanning() sending LEDPanel.stop()
+(--stop), which poisons the panel's internal state so the NEXT arm never
+steps; a run that got interrupted before stop_scanning() ran (skipping the
+--stop) always worked next time, which is exactly the "succeed" half of
+the alternating pattern lining up with "the previous run never cleanly
+finished." Fixed by switching stop_scanning()'s dual-panel path to
+LEDPanel.reset() instead - see that function's own comment and CLAUDE.md's
+dual-panel section for the full trail. Every run through this script
+should now succeed, not alternate - if the pattern below still shows
+failures, that's a NEW/different issue, not this one.
+
+This script's own defenses against the old pattern are kept regardless -
+still useful belt-and-suspenders, and still needed for genuinely different
+failure modes (a hung/crashed subprocess, stale output files from an
+earlier session): each run's own resulting CSV is inspected afterward (via
+domain.panel_drift_analysis.summarize_drift) to classify PASS (at least
+one real transition detected) vs FAIL (no transitions - the panels never
+stepped), independently of whether the subprocess itself crashed or
+completed silently. Failed runs are excluded from the rate-consistency
+numbers/plots but still counted and reported, so the pass/fail pattern
+itself is visible in the results too. An extra
+dual_panel_control.stop_scanning() safety call still runs between
+iterations regardless of the just-finished run's outcome, to maximize the
+chance the panels are actually released before the next attempt
+(belt-and-suspenders beyond whatever panel_drift_measure.py's own cleanup
+already tried).
 
 Run from the repo root: python tools/panel_drift_overnight.py
 Writes output/overnight_runs/run_NNN/ (each run's own archived CSVs +
