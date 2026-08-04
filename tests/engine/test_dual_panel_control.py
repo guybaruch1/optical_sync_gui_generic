@@ -100,13 +100,18 @@ def test_start_scanning_with_dual_panel_config_configures_both_panels_and_closes
         assert mock_run_on_both.call_args[0][0] == DUAL_PANEL_CONFIG
         # Actually invoke the action callback _run_on_both_panels was given,
         # to confirm it sends reset() first (unconditionally clearing
-        # whatever state the panel was left in), then EXACTLY the 4-command
-        # sequence confirmed on real hardware to produce continuous
-        # stepping once triggered - no --stop
-        # (response_time_measurement_mode()/stop() bake one in, confirmed
-        # via real-hardware testing to break trigger-mode stepping) and no
-        # set_direction_single (absent from the confirmed-working reference
-        # sequence too).
+        # whatever state the panel was left in), then set_mode/set_speed_ms,
+        # then forces a real transition on set_camera_trigger (False, THEN
+        # True) and set_trigger_mode (1, THEN 2) rather than a single call
+        # each - a run following one that completed normally leaves both
+        # already at their target value (stop_scanning() never resets
+        # either), so a single call risks being a same-value no-op instead
+        # of a real edge (mirrors _relay_on's own OFF-before-ON fix, one
+        # layer further down - see this module's start_scanning comment).
+        # No --stop (response_time_measurement_mode()/stop() bake one in,
+        # confirmed via real-hardware testing to break trigger-mode
+        # stepping) and no set_direction_single (absent from the
+        # confirmed-working reference sequence too).
         action = mock_run_on_both.call_args[0][1]
         action()
         mock_led_panel.reset.assert_called_once()
@@ -115,8 +120,8 @@ def test_start_scanning_with_dual_panel_config_configures_both_panels_and_closes
         mock_led_panel.set_direction_single.assert_not_called()
         mock_led_panel.set_mode.assert_called_once_with(1)
         mock_led_panel.set_speed_ms.assert_called_once_with(5)
-        mock_led_panel.set_trigger_mode.assert_called_once_with(2)
-        mock_led_panel.set_camera_trigger.assert_called_once_with(True)
+        assert mock_led_panel.set_trigger_mode.call_args_list == [call(1), call(2)]
+        assert mock_led_panel.set_camera_trigger.call_args_list == [call(False), call(True)]
         # .start() must NOT be called for the dual-panel/trigger-mode case -
         # tried in 2 different positions, neither helped (see this module's
         # own start_scanning comment), and the first position caused a real

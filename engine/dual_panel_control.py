@@ -128,14 +128,28 @@ def start_scanning(switch_time_ms, scan_direction, dual_panel_config):
         # also reverted: real-hardware testing (tools/diag_panel_query_state.py)
         # showed isRunning stayed '0' even with --start sent in this
         # position, so it provided no measurable benefit either way -
-        # removed rather than kept as unproven complexity. See
-        # _relay_on's own comment for the current hypothesis being tested
-        # instead (a real relay transition, not --start, may be what's
-        # actually needed to get isRunning set).
+        # removed rather than kept as unproven complexity.
+        #
+        # _relay_on's own guaranteed OFF-before-ON transition was tried next -
+        # confirmed via tools/diag_panel_query_state.py that the panel DOES
+        # electrically detect that transition (getCameraTriggerState flips
+        # 0->1 right after arming), but isRunning still stayed '0' and the
+        # panel still didn't step. So the missing edge isn't the relay
+        # wiring - it may instead be these commands themselves: a run
+        # following one that completed normally leaves set_camera_trigger
+        # already at True and set_trigger_mode already at 2 (stop_scanning()
+        # never resets either), so simply calling set_camera_trigger(True)/
+        # set_trigger_mode(2) again here may be a same-value no-op, not a
+        # real transition - same class of bug _relay_on's fix targeted, just
+        # one layer further down. UNCONFIRMED as of this commit: forcing a
+        # real transition on both by toggling through a different value
+        # first, mirroring _relay_on's OFF-before-ON pattern.
         def configure_one_panel():
             LEDPanel.reset()
             LEDPanel.set_mode(1)  # response-time-measurement mode, no preceding --stop
             LEDPanel.set_speed_ms(switch_time_ms)
+            LEDPanel.set_camera_trigger(False)  # guarantee a real False->True transition below
+            LEDPanel.set_trigger_mode(1)  # guarantee a real mode transition below (1=Continuous)
             LEDPanel.set_trigger_mode(2)
             LEDPanel.set_camera_trigger(True)
 
@@ -306,19 +320,22 @@ def _relay_on(dual_panel_config):
     com_port = dual_panel_config["relay_com_port"]
     s = serial.Serial(com_port, 9600, timeout=1)
     time.sleep(2)  # let the board finish reset after DTR toggle
-    # Explicit OFF before ON - UNCONFIRMED as of this commit, real-hardware
-    # testing needed. Per Image Engineering's own iQ-Trigger API docs (a
-    # separate, purpose-built trigger box for driving devices like the LED
-    # Panel - not what this rig uses, but its documented behavior is
+    # Explicit OFF before ON - per Image Engineering's own iQ-Trigger API
+    # docs (a separate, purpose-built trigger box for driving devices like
+    # the LED Panel - not what this rig uses, but its documented behavior is
     # edge/pulse-based: toggleState()/sequences, not a held-closed state),
     # the LED Panel's isRunning flag may be set by detecting a genuine
-    # open->closed TRANSITION, not simply by the relay BEING closed. If the
-    # relay was already physically closed from whatever ran before (e.g.
-    # its own OFF write never landed, or _relay_off() above was a no-op as
-    # described), sending ON again is a no-op edge-wise - no real
-    # transition occurs, and isRunning never gets set. Sending OFF first
-    # guarantees a real transition on the ON write below, regardless of
-    # whatever state the relay actually started in.
+    # open->closed TRANSITION, not simply by the relay BEING closed. Confirmed
+    # via real-hardware testing (tools/diag_panel_query_state.py) that this
+    # guaranteed transition DOES reach the panel - getCameraTriggerState
+    # flips 0->1 right after arming, proving the panel electrically detects
+    # the pulse - but isRunning still stayed '0' and the panel still didn't
+    # step. So this relay-edge guarantee is confirmed harmless/correct (and
+    # kept - it rules out "the relay itself never produced a real edge" as a
+    # variable) but is NOT sufficient on its own; the missing edge must be
+    # elsewhere - see configure_one_panel's own comment for the next
+    # hypothesis being tested (the panel's OWN config commands, not just the
+    # relay, may need a forced transition too).
     s.write(bytes.fromhex("A00100A1"))  # relay 1 OFF - guarantee a known-open starting state
     time.sleep(0.2)  # let the board register the OFF state before flipping back on
     s.write(bytes.fromhex("A00101A2"))  # relay 1 ON - now a guaranteed real rising edge
