@@ -102,22 +102,43 @@ def start_scanning(switch_time_ms, scan_direction, dual_panel_config):
         # cheap "known starting position" step - it did not regress the
         # working "interrupted run" case either.
         #
-        # LEDPanel.start() ("--start": Start the LED Panel) was tried here,
-        # after set_camera_trigger(True), on the theory that it might
-        # restore whatever internal "running" state a prior --stop clears.
-        # Reverted after real-hardware testing: --start makes a panel begin
-        # stepping immediately on its own internal clock, REGARDLESS of the
-        # External trigger mode just configured - since configure_one_panel
-        # runs separately per panel (hub-switched, one at a time), that
-        # made panel A start stepping the moment ITS OWN --start ran, and
-        # panel B start later, whenever the hub got to it - completely
-        # bypassing the shared relay pulse that's supposed to start both
-        # panels at the exact same instant in lockstep. Do not add --start
-        # back here without re-confirming lockstep is preserved.
+        # LEDPanel.start() ("--start": Start the LED Panel) was first tried
+        # AFTER set_camera_trigger(True) (i.e. after already being placed
+        # into External trigger mode), on the theory that it might restore
+        # whatever internal "running" state a prior --stop clears -
+        # confirmed via tools/diag_panel_query_state.py that this internal
+        # state (LEDPanel.is_running(), queried via --isRunning) really is
+        # the deciding factor: a run following one that completed normally
+        # (--stop clears it to '0') never gets it back, since nothing in
+        # this sequence used to set it; a run following one that was
+        # interrupted before stop_scanning() ran (leaving isRunning='1'
+        # from before) always worked, with getCurrentLED visibly changing
+        # between queries - objective proof it was really stepping.
+        #
+        # That first position was reverted: calling --start once already
+        # in External trigger mode made a panel begin stepping immediately
+        # on its own internal clock, regardless of the trigger mode just
+        # configured - since configure_one_panel runs separately per panel
+        # (hub-switched, one at a time), panel A started the moment its own
+        # --start ran, and panel B started later, whenever the hub got to
+        # it - bypassing the shared relay pulse meant to start both at the
+        # same instant in lockstep.
+        #
+        # Now tried BEFORE set_trigger_mode(2)/set_camera_trigger(True)
+        # instead - UNCONFIRMED as of this commit. The idea: set
+        # isRunning=1 while the panel is still in a more neutral state,
+        # then switch it into External-trigger-wait mode afterward, hoping
+        # that leaves it paused/waiting for the relay rather than free-
+        # running immediately. Verify with tools/diag_panel_query_state.py
+        # that getCurrentLED stays frozen right after arming but before the
+        # relay closes (not moving on its own) - if it's already changing
+        # before the relay ever closes, this ordering doesn't fix the
+        # lockstep problem either and should be reverted the same way.
         def configure_one_panel():
             LEDPanel.reset()
             LEDPanel.set_mode(1)  # response-time-measurement mode, no preceding --stop
             LEDPanel.set_speed_ms(switch_time_ms)
+            LEDPanel.start()
             LEDPanel.set_trigger_mode(2)
             LEDPanel.set_camera_trigger(True)
 
