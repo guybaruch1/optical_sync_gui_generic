@@ -102,22 +102,24 @@ def start_scanning(switch_time_ms, scan_direction, dual_panel_config):
         # cheap "known starting position" step - it did not regress the
         # working "interrupted run" case either.
         #
-        # LEDPanel.start() ("--start": Start the LED Panel) is a NEW
-        # addition, UNCONFIRMED as of this commit - --stop's own --help
-        # text says it stops the panel (not just resets position), and
-        # this dual-panel path never previously called --start at all
-        # (assumed the relay's own close was sufficient to kick off
-        # stepping - true for a freshly-armed or still-running panel, but
-        # untested for one --stop explicitly halted). Remove this comment
-        # once real-hardware testing confirms (or rules out) that it fixes
-        # the "only works once/after an interrupt" pattern.
+        # LEDPanel.start() ("--start": Start the LED Panel) was tried here,
+        # after set_camera_trigger(True), on the theory that it might
+        # restore whatever internal "running" state a prior --stop clears.
+        # Reverted after real-hardware testing: --start makes a panel begin
+        # stepping immediately on its own internal clock, REGARDLESS of the
+        # External trigger mode just configured - since configure_one_panel
+        # runs separately per panel (hub-switched, one at a time), that
+        # made panel A start stepping the moment ITS OWN --start ran, and
+        # panel B start later, whenever the hub got to it - completely
+        # bypassing the shared relay pulse that's supposed to start both
+        # panels at the exact same instant in lockstep. Do not add --start
+        # back here without re-confirming lockstep is preserved.
         def configure_one_panel():
             LEDPanel.reset()
             LEDPanel.set_mode(1)  # response-time-measurement mode, no preceding --stop
             LEDPanel.set_speed_ms(switch_time_ms)
             LEDPanel.set_trigger_mode(2)
             LEDPanel.set_camera_trigger(True)
-            LEDPanel.start()
 
         _run_on_both_panels(dual_panel_config, configure_one_panel)
         _relay_on(dual_panel_config)
