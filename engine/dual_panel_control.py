@@ -85,11 +85,25 @@ def start_scanning(switch_time_ms, scan_direction, dual_panel_config):
         # from actually stepping once triggered (presumably --stop resets
         # whatever internal state --setTriggerMode/--setCameraTrigger
         # establish), and the confirmed-working reference sequence
-        # (docs/config_tigger_mode.bat) never sets direction either. This
-        # is the EXACT 4-command sequence confirmed to produce continuous
-        # stepping once triggered - do not add anything back without
-        # re-confirming on real hardware first.
+        # (docs/config_tigger_mode.bat) never sets direction either. Do not
+        # add either of those back without re-confirming on real hardware
+        # first.
+        #
+        # LEDPanel.reset() ("--reset": reset to starting position WITHOUT
+        # stopping it - distinct from --stop, which does both) runs first,
+        # unconditionally, on real-hardware evidence that stepping only
+        # reliably works on the very first arm attempt, or on one following
+        # a run that was interrupted before stop_scanning() ever ran (i.e.
+        # before --stop was sent) - any run following one that completed
+        # normally (which DOES send --stop via stop_scanning) fails. reset()
+        # is an attempt to unconditionally clear whatever state a panel is
+        # in - poisoned by a prior --stop, mid-step, whatever - before
+        # arming it, rather than depending on what the previous run left
+        # behind. UNCONFIRMED as of this commit - remove this comment once
+        # real-hardware testing confirms (or rules out) that it fixes the
+        # "only works once/after an interrupt" pattern.
         def configure_one_panel():
+            LEDPanel.reset()
             LEDPanel.set_mode(1)  # response-time-measurement mode, no preceding --stop
             LEDPanel.set_speed_ms(switch_time_ms)
             LEDPanel.set_trigger_mode(2)
