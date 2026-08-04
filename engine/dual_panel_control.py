@@ -91,23 +91,33 @@ def start_scanning(switch_time_ms, scan_direction, dual_panel_config):
         #
         # LEDPanel.reset() ("--reset": reset to starting position WITHOUT
         # stopping it - distinct from --stop, which does both) runs first,
-        # unconditionally, on real-hardware evidence that stepping only
-        # reliably works on the very first arm attempt, or on one following
-        # a run that was interrupted before stop_scanning() ever ran (i.e.
-        # before --stop was sent) - any run following one that completed
-        # normally (which DOES send --stop via stop_scanning) fails. reset()
-        # is an attempt to unconditionally clear whatever state a panel is
-        # in - poisoned by a prior --stop, mid-step, whatever - before
-        # arming it, rather than depending on what the previous run left
-        # behind. UNCONFIRMED as of this commit - remove this comment once
-        # real-hardware testing confirms (or rules out) that it fixes the
-        # "only works once/after an interrupt" pattern.
+        # unconditionally. Confirmed via real-hardware testing (isolating
+        # stop_scanning()'s cleanup into its 3 separate pieces - releasing
+        # the relay, toggling Acroname hub exposure to reach each panel,
+        # and sending LEDPanel.stop() to each one - via tools/
+        # diag_isolate_stop_scanning.py) that the relay release and hub
+        # toggle are BOTH innocent on their own; only LEDPanel.stop()
+        # (--stop) breaks the next run. reset() alone did NOT fix that (the
+        # pattern persisted with it added), but is left in as a harmless,
+        # cheap "known starting position" step - it did not regress the
+        # working "interrupted run" case either.
+        #
+        # LEDPanel.start() ("--start": Start the LED Panel) is a NEW
+        # addition, UNCONFIRMED as of this commit - --stop's own --help
+        # text says it stops the panel (not just resets position), and
+        # this dual-panel path never previously called --start at all
+        # (assumed the relay's own close was sufficient to kick off
+        # stepping - true for a freshly-armed or still-running panel, but
+        # untested for one --stop explicitly halted). Remove this comment
+        # once real-hardware testing confirms (or rules out) that it fixes
+        # the "only works once/after an interrupt" pattern.
         def configure_one_panel():
             LEDPanel.reset()
             LEDPanel.set_mode(1)  # response-time-measurement mode, no preceding --stop
             LEDPanel.set_speed_ms(switch_time_ms)
             LEDPanel.set_trigger_mode(2)
             LEDPanel.set_camera_trigger(True)
+            LEDPanel.start()
 
         _run_on_both_panels(dual_panel_config, configure_one_panel)
         _relay_on(dual_panel_config)

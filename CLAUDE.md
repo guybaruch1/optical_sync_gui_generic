@@ -144,12 +144,19 @@ deliberately no `set_direction_single()` either: real-hardware testing
 (see `tools/diag_*.py`) confirmed that sending `--stop` before entering
 trigger mode prevents the panel from actually stepping once triggered,
 and the confirmed-working reference sequence
-(`docs/config_tigger_mode.bat`) never sets direction. This is the EXACT
-4-command sequence confirmed to produce continuous stepping - don't add
-either back without re-confirming on real hardware first. Never calls
-`.start()` at all - closing the relay is what kicks off stepping, not
-`--start`. Any panel config change (e.g. switch time) needs this whole
-provisioning re-run - see `gui/pages/threshold_tuning_page.py`'s
+(`docs/config_tigger_mode.bat`) never sets direction. Don't add either
+back without re-confirming on real hardware first. Also calls
+`LEDPanel.reset()` first (unconditionally - real-hardware testing showed
+it's harmless but didn't fix anything on its own) and `LEDPanel.start()`
+last, after `set_camera_trigger` - added after isolating that neither
+releasing the relay nor toggling Acroname hub port-exposure breaks the
+next run (`tools/diag_isolate_stop_scanning.py`), only `LEDPanel.stop()`
+(`--stop`) does; `start()` is an attempt to explicitly restore whatever
+internal "running" state `--stop` clears, since this path previously
+assumed closing the relay alone was always sufficient to kick off
+stepping - true for a freshly-armed or still-running panel, untested for
+one `--stop` explicitly halted. Any panel config change (e.g. switch time)
+needs this whole provisioning re-run - see `gui/pages/threshold_tuning_page.py`'s
 `_on_switch_time_changed`, which branches on `dual_panel_config` to either
 call `LEDPanel.set_speed_ms()` directly and instantly (single-panel) or
 re-run `start_scanning()` in full (dual-panel, visibly slower - no way
