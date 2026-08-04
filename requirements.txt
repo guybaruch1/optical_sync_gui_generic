@@ -14,3 +14,11 @@ pyserial==3.5
 # the actual install method on the dev machine (Acroname sometimes
 # distributes this via their own installer rather than PyPI).
 brainstem
+# Only needed for LEDPanel's --get*/--isRunning query commands
+# (engine/led_panel.py's _query, imported lazily there) - LED-Panel.exe
+# writes their answers via the low-level WriteConsole API, which produces
+# nothing when stdout is redirected to a pipe/file (confirmed on real
+# hardware: works fine printed directly to a terminal, empty when
+# redirected with `>`), so capturing them needs to read the console
+# screen buffer directly instead of normal subprocess output capture.
+pywin32==308
