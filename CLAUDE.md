@@ -147,15 +147,19 @@ and the confirmed-working reference sequence
 (`docs/config_tigger_mode.bat`) never sets direction. Don't add either
 back without re-confirming on real hardware first. Also calls
 `LEDPanel.reset()` first (unconditionally - real-hardware testing showed
-it's harmless but didn't fix anything on its own) and `LEDPanel.start()`
-last, after `set_camera_trigger` - added after isolating that neither
-releasing the relay nor toggling Acroname hub port-exposure breaks the
-next run (`tools/diag_isolate_stop_scanning.py`), only `LEDPanel.stop()`
-(`--stop`) does; `start()` is an attempt to explicitly restore whatever
-internal "running" state `--stop` clears, since this path previously
-assumed closing the relay alone was always sufficient to kick off
-stepping - true for a freshly-armed or still-running panel, untested for
-one `--stop` explicitly halted. Any panel config change (e.g. switch time)
+it's harmless but didn't fix anything on its own). `LEDPanel.start()` was
+also tried, after `set_camera_trigger` - isolating stop_scanning's cleanup
+(`tools/diag_isolate_stop_scanning.py`) confirmed neither releasing the
+relay nor toggling Acroname hub port-exposure breaks the next run, only
+`LEDPanel.stop()` (`--stop`) does, so `start()` was an attempt to
+explicitly restore whatever internal "running" state `--stop` clears -
+but reverted after real-hardware testing showed `--start` makes a panel
+begin stepping immediately on its own internal clock regardless of the
+External trigger mode just configured, and since `configure_one_panel`
+runs separately per panel (hub-switched, one at a time), that broke
+lockstep entirely (panel A visibly started well before panel B). Do not
+add `--start` back here without re-confirming lockstep is preserved. Any
+panel config change (e.g. switch time)
 needs this whole provisioning re-run - see `gui/pages/threshold_tuning_page.py`'s
 `_on_switch_time_changed`, which branches on `dual_panel_config` to either
 call `LEDPanel.set_speed_ms()` directly and instantly (single-panel) or
