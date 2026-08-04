@@ -155,14 +155,35 @@ def start_scanning(switch_time_ms, scan_direction, dual_panel_config):
         # command ever observed to set isRunning=1, but calling it alone
         # (either position tried so far) free-runs the panel immediately on
         # its own clock instead of waiting for the trigger, breaking
-        # lockstep. UNCONFIRMED as of this commit: call --start (accepting
-        # that panel briefly free-runs) then IMMEDIATELE re-apply
-        # set_trigger_mode(2) on the same panel, hoping to put it back into
-        # trigger-wait while isRunning is already forced to '1' - accepts a
-        # small risk of a few steps of drift on whichever panel is
-        # configured first, since it briefly free-runs during its own
-        # hub-switched turn before the other panel is even reached.
+        # lockstep.
+        #
+        # Calling --start, THEN immediately re-applying set_trigger_mode(2)
+        # right after it, was tried next - also confirmed via
+        # tools/diag_panel_query_state.py to make no difference: isRunning
+        # read '0' again in the post-arm query, same as every other
+        # attempt. This means set_trigger_mode(2) itself (re-)clears
+        # isRunning back to '0' the moment it's called, no matter when -
+        # i.e. isRunning and "waiting for an external trigger" are mutually
+        # exclusive states on this firmware, not something --start can force
+        # to coexist.
+        #
+        # UNCONFIRMED as of this commit, different structure: --start as the
+        # very FIRST command, before reset()/anything else - deliberately
+        # mimicking what an interrupted run leaves behind (isRunning='1'
+        # from before, never cleared since stop_scanning() never ran) -
+        # then letting the exact same reset/mode/speed/trigger-toggle
+        # sequence run on top of that already-running state, since THAT
+        # sequence is the one already confirmed (via the interrupt trick)
+        # to correctly re-arm trigger-wait when starting from isRunning='1'.
+        # Same lockstep-drift risk as the previous --start attempts (each
+        # panel briefly free-runs during its own hub-switched turn, before
+        # the other panel is even reached) - unconfirmed whether the
+        # trailing reset/trigger-mode sequence re-syncs both panels back
+        # onto the shared relay trigger regardless of that head start, or
+        # whether it also just clears isRunning back to '0' like the
+        # previous position did.
         def configure_one_panel():
+            LEDPanel.start()
             LEDPanel.reset()
             LEDPanel.set_mode(1)  # response-time-measurement mode, no preceding --stop
             LEDPanel.set_speed_ms(switch_time_ms)
@@ -170,8 +191,6 @@ def start_scanning(switch_time_ms, scan_direction, dual_panel_config):
             LEDPanel.set_trigger_mode(1)  # guarantee a real mode transition below (1=Continuous)
             LEDPanel.set_trigger_mode(2)
             LEDPanel.set_camera_trigger(True)
-            LEDPanel.start()
-            LEDPanel.set_trigger_mode(2)  # re-apply after start() to try to force back into trigger-wait
 
         _run_on_both_panels(dual_panel_config, configure_one_panel)
         _relay_on(dual_panel_config)
