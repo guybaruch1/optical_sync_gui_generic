@@ -12,7 +12,7 @@ mode numbers and the all_leds_off-vs-stop distinction.
 
 import logging
 import time
-from subprocess import check_call, CalledProcessError
+from subprocess import check_call, CalledProcessError, TimeoutExpired
 
 _logger = logging.getLogger(__name__)
 
@@ -20,6 +20,14 @@ _logger = logging.getLogger(__name__)
 class LEDPanel:
     cmd_delay = 0.1
     exe_name = "LED-Panel.exe"
+    # check_call has no timeout by default - a real-hardware USB hiccup
+    # (seen as "USB communication failed" on stdout, usually followed by a
+    # normal CalledProcessError that this class's own retry loop already
+    # handles) can instead make LED-Panel.exe hang indefinitely waiting on
+    # the device, blocking the whole process forever with nothing to
+    # retry. Every real command observed so far completes near-instantly
+    # (well under 1s) - anything past this is treated as hung, not slow.
+    cmd_timeout_s = 5.0
 
     @staticmethod
     def _run(args):
@@ -30,9 +38,9 @@ class LEDPanel:
         try:
             while retries > 0:
                 try:
-                    check_call(cmd)
+                    check_call(cmd, timeout=LEDPanel.cmd_timeout_s)
                     return
-                except (CalledProcessError, FileNotFoundError) as e:
+                except (CalledProcessError, FileNotFoundError, TimeoutExpired) as e:
                     last_error = e
                     retries -= 1
                     _logger.error("Command returned with an error: %s", e)
@@ -102,9 +110,9 @@ class LEDPanel:
         try:
             while retries > 0:
                 try:
-                    check_call(cmd)
+                    check_call(cmd, timeout=LEDPanel.cmd_timeout_s)
                     return LEDPanel._read_console_output(stdout_handle, cursor_before, buffer_width)
-                except (CalledProcessError, FileNotFoundError) as e:
+                except (CalledProcessError, FileNotFoundError, TimeoutExpired) as e:
                     last_error = e
                     retries -= 1
                     _logger.error("Query returned with an error: %s", e)
