@@ -99,14 +99,17 @@ def test_start_scanning_with_dual_panel_config_configures_both_panels_and_closes
         mock_run_on_both.assert_called_once()
         assert mock_run_on_both.call_args[0][0] == DUAL_PANEL_CONFIG
         # Actually invoke the action callback _run_on_both_panels was given,
-        # to confirm it sends EXACTLY the 4-command sequence confirmed on
-        # real hardware to produce continuous stepping once triggered - no
-        # --stop (response_time_measurement_mode()/stop() bake one in,
-        # confirmed via real-hardware testing to break trigger-mode
-        # stepping) and no set_direction_single (absent from the
-        # confirmed-working reference sequence too).
+        # to confirm it sends reset() first (unconditionally clearing
+        # whatever state the panel was left in), then EXACTLY the 4-command
+        # sequence confirmed on real hardware to produce continuous
+        # stepping once triggered - no --stop
+        # (response_time_measurement_mode()/stop() bake one in, confirmed
+        # via real-hardware testing to break trigger-mode stepping) and no
+        # set_direction_single (absent from the confirmed-working reference
+        # sequence too).
         action = mock_run_on_both.call_args[0][1]
         action()
+        mock_led_panel.reset.assert_called_once()
         mock_led_panel.stop.assert_not_called()
         mock_led_panel.response_time_measurement_mode.assert_not_called()
         mock_led_panel.set_direction_single.assert_not_called()
