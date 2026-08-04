@@ -135,15 +135,33 @@ def start_scanning(switch_time_ms, scan_direction, dual_panel_config):
         # electrically detect that transition (getCameraTriggerState flips
         # 0->1 right after arming), but isRunning still stayed '0' and the
         # panel still didn't step. So the missing edge isn't the relay
-        # wiring - it may instead be these commands themselves: a run
-        # following one that completed normally leaves set_camera_trigger
-        # already at True and set_trigger_mode already at 2 (stop_scanning()
-        # never resets either), so simply calling set_camera_trigger(True)/
-        # set_trigger_mode(2) again here may be a same-value no-op, not a
-        # real transition - same class of bug _relay_on's fix targeted, just
-        # one layer further down. UNCONFIRMED as of this commit: forcing a
-        # real transition on both by toggling through a different value
-        # first, mirroring _relay_on's OFF-before-ON pattern.
+        # wiring.
+        #
+        # Forcing a real transition on set_camera_trigger/set_trigger_mode
+        # themselves (toggling through a different value first, mirroring
+        # _relay_on's fix one layer down - False->True, 1->2 below) was
+        # tried next too - also confirmed via tools/diag_panel_query_state.py
+        # to make no difference: isRunning still stayed '0', panel still
+        # didn't step, getCameraTriggerState still flipped 0->1 same as
+        # without this toggle. Kept anyway - forcing a real transition here
+        # is still more correct than relying on whatever value a previous
+        # run's --stop happened to leave behind, and it's confirmed
+        # harmless, even though it didn't fix this bug either.
+        #
+        # Both confirmed theories (relay edge, config-command edge) rule out
+        # everything upstream of the panel's own internal isRunning flag -
+        # the panel demonstrably SEES the trigger (getCameraTriggerState),
+        # it's just not translating that into stepping. --start is the only
+        # command ever observed to set isRunning=1, but calling it alone
+        # (either position tried so far) free-runs the panel immediately on
+        # its own clock instead of waiting for the trigger, breaking
+        # lockstep. UNCONFIRMED as of this commit: call --start (accepting
+        # that panel briefly free-runs) then IMMEDIATELE re-apply
+        # set_trigger_mode(2) on the same panel, hoping to put it back into
+        # trigger-wait while isRunning is already forced to '1' - accepts a
+        # small risk of a few steps of drift on whichever panel is
+        # configured first, since it briefly free-runs during its own
+        # hub-switched turn before the other panel is even reached.
         def configure_one_panel():
             LEDPanel.reset()
             LEDPanel.set_mode(1)  # response-time-measurement mode, no preceding --stop
@@ -152,6 +170,8 @@ def start_scanning(switch_time_ms, scan_direction, dual_panel_config):
             LEDPanel.set_trigger_mode(1)  # guarantee a real mode transition below (1=Continuous)
             LEDPanel.set_trigger_mode(2)
             LEDPanel.set_camera_trigger(True)
+            LEDPanel.start()
+            LEDPanel.set_trigger_mode(2)  # re-apply after start() to try to force back into trigger-wait
 
         _run_on_both_panels(dual_panel_config, configure_one_panel)
         _relay_on(dual_panel_config)
