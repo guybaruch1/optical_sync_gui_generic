@@ -151,19 +151,28 @@ class LEDPanel:
     @staticmethod
     def set_camera_trigger(enabled):
         # LED-Panel.exe --help documents --setCameraTrigger <bool> as
-        # [0] Enable, [1] Disable - the REVERSE of the intuitive "1=on"
-        # convention this code had been using since it was written. Every
-        # call site that calls set_camera_trigger(True) intending to
-        # ENABLE it (e.g. engine/dual_panel_control.py's start_scanning)
-        # was actually sending 1 and DISABLING it instead.
-        LEDPanel._run("--setCameraTrigger {}".format(0 if enabled else 1))
+        # [0] Enable, [1] Disable - the reverse of the "1=on" convention
+        # used here. Briefly "corrected" to 0-for-enabled to match that,
+        # but real-hardware testing showed that change broke the reliable
+        # "interrupt a run, the next one steps" workaround, which
+        # 1-for-enabled had never affected - i.e. the documented mapping
+        # doesn't match how this specific panel's firmware actually
+        # behaves (a stale doc relative to the firmware version, most
+        # likely). Reverted back to 1-for-enabled; don't "fix" this again
+        # without confirming on real hardware first.
+        LEDPanel._run("--setCameraTrigger {}".format(1 if enabled else 0))
 
     @staticmethod
     def set_stop_trigger(enabled):
-        # Same [0]=Enable/[1]=Disable convention as set_camera_trigger,
-        # per LED-Panel.exe --help. Not currently called from anywhere -
-        # exposed for diagnostics/future use (tools/diag_panel_query_state.py
-        # checks its current state via get_stop_trigger/get_stop_trigger_state).
+        # Same [0]=Enable/[1]=Disable convention set_camera_trigger used to
+        # follow, per LED-Panel.exe --help - UNVERIFIED against real
+        # hardware (see set_camera_trigger's own comment: that documented
+        # mapping turned out not to match this panel's actual firmware
+        # behavior, reverted after real-hardware testing). Not currently
+        # called from anywhere - exposed for diagnostics/future use
+        # (tools/diag_panel_query_state.py checks its current state via
+        # get_stop_trigger/get_stop_trigger_state). Confirm the real
+        # polarity on hardware before wiring this into anything that matters.
         LEDPanel._run("--setStopTrigger {}".format(0 if enabled else 1))
 
     @staticmethod

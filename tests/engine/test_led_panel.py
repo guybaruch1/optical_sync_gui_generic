@@ -62,19 +62,23 @@ def test_set_trigger_mode_sends_set_trigger_mode_command():
         mock_check_call.assert_called_once_with(["LED-Panel.exe", "--setTriggerMode", "2"])
 
 
-def test_set_camera_trigger_true_sends_0():
+def test_set_camera_trigger_true_sends_1():
     # LED-Panel.exe --help documents --setCameraTrigger as [0] Enable,
-    # [1] Disable - the reverse of the intuitive "1=on" this project's own
-    # code had backwards until this was checked against the real CLI help.
+    # [1] Disable, but real-hardware testing showed following that
+    # literally broke a previously-reliable workaround ("interrupt a run,
+    # the next one steps") that 1-for-enabled never affected - the
+    # documented mapping doesn't match this panel's actual firmware
+    # behavior. Don't "fix" this again without confirming on real
+    # hardware first.
     with patch("engine.led_panel.check_call") as mock_check_call, patch("time.sleep"):
         LEDPanel.set_camera_trigger(True)
-        mock_check_call.assert_called_once_with(["LED-Panel.exe", "--setCameraTrigger", "0"])
+        mock_check_call.assert_called_once_with(["LED-Panel.exe", "--setCameraTrigger", "1"])
 
 
-def test_set_camera_trigger_false_sends_1():
+def test_set_camera_trigger_false_sends_0():
     with patch("engine.led_panel.check_call") as mock_check_call, patch("time.sleep"):
         LEDPanel.set_camera_trigger(False)
-        mock_check_call.assert_called_once_with(["LED-Panel.exe", "--setCameraTrigger", "1"])
+        mock_check_call.assert_called_once_with(["LED-Panel.exe", "--setCameraTrigger", "0"])
 
 
 def test_set_stop_trigger_true_sends_0():
