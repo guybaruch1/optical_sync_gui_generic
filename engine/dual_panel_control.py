@@ -300,12 +300,31 @@ def _relay_on(dual_panel_config):
     # Closes any stale still-open connection first - e.g.
     # gui/pages/threshold_tuning_page.py's _on_switch_time_changed calls
     # start_scanning() again in full without an intervening stop_scanning()
-    # whenever switch_time_ms changes mid-run.
+    # whenever switch_time_ms changes mid-run. Only affects THIS process's
+    # own tracked connection though - _relay_connection["conn"] is always
+    # None in a fresh process, so this is a no-op on the very common case
+    # of a brand new run, regardless of whatever physical state the relay
+    # was actually left in by whatever ran before.
     _relay_off()
     com_port = dual_panel_config["relay_com_port"]
     s = serial.Serial(com_port, 9600, timeout=1)
     time.sleep(2)  # let the board finish reset after DTR toggle
-    s.write(bytes.fromhex("A00101A2"))  # relay 1 ON - kept open, not released, until _relay_off()
+    # Explicit OFF before ON - UNCONFIRMED as of this commit, real-hardware
+    # testing needed. Per Image Engineering's own iQ-Trigger API docs (a
+    # separate, purpose-built trigger box for driving devices like the LED
+    # Panel - not what this rig uses, but its documented behavior is
+    # edge/pulse-based: toggleState()/sequences, not a held-closed state),
+    # the LED Panel's isRunning flag may be set by detecting a genuine
+    # open->closed TRANSITION, not simply by the relay BEING closed. If the
+    # relay was already physically closed from whatever ran before (e.g.
+    # its own OFF write never landed, or _relay_off() above was a no-op as
+    # described), sending ON again is a no-op edge-wise - no real
+    # transition occurs, and isRunning never gets set. Sending OFF first
+    # guarantees a real transition on the ON write below, regardless of
+    # whatever state the relay actually started in.
+    s.write(bytes.fromhex("A00100A1"))  # relay 1 OFF - guarantee a known-open starting state
+    time.sleep(0.2)  # let the board register the OFF state before flipping back on
+    s.write(bytes.fromhex("A00101A2"))  # relay 1 ON - now a guaranteed real rising edge
     _relay_connection["conn"] = s
 
     stop_event = threading.Event()
