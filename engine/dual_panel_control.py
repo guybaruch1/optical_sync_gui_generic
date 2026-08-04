@@ -124,21 +124,18 @@ def start_scanning(switch_time_ms, scan_direction, dual_panel_config):
         # it - bypassing the shared relay pulse meant to start both at the
         # same instant in lockstep.
         #
-        # Now tried BEFORE set_trigger_mode(2)/set_camera_trigger(True)
-        # instead - UNCONFIRMED as of this commit. The idea: set
-        # isRunning=1 while the panel is still in a more neutral state,
-        # then switch it into External-trigger-wait mode afterward, hoping
-        # that leaves it paused/waiting for the relay rather than free-
-        # running immediately. Verify with tools/diag_panel_query_state.py
-        # that getCurrentLED stays frozen right after arming but before the
-        # relay closes (not moving on its own) - if it's already changing
-        # before the relay ever closes, this ordering doesn't fix the
-        # lockstep problem either and should be reverted the same way.
+        # Also tried BEFORE set_trigger_mode(2)/set_camera_trigger(True) -
+        # also reverted: real-hardware testing (tools/diag_panel_query_state.py)
+        # showed isRunning stayed '0' even with --start sent in this
+        # position, so it provided no measurable benefit either way -
+        # removed rather than kept as unproven complexity. See
+        # _relay_on's own comment for the current hypothesis being tested
+        # instead (a real relay transition, not --start, may be what's
+        # actually needed to get isRunning set).
         def configure_one_panel():
             LEDPanel.reset()
             LEDPanel.set_mode(1)  # response-time-measurement mode, no preceding --stop
             LEDPanel.set_speed_ms(switch_time_ms)
-            LEDPanel.start()
             LEDPanel.set_trigger_mode(2)
             LEDPanel.set_camera_trigger(True)
 
