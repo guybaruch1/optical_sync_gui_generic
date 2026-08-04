@@ -12,7 +12,7 @@ mode numbers and the all_leds_off-vs-stop distinction.
 
 import logging
 import time
-from subprocess import check_call, check_output, CalledProcessError
+from subprocess import check_call, CalledProcessError
 
 _logger = logging.getLogger(__name__)
 
@@ -57,18 +57,53 @@ class LEDPanel:
     def _query(args):
         """Like _run, but for read-only --get*/--isRunning commands that
         print their answer to stdout instead of just succeeding/failing.
-        Returns the raw stripped stdout text - deliberately not parsed
-        into an int/bool, since the exact output format for each of these
-        query commands hasn't been confirmed against real hardware yet;
+
+        LED-Panel.exe writes that answer via the low-level WriteConsole
+        API, which produces NOTHING when stdout is redirected to a pipe
+        or file - confirmed on real hardware: `LED-Panel.exe --isRunning`
+        prints fine in a real terminal, but
+        `LED-Panel.exe --isRunning > out.txt` leaves out.txt empty.
+        subprocess.check_output can't capture this at all (it redirects
+        to a pipe internally), so this instead runs the command with NO
+        redirection at all (check_call, same as _run - it inherits
+        THIS process's own real console) and reads the text straight out
+        of the console's own screen buffer, at the cursor position where
+        it landed.
+
+        Only works when this process itself has a real, native Windows
+        console attached (a plain cmd.exe/PowerShell.exe window) - some
+        IDE-integrated "Run" consoles use their own pseudo-console instead
+        of attaching a real one, which raises RuntimeError here with a
+        message saying so rather than a cryptic pywintypes error.
+        Returns the raw stripped text - deliberately not parsed into an
+        int/bool, since the exact output format for each of these query
+        commands hasn't been confirmed against real hardware yet;
         callers/diagnostic scripts print it as-is."""
+        import win32console
+
         cmd = [LEDPanel.exe_name] + args.split()
-        retries = 3
         _logger.info("Querying cmd: %s", " ".join(cmd))
+
+        try:
+            stdout_handle = win32console.GetStdHandle(win32console.STD_OUTPUT_HANDLE)
+            info_before = stdout_handle.GetConsoleScreenBufferInfo()
+        except Exception as exc:
+            raise RuntimeError(
+                "LEDPanel._query needs a real, native Windows console attached to capture "
+                "LED-Panel.exe's --get*/--isRunning output (it writes via WriteConsole, which "
+                "produces nothing under redirection) - run this from a plain cmd.exe/"
+                "PowerShell.exe window, not an IDE-integrated console: {}".format(exc)
+            )
+        cursor_before = info_before["CursorPosition"]
+        buffer_width = info_before["Size"].X
+
+        retries = 3
         last_error = None
         try:
             while retries > 0:
                 try:
-                    return check_output(cmd, text=True).strip()
+                    check_call(cmd)
+                    return LEDPanel._read_console_output(stdout_handle, cursor_before, buffer_width)
                 except (CalledProcessError, FileNotFoundError) as e:
                     last_error = e
                     retries -= 1
@@ -80,6 +115,25 @@ class LEDPanel:
             )
         finally:
             time.sleep(LEDPanel.cmd_delay)
+
+    @staticmethod
+    def _read_console_output(stdout_handle, cursor_before, buffer_width):
+        """Reads every screen-buffer row from cursor_before (where the
+        cursor was right before the query command ran) through wherever
+        the cursor ended up after it - i.e. exactly the text that command
+        just printed, nothing that was already on screen beforehand."""
+        info_after = stdout_handle.GetConsoleScreenBufferInfo()
+        cursor_after = info_after["CursorPosition"]
+
+        import win32console
+
+        lines = []
+        y = cursor_before.Y
+        while y <= cursor_after.Y:
+            text = stdout_handle.ReadConsoleOutputCharacter(buffer_width, win32console.PyCOORDType(0, y))
+            lines.append(text.rstrip())
+            y += 1
+        return "\n".join(lines).strip()
 
     @staticmethod
     def all_leds_on():
