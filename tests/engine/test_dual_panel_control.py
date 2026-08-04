@@ -100,13 +100,15 @@ def test_start_scanning_with_dual_panel_config_configures_both_panels_and_closes
         assert mock_run_on_both.call_args[0][0] == DUAL_PANEL_CONFIG
         # Actually invoke the action callback _run_on_both_panels was given,
         # to confirm it sends reset() first (unconditionally clearing
-        # whatever state the panel was left in), then EXACTLY the 4-command
+        # whatever state the panel was left in), then the 4-command
         # sequence confirmed on real hardware to produce continuous
         # stepping once triggered - no --stop
         # (response_time_measurement_mode()/stop() bake one in, confirmed
         # via real-hardware testing to break trigger-mode stepping) and no
         # set_direction_single (absent from the confirmed-working reference
-        # sequence too).
+        # sequence too) - then start() last, an attempt to explicitly
+        # restore whatever internal "running" state a prior --stop cleared
+        # (see this module's own start_scanning docstring/comment).
         action = mock_run_on_both.call_args[0][1]
         action()
         mock_led_panel.reset.assert_called_once()
@@ -117,9 +119,7 @@ def test_start_scanning_with_dual_panel_config_configures_both_panels_and_closes
         mock_led_panel.set_speed_ms.assert_called_once_with(5)
         mock_led_panel.set_trigger_mode.assert_called_once_with(2)
         mock_led_panel.set_camera_trigger.assert_called_once_with(True)
-        # .start() is never called for the dual-panel/trigger-mode case -
-        # closing the relay is what kicks off stepping, not --start.
-        mock_led_panel.start.assert_not_called()
+        mock_led_panel.start.assert_called_once()
 
         mock_relay_on.assert_called_once_with(DUAL_PANEL_CONFIG)
 
