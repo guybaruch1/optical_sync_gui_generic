@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-from tools.panel_drift_analysis import (
+from tools.panel_drift.panel_drift_analysis import (
     parse_gap_series, count_timestamp_discontinuities, linear_fit_rate, bin_series, find_transitions,
     compute_local_rates, summarize_drift, export_drift_over_time_plot, export_local_rate_plot,
     export_rate_consistency_plot, export_overlay_plot,

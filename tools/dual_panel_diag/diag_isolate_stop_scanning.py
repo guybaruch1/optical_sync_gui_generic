@@ -8,8 +8,8 @@ own, and only sending LEDPanel.stop() (--stop) to each panel breaks the
 next run. engine/dual_panel_control.py's stop_scanning() has since been
 fixed to call LEDPanel.reset() instead for the dual-panel case - see its
 own comment for the fix and CLAUDE.md's dual-panel section for the full
-trail (real-hardware testing via tools/diag_panel_query_state.py/
-tools/diag_arm_sequence_sweep.py that ruled out every start_scanning-side
+trail (real-hardware testing via tools/dual_panel_diag/diag_panel_query_state.py/
+tools/dual_panel_diag/diag_arm_sequence_sweep.py that ruled out every start_scanning-side
 fix first). The "full" variant below now exercises the FIXED
 stop_scanning() (LEDPanel.reset(), not .stop()) - kept as a way to
 re-isolate a similar issue in the future, not because this one is still
@@ -30,23 +30,23 @@ isolation:
 
 HOW TO USE: set VARIANT below, run this script (it arms+steps for 10s,
 runs just that one cleanup variant, then exits), then immediately run
-this script AGAIN (or tools/diag_app_start_scanning.py) and watch whether
+this script AGAIN (or tools/dual_panel_diag/diag_app_start_scanning.py) and watch whether
 THAT next run steps or not. Repeat with a different VARIANT to compare.
 
-Run from the repo root: python tools/diag_isolate_stop_scanning.py
+Run from the repo root: python tools/dual_panel_diag/diag_isolate_stop_scanning.py
 """
 
 import os
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from settings import load_settings
 from engine.led_panel import LEDPanel
 import engine.dual_panel_control as dual_panel_control
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Which cleanup behavior to run after arming+stepping - see module
 # docstring for what each one isolates.
@@ -99,7 +99,7 @@ def main():
 
     print(
         "Done - now run this script again (same or a different VARIANT) or "
-        "tools/diag_app_start_scanning.py, and report whether THAT next run steps."
+        "tools/dual_panel_diag/diag_app_start_scanning.py, and report whether THAT next run steps."
     )
 
 

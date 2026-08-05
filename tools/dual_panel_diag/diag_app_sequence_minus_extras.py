@@ -20,7 +20,7 @@ This script is kept as a way to re-verify the exact 4-command sequence in
 isolation from the rest of the app, using the app's real hub-switching
 plumbing (_run_on_both_panels/_relay_on/_relay_off).
 
-Run from the repo root: python tools/diag_app_sequence_minus_extras.py
+Run from the repo root: python tools/dual_panel_diag/diag_app_sequence_minus_extras.py
 Watch the physical panels while it runs.
 """
 
@@ -28,7 +28,7 @@ import os
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from settings import load_settings
 from engine.led_panel import LEDPanel
@@ -36,7 +36,7 @@ import engine.dual_panel_control as dual_panel_control
 
 
 def main():
-    settings = load_settings(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "settings.yaml"))
+    settings = load_settings(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "settings.yaml"))
     dual_panel_config = settings["dual_panel"]
     switch_time_ms = 1
 

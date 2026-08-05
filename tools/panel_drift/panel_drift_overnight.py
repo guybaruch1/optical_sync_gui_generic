@@ -1,17 +1,17 @@
 """Standalone tool - NOT part of the shipped app, no automated tests for
 this file itself (same "thin hardware/IO script, pure logic tested
 elsewhere" split as every other tool in this family - the plotting/rate-
-consistency logic it calls into, tools/panel_drift_analysis.py, IS
-unit-tested).
+consistency logic it calls into, tools/panel_drift/panel_drift_analysis.py,
+IS unit-tested).
 
-Runs tools/panel_drift_measure.py many times back-to-back - as separate,
+Runs tools/panel_drift/panel_drift_measure.py many times back-to-back - as separate,
 independent OS processes, matching exactly how it's actually run by hand,
 since that's the execution mode the "alternating success/failure" bug was
 observed under - to check whether the measured panel-to-panel drift RATE
 is consistent run over run, not just within a single run. Meant to be
 left running unattended overnight.
 
-Does NOT modify tools/panel_drift_measure.py at all - it's invoked as an
+Does NOT modify tools/panel_drift/panel_drift_measure.py at all - it's invoked as an
 opaque subprocess, unchanged, using whatever PICK/DURATION_S/DEVICE_SERIAL/
 etc. are already configured there.
 
@@ -33,7 +33,7 @@ This script's own defenses against the old pattern are kept regardless -
 still useful belt-and-suspenders, and still needed for genuinely different
 failure modes (a hung/crashed subprocess, stale output files from an
 earlier session): each run's own resulting CSV is inspected afterward (via
-tools.panel_drift_analysis.summarize_drift) to classify PASS (at least
+tools.panel_drift.panel_drift_analysis.summarize_drift) to classify PASS (at least
 one real transition detected) vs FAIL (no transitions - the panels never
 stepped), independently of whether the subprocess itself crashed or
 completed silently. Failed runs are excluded from the rate-consistency
@@ -45,7 +45,7 @@ chance the panels are actually released before the next attempt
 (belt-and-suspenders beyond whatever panel_drift_measure.py's own cleanup
 already tried).
 
-Run from the repo root: python tools/panel_drift_overnight.py
+Run from the repo root: python tools/panel_drift/panel_drift_overnight.py
 Writes output/overnight_runs/run_NNN/ (each run's own archived CSVs +
 console log), output/overnight_rate_consistency.png (measured rate per
 run, pass/fail marked), output/overnight_overlay.png (every successful
@@ -59,17 +59,17 @@ import subprocess
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from settings import load_settings, ensure_output_dir
 import engine.dual_panel_control as dual_panel_control
-from tools.panel_drift_analysis import summarize_drift, export_rate_consistency_plot, export_overlay_plot
+from tools.panel_drift.panel_drift_analysis import summarize_drift, export_rate_consistency_plot, export_overlay_plot
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SETTINGS_PATH = os.path.join(REPO_ROOT, "settings.yaml")
-PANEL_DRIFT_MEASURE_SCRIPT = os.path.join(REPO_ROOT, "tools", "panel_drift_measure.py")
+PANEL_DRIFT_MEASURE_SCRIPT = os.path.join(REPO_ROOT, "tools", "panel_drift", "panel_drift_measure.py")
 
-# How many times to run tools/panel_drift_measure.py back-to-back. Each
+# How many times to run tools/panel_drift/panel_drift_measure.py back-to-back. Each
 # successful run takes as long as that script's own DURATION_S (edit it
 # there, not here) - size this to fit your overnight window, and expect
 # roughly half as many usable/successful runs given the known alternating
@@ -93,7 +93,7 @@ DELAY_BETWEEN_RUNS_S = 5.0
 # bounding a truly hung one.
 PER_RUN_TIMEOUT_S = 600.0
 
-# Same tuned value tools/panel_drift_stats.py already uses (see its own
+# Same tuned value tools/panel_drift/panel_drift_stats.py already uses (see its own
 # comment) - real hardware showed 10s bins still left spurious transitions
 # from measurement noise, which risks misclassifying a run here (a run
 # could look "stepped" from noise alone at a finer bin size). Passed
@@ -101,11 +101,12 @@ PER_RUN_TIMEOUT_S = 600.0
 # generic default.
 BIN_SECONDS = 30.0
 
-# --- Minimal, standalone CSV loading - duplicated from tools/
-# panel_drift_stats.py on purpose, matching this project's existing
-# convention of keeping each hardware-adjacent tool script independently
-# runnable rather than sharing small helpers across them (see PICK/
-# DEVICE_SERIAL in tools/panel_drift_calibrate.py/panel_drift_measure.py). ---
+# --- Minimal, standalone CSV loading - duplicated from
+# tools/panel_drift/panel_drift_stats.py on purpose, matching this project's
+# existing convention of keeping each hardware-adjacent tool script
+# independently runnable rather than sharing small helpers across them (see
+# PICK/DEVICE_SERIAL in tools/panel_drift/panel_drift_calibrate.py and
+# panel_drift_measure.py). ---
 
 _BOOL_FIELDS = (
     "stream_a_frame_drop", "stream_b_frame_drop",
@@ -151,7 +152,7 @@ def load_rows(raw_csv_path, frame_drops_csv_path):
 
 
 def _archive_run_output(output_dir, run_dir):
-    """Moves (not copies) tools/panel_drift_measure.py's fixed-name output
+    """Moves (not copies) tools/panel_drift/panel_drift_measure.py's fixed-name output
     files into this run's own subdirectory immediately after it finishes -
     that script always writes to the SAME output/panel_drift_raw.csv etc.,
     so without this the next run would silently overwrite this one's
@@ -243,14 +244,14 @@ def main():
     os.makedirs(archive_dir, exist_ok=True)
 
     # Fails fast, before burning the whole batch on the same crash
-    # repeated N_RUNS times overnight - tools/panel_drift_measure.py can't
+    # repeated N_RUNS times overnight - tools/panel_drift/panel_drift_measure.py can't
     # do anything at all without this (it crashes immediately, before
     # touching the camera/relay/panels), so there's no point starting.
     calibration_path = os.path.join(output_dir, "panel_drift_calibration.yaml")
     if not os.path.exists(calibration_path):
         print(
-            "ERROR: {} does not exist - tools/panel_drift_measure.py cannot run at all without "
-            "it. Run tools/panel_drift_calibrate.py first, then re-run this script.".format(calibration_path)
+            "ERROR: {} does not exist - tools/panel_drift/panel_drift_measure.py cannot run at all without "
+            "it. Run tools/panel_drift/panel_drift_calibrate.py first, then re-run this script.".format(calibration_path)
         )
         return
 

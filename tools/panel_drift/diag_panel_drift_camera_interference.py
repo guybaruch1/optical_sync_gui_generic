@@ -2,11 +2,11 @@
 
 Isolates whether OPENING/STREAMING A REALSENSE CAMERA PIPELINE alongside
 already-armed dual-panel stepping is what stops the panels from
-continuing to step, for tools/panel_drift_measure.py's "both panels stuck
+continuing to step, for tools/panel_drift/panel_drift_measure.py's "both panels stuck
 on LED 0, physically confirmed not stepping" report.
 
 engine.dual_panel_control.start_scanning's dual-panel sequence is already
-confirmed (tools/diag_app_start_scanning.py, tools/
+confirmed (tools/dual_panel_diag/diag_app_start_scanning.py, tools/
 diag_baseline_demo_sequence.py) to produce continuous stepping ON ITS
 OWN, with NO camera involved at all - so the one new variable
 panel_drift_measure.py introduces is opening a bare rs.pipeline() and
@@ -19,7 +19,7 @@ at (if it does):
   STAGE 2: same armed state, but a camera pipeline is opened and actively
            pulls frames (like panel_drift_measure.py's frame_source loop).
 
-Run from the repo root: python tools/diag_panel_drift_camera_interference.py
+Run from the repo root: python tools/panel_drift/diag_panel_drift_camera_interference.py
 Watch BOTH physical panels continuously through both stages - not just at
 the end - and report at which stage (if either) they stop advancing.
 """
@@ -28,7 +28,7 @@ import os
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import pyrealsense2 as rs
 
@@ -36,9 +36,9 @@ from settings import load_settings
 from state.gui_state import load_gui_state
 import engine.dual_panel_control as dual_panel_control
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Must match tools/panel_drift_measure.py's PICK - this is only testing
+# Must match tools/panel_drift/panel_drift_measure.py's PICK - this is only testing
 # camera interference, not detection, so an exact LED-position match
 # doesn't matter, just the same stream identity/resolution/fps.
 PICK = {

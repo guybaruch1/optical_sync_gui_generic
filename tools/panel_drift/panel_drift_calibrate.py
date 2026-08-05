@@ -1,8 +1,8 @@
 """Standalone tool - NOT part of the shipped app, no automated tests (same
 "hardware-only, no tests by design" bucket as engine/led_panel.py,
-engine/acroname_hub.py, tools/diag_*.py).
+engine/acroname_hub.py, tools/dual_panel_diag/diag_*.py).
 
-One-time setup for tools/panel_drift_measure.py: calibrates BOTH physical
+One-time setup for tools/panel_drift/panel_drift_measure.py: calibrates BOTH physical
 LED panels' positions/thresholds as seen by a SINGLE camera stream, so the
 measurement script can measure drift between the two panels using only
 that one stream as the timing reference - this eliminates the sensor-type
@@ -23,9 +23,9 @@ PICK below must point to a single stream that can see BOTH physical
 panels simultaneously in its own field of view - edit it if you want to
 test with a different stream than the default (D455 infrared/1).
 
-Run from the repo root: python tools/panel_drift_calibrate.py
+Run from the repo root: python tools/panel_drift/panel_drift_calibrate.py
 Writes output/panel_drift_calibration.yaml, consumed by
-tools/panel_drift_measure.py. Re-run this whenever the panels/camera are
+tools/panel_drift/panel_drift_measure.py. Re-run this whenever the panels/camera are
 physically moved.
 
 For each panel, an ROI-select window comes up first, then a threshold-
@@ -41,7 +41,7 @@ import os
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import cv2
 import numpy as np
@@ -58,14 +58,14 @@ from domain.realsense_utils import (
 from domain.calibration import assign_grid_ids, build_positions_with_thresholds
 from gui.pages.roi_select_page import _select_roi
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SETTINGS_PATH = os.path.join(REPO_ROOT, "settings.yaml")
 
 # Which single stream to test - MUST match the PICK in
-# tools/panel_drift_measure.py exactly (the measurement script re-declares
+# tools/panel_drift/panel_drift_measure.py exactly (the measurement script re-declares
 # its own copy rather than importing this one, matching this project's
 # existing convention of duplicating small constants across hardware-only
-# scripts rather than sharing them - see tools/diag_*.py). Edit both files
+# scripts rather than sharing them - see tools/dual_panel_diag/diag_*.py). Edit both files
 # together if you change this.
 PICK = {
     "stream_type": rs.stream.infrared,

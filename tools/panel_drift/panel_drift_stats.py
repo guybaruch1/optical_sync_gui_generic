@@ -1,10 +1,10 @@
 """Standalone tool - NOT part of the shipped app, no automated tests for
-this file itself (the analysis it calls into, tools/panel_drift_analysis.py,
-IS unit-tested - see tests/tools/test_panel_drift_analysis.py - same "pure
+this file itself (the analysis it calls into, tools/panel_drift/panel_drift_analysis.py,
+IS unit-tested - see tests/tools/panel_drift/test_panel_drift_analysis.py - same "pure
 logic is tested, the thin hardware/IO script around it isn't" split every
 other tool in this project follows).
 
-Offline analysis of a completed tools/panel_drift_measure.py run: reads the
+Offline analysis of a completed tools/panel_drift/panel_drift_measure.py run: reads the
 CSVs it already wrote (output/panel_drift_raw.csv, output/
 panel_drift_frame_drops.csv) - no camera, no LED panels, no Acroname hub
 needed - and produces every plot plus a console summary answering "what is
@@ -29,7 +29,7 @@ the drift between the two LED panels":
   timestamp, the local rate at each one, and the headline number - the
   overall linear-fit drift rate in ms/s, ms/min, and ms/hour.
 
-Run from the repo root: python tools/panel_drift_stats.py
+Run from the repo root: python tools/panel_drift/panel_drift_stats.py
 Edit RAW_CSV_PATH/FRAME_DROPS_CSV_PATH/BIN_SECONDS below if your files or
 desired smoothing window differ from the defaults.
 """
@@ -38,16 +38,16 @@ import csv
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from settings import load_settings, ensure_output_dir
 from domain.plot_export import export_session_plot
-from tools.panel_drift_analysis import export_drift_over_time_plot, export_local_rate_plot
+from tools.panel_drift.panel_drift_analysis import export_drift_over_time_plot, export_local_rate_plot
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SETTINGS_PATH = os.path.join(REPO_ROOT, "settings.yaml")
 
-# Edit these if you moved the CSVs tools/panel_drift_measure.py wrote, or
+# Edit these if you moved the CSVs tools/panel_drift/panel_drift_measure.py wrote, or
 # want to point at a different output directory's files. None (the
 # default) resolves both against settings.yaml's paths.output_dir.
 RAW_CSV_PATH = None
@@ -160,7 +160,7 @@ def main():
     if summary["n_timestamp_discontinuities"]:
         print(
             "NOTE: {} camera HW-timestamp discontinuity(ies) detected during this run (the raw "
-            "frame timestamp went backward at least once - see tools/panel_drift_analysis.py's "
+            "frame timestamp went backward at least once - see tools/panel_drift/panel_drift_analysis.py's "
             "parse_gap_series). Elapsed time is reconstructed by holding steady across each one, so "
             "the plots/rate below stay internally consistent, but the true real-world duration of "
             "each glitch is unknown and not included in the covered elapsed time above.".format(

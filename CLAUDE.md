@@ -154,13 +154,13 @@ on its next arm, while a run following one that was INTERRUPTED before
 the `start_scanning` side - trying `LEDPanel.start()` in 3 different
 positions, forcing a real transition on `set_camera_trigger`/
 `set_trigger_mode`, forcing a real transition on the relay itself - all
-confirmed via `tools/diag_panel_query_state.py` (queries `LED-Panel.exe`'s
+confirmed via `tools/dual_panel_diag/diag_panel_query_state.py` (queries `LED-Panel.exe`'s
 own `--isRunning`/`--getCurrentLED`/etc., via a `pywin32`
 `win32console`-based reader, since these commands write via the low-level
 `WriteConsole` API and produce nothing under redirection - only works from
 a real, native Windows console, not an IDE-integrated one) to make no
 difference: `isRunning` never got set, and the panel never stepped.
-`tools/diag_arm_sequence_sweep.py` then automated an exhaustive sweep of
+`tools/dual_panel_diag/diag_arm_sequence_sweep.py` then automated an exhaustive sweep of
 12 arm-sequence variants (each starting from a `stop_scanning()`-forced
 "just stopped" precondition, detecting actual stepping automatically via
 `getCurrentLED` changing between 2 samples) and confirmed NONE of that
@@ -188,7 +188,7 @@ without the poisoning. `start_scanning`'s own arm sequence is back to the
 plain sequence above - none of the accumulated complexity was ever needed
 once this was fixed at its actual source. Do not add `LEDPanel.stop()`
 back into the dual-panel `stop_scanning` path without re-confirming on
-real hardware first (`tools/diag_panel_query_state.py`, checking
+real hardware first (`tools/dual_panel_diag/diag_panel_query_state.py`, checking
 `isRunning` after the NEXT arm).
 
 Any panel config change (e.g. switch time)

@@ -1,18 +1,23 @@
-"""Pure analysis/plotting for tools/panel_drift_measure.py's/tools/
-panel_drift_stats.py's "how much do the two LED panels drift apart"
-question. No Qt, no pyrealsense2, no hardware - takes the same row dicts
-domain.csv_export.export_session_csvs writes/domain.plot_export.
+"""Pure analysis/plotting for tools/panel_drift/panel_drift_measure.py's/
+tools/panel_drift/panel_drift_stats.py's "how much do the two LED panels
+drift apart" question. No Qt, no pyrealsense2, no hardware - takes the same
+row dicts domain.csv_export.export_session_csvs writes/domain.plot_export.
 export_session_plot reads.
 
-Lives in tools/, NOT domain/, even though it's pure/tested logic like
-everything in domain/ - it's used only by this project's standalone
-panel-drift tools (tools/panel_drift_stats.py, tools/
-panel_drift_overnight.py), never by the real app (gui/, engine/, main.py),
-so it belongs with the rest of that niche, occasional-use tooling rather
-than in the core app's own reusable logic layer. tools/__init__.py exists
-solely so this module (and its tests, tests/tools/test_panel_drift_analysis.py)
-can be imported normally - the other tools/*.py scripts remain standalone,
-run directly, no package structure needed for them.
+Lives in tools/panel_drift/, NOT domain/, even though it's pure/tested
+logic like everything in domain/ - it's used only by this project's
+standalone panel-drift tools (tools/panel_drift/panel_drift_stats.py,
+tools/panel_drift/panel_drift_overnight.py), never by the real app (gui/,
+engine/, main.py), so it belongs with the rest of that niche,
+occasional-use tooling rather than in the core app's own reusable logic
+layer - grouped together with its sibling panel-drift scripts under
+tools/panel_drift/, separate from the dual-panel arm-sequence diagnostics
+under tools/dual_panel_diag/ (a different investigation). tools/__init__.py
+and tools/panel_drift/__init__.py exist solely so this module (and its
+tests, tests/tools/panel_drift/test_panel_drift_analysis.py) can be
+imported normally as tools.panel_drift.panel_drift_analysis - every other
+tools/*.py script remains standalone, run directly, no package structure
+needed for them.
 
 Real hardware runs showed the raw position_gap_ms series is NOT simply a
 clean staircase - a run can show several-second-long oscillation between
@@ -180,7 +185,7 @@ def summarize_drift(rows, bin_seconds=10.0, value_key="position_gap_ms",
     drift rate, bins+smooths it, and derives clean transitions/local rates
     from the smoothed series. Returns a dict consumed by both
     export_drift_over_time_plot/export_local_rate_plot and by callers that
-    just want the numbers (e.g. tools/panel_drift_stats.py's console
+    just want the numbers (e.g. tools/panel_drift/panel_drift_stats.py's console
     summary) - elapsed_s_range is None if there's nothing usable at all."""
     elapsed_s, values = parse_gap_series(rows, value_key, excluded_key)
     fit = linear_fit_rate(elapsed_s, values)

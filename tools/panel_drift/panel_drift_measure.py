@@ -1,9 +1,9 @@
 """Standalone tool - NOT part of the shipped app, no automated tests (same
 "hardware-only, no tests by design" bucket as engine/session_engine.py,
-engine/led_panel.py, tools/diag_*.py).
+engine/led_panel.py, tools/dual_panel_diag/diag_*.py).
 
 Measures drift between the two physical LED panels used in dual-panel
-mode, using a SINGLE camera stream (see tools/panel_drift_calibrate.py's
+mode, using a SINGLE camera stream (see tools/panel_drift/panel_drift_calibrate.py's
 module docstring for why - it eliminates the sensor-type confound of
 comparing two different physical imagers).
 
@@ -26,9 +26,9 @@ pick twice, since there's only one real stream here, is untested and
 risks a duplicate-enable_stream error on real hardware) - instead opens a
 small custom single-stream rs.pipeline() loop directly.
 
-Run from the repo root: python tools/panel_drift_measure.py
+Run from the repo root: python tools/panel_drift/panel_drift_measure.py
 Requires output/panel_drift_calibration.yaml (see
-tools/panel_drift_calibrate.py). Runs for this script's own DURATION_S
+tools/panel_drift/panel_drift_calibrate.py). Runs for this script's own DURATION_S
 constant (deliberately NOT settings.yaml's test.duration_s - this test is
 run far longer than a normal live session, and the two must not be
 coupled through one shared config value), or press Ctrl+C to stop early.
@@ -53,7 +53,7 @@ import sys
 import time
 import signal
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import cv2
 import yaml
@@ -73,10 +73,10 @@ from domain.plot_export import export_session_plot
 
 LIVE_VIEW_WINDOW = "Panel Drift - Live Capture (green=on, red=off, q=quit)"
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SETTINGS_PATH = os.path.join(REPO_ROOT, "settings.yaml")
 
-# Must match tools/panel_drift_calibrate.py's PICK exactly - see that
+# Must match tools/panel_drift/panel_drift_calibrate.py's PICK exactly - see that
 # script's module docstring for why these aren't shared/imported.
 PICK = {
     "stream_type": rs.stream.infrared,
@@ -141,7 +141,7 @@ def load_panel_calibration(output_dir):
             or stored_pick["fps"] != PICK["fps"]):
         print(
             "WARNING: {} was calibrated against a different PICK ({!r}) than this script's own "
-            "PICK ({!r}) - re-run tools/panel_drift_calibrate.py, or edit this script's PICK to "
+            "PICK ({!r}) - re-run tools/panel_drift/panel_drift_calibrate.py, or edit this script's PICK to "
             "match.".format(path, stored_pick, {
                 "stream_type": PICK["stream_type"].name, "stream_index": PICK["stream_index"],
                 "format": PICK["format"].name, "width": PICK["width"], "height": PICK["height"],
@@ -191,8 +191,8 @@ def export_drift_over_time_plot(rows, path):
     # which under plain subtraction corrupted every row after it into a
     # nonsensical NEGATIVE elapsed time. A backward step between two
     # consecutive rows is clamped to a 0-duration "glitch" instead - see
-    # tools/panel_drift_analysis.py's parse_gap_series for the same fix,
-    # applied there for tools/panel_drift_stats.py's offline analysis.
+    # tools/panel_drift/panel_drift_analysis.py's parse_gap_series for the same fix,
+    # applied there for tools/panel_drift/panel_drift_stats.py's offline analysis.
     elapsed_s = []
     elapsed_us = 0.0
     prev_raw = None
@@ -300,7 +300,7 @@ def main():
     if len(panel_a_xy) != len(panel_b_xy):
         print(
             "WARNING: panel A has {} calibrated LED(s) but panel B has {} - drift readings will "
-            "likely be meaningless. Re-run tools/panel_drift_calibrate.py.".format(
+            "likely be meaningless. Re-run tools/panel_drift/panel_drift_calibrate.py.".format(
                 len(panel_a_xy), len(panel_b_xy)
             )
         )

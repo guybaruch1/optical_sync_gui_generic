@@ -9,10 +9,10 @@ Purpose: confirm the exact known-good sequence still produces visible
 continuous LED stepping on this rig RIGHT NOW, as an unambiguous baseline.
 If this ALSO fails to step, the problem is environmental (wiring changed,
 panel firmware, panel power, etc.) - NOT this app's integration of the
-same sequence. If this WORKS, compare against tools/diag_app_start_scanning.py
+same sequence. If this WORKS, compare against tools/dual_panel_diag/diag_app_start_scanning.py
 (the app's actual integrated function) to see where they diverge.
 
-Run from the repo root: python tools/diag_baseline_demo_sequence.py
+Run from the repo root: python tools/dual_panel_diag/diag_baseline_demo_sequence.py
 Watch the physical panels while it runs - one LED should visibly step
 across each panel, continuously, after the final relay pulse.
 """
@@ -21,7 +21,7 @@ import os
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from settings import load_settings
 from engine.acroname_hub import AcronameHub
@@ -29,7 +29,7 @@ from engine.led_panel import LEDPanel
 
 
 def main():
-    settings = load_settings(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "settings.yaml"))
+    settings = load_settings(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "settings.yaml"))
     dp = settings["dual_panel"]
     stream_a_port = dp["stream_a_panel_port"]
     stream_b_port = dp["stream_b_panel_port"]

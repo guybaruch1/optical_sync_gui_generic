@@ -37,7 +37,7 @@ starting state.
 
 None of this mutates engine/dual_panel_control.py - it calls the app's
 real _run_on_both_panels/_relay_on/_relay_off directly (same pattern
-tools/diag_app_sequence_minus_extras.py already established) with
+tools/dual_panel_diag/diag_app_sequence_minus_extras.py already established) with
 throwaway configure functions defined only in this script, so a variant
 that works can be copied into start_scanning() deliberately afterward,
 rather than this script silently mutating shared code mid-sweep.
@@ -48,20 +48,20 @@ the panels is NOT required (detection is automatic), but feel free to -
 if one variant visibly steps, you can Ctrl+C once its own summary line
 prints without waiting for the rest to finish.
 
-Run from the repo root: python tools/diag_arm_sequence_sweep.py
+Run from the repo root: python tools/dual_panel_diag/diag_arm_sequence_sweep.py
 """
 
 import os
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from settings import load_settings
 from engine.led_panel import LEDPanel
 import engine.dual_panel_control as dual_panel_control
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # How long to let a just-armed panel settle before the first getCurrentLED
 # sample, and how long to wait between the first and second sample to give
@@ -204,7 +204,7 @@ VARIANTS = [
 
 def _sample_both_panels(dual_panel_config):
     """Hub-switches to each panel once and reads isRunning/getCurrentLED -
-    cheap subset of tools/diag_panel_query_state.py's 8-field query, since
+    cheap subset of tools/dual_panel_diag/diag_panel_query_state.py's 8-field query, since
     this runs twice per variant and there are many variants."""
     from engine.acroname_hub import AcronameHub
 

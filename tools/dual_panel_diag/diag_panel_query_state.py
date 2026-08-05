@@ -17,7 +17,7 @@ Queries at three points:
      it settle - what "should be stepping" looks like.
   3. AFTER disarming (stop_scanning()) - what "cleanly stopped" looks like.
 
-Run from the repo root: python tools/diag_panel_query_state.py
+Run from the repo root: python tools/dual_panel_diag/diag_panel_query_state.py
 Compare the printed state across a run that visibly steps and one that
 doesn't (letting each complete naturally) to see what actually differs -
 this is real, direct evidence from the panel's own firmware instead of
@@ -28,13 +28,13 @@ import os
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from settings import load_settings
 from engine.led_panel import LEDPanel
 import engine.dual_panel_control as dual_panel_control
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def _query_one_panel(label):
