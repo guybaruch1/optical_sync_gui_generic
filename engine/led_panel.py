@@ -232,7 +232,7 @@ class LEDPanel:
         # mapping turned out not to match this panel's actual firmware
         # behavior, reverted after real-hardware testing). Not currently
         # called from anywhere - exposed for diagnostics/future use
-        # (tools/diag_panel_query_state.py checks its current state via
+        # (tools/dual_panel_diag/diag_panel_query_state.py checks its current state via
         # get_stop_trigger/get_stop_trigger_state). Confirm the real
         # polarity on hardware before wiring this into anything that matters.
         LEDPanel._run("--setStopTrigger {}".format(0 if enabled else 1))
