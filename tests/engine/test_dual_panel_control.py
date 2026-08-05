@@ -134,7 +134,7 @@ def test_stop_scanning_with_dual_panel_config_releases_relay_before_touching_hub
                        side_effect=lambda: call_order.append("_relay_off")) as mock_relay_off:
         stop_scanning(DUAL_PANEL_CONFIG)
         # LEDPanel.reset(), NOT LEDPanel.stop() - --stop was confirmed (via
-        # tools/diag_arm_sequence_sweep.py's exhaustive testing of the
+        # tools/dual_panel_diag/diag_arm_sequence_sweep.py's exhaustive testing of the
         # arm-sequence side) to be the actual root cause of the "only steps
         # once, or after an interrupted run" bug: it sets some internal
         # panel state nothing in start_scanning's arm sequence can undo.
