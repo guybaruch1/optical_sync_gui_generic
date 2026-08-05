@@ -90,15 +90,15 @@ def start_scanning(switch_time_ms, scan_direction, dual_panel_config):
         # This is deliberately the plain, minimal sequence -
         # docs/config_tigger_mode.bat's own 4 commands, plus reset() as a
         # cheap "known starting position" step. A long investigation (see
-        # git history around tools/diag_panel_query_state.py and
-        # tools/diag_arm_sequence_sweep.py for the full trail) piled a lot
+        # git history around tools/dual_panel_diag/diag_panel_query_state.py and
+        # tools/dual_panel_diag/diag_arm_sequence_sweep.py for the full trail) piled a lot
         # more onto this - LEDPanel.start() in 3 different positions,
         # forcing a real transition on set_camera_trigger/set_trigger_mode,
         # forcing a real transition on the relay itself - all of it chasing
         # the actual bug: a run following one that completed NORMALLY never
         # stepped on its next arm, while a run following one that was
         # INTERRUPTED before stop_scanning() ran always did. An automated
-        # sweep of 12 variants (tools/diag_arm_sequence_sweep.py) confirmed
+        # sweep of 12 variants (tools/dual_panel_diag/diag_arm_sequence_sweep.py) confirmed
         # none of that arm-sequence complexity ever fixed it - the ONLY
         # variant that produced stepping was calling --start right after
         # entering External trigger mode, which free-runs the panel on its
@@ -302,7 +302,7 @@ def _relay_on(dual_panel_config):
     # edge/pulse-based: toggleState()/sequences, not a held-closed state),
     # the LED Panel's isRunning flag may be set by detecting a genuine
     # open->closed TRANSITION, not simply by the relay BEING closed. Confirmed
-    # via real-hardware testing (tools/diag_panel_query_state.py) that this
+    # via real-hardware testing (tools/dual_panel_diag/diag_panel_query_state.py) that this
     # guaranteed transition DOES reach the panel - getCameraTriggerState
     # flips 0->1 right after arming, proving the panel electrically detects
     # the pulse - but isRunning still stayed '0' and the panel still didn't
