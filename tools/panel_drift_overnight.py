@@ -1,7 +1,7 @@
 """Standalone tool - NOT part of the shipped app, no automated tests for
 this file itself (same "thin hardware/IO script, pure logic tested
 elsewhere" split as every other tool in this family - the plotting/rate-
-consistency logic it calls into, domain/panel_drift_analysis.py, IS
+consistency logic it calls into, tools/panel_drift_analysis.py, IS
 unit-tested).
 
 Runs tools/panel_drift_measure.py many times back-to-back - as separate,
@@ -33,7 +33,7 @@ This script's own defenses against the old pattern are kept regardless -
 still useful belt-and-suspenders, and still needed for genuinely different
 failure modes (a hung/crashed subprocess, stale output files from an
 earlier session): each run's own resulting CSV is inspected afterward (via
-domain.panel_drift_analysis.summarize_drift) to classify PASS (at least
+tools.panel_drift_analysis.summarize_drift) to classify PASS (at least
 one real transition detected) vs FAIL (no transitions - the panels never
 stepped), independently of whether the subprocess itself crashed or
 completed silently. Failed runs are excluded from the rate-consistency
@@ -63,7 +63,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from settings import load_settings, ensure_output_dir
 import engine.dual_panel_control as dual_panel_control
-from domain.panel_drift_analysis import summarize_drift, export_rate_consistency_plot, export_overlay_plot
+from tools.panel_drift_analysis import summarize_drift, export_rate_consistency_plot, export_overlay_plot
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SETTINGS_PATH = os.path.join(REPO_ROOT, "settings.yaml")

@@ -3,9 +3,9 @@ import os
 
 import pytest
 
-from domain.panel_drift_analysis import (
-    parse_gap_series, linear_fit_rate, bin_series, find_transitions, compute_local_rates,
-    summarize_drift, export_drift_over_time_plot, export_local_rate_plot,
+from tools.panel_drift_analysis import (
+    parse_gap_series, count_timestamp_discontinuities, linear_fit_rate, bin_series, find_transitions,
+    compute_local_rates, summarize_drift, export_drift_over_time_plot, export_local_rate_plot,
     export_rate_consistency_plot, export_overlay_plot,
 )
 
@@ -33,6 +33,41 @@ def test_parse_gap_series_skips_excluded_and_missing():
 def test_parse_gap_series_returns_empty_for_no_usable_rows():
     assert parse_gap_series([]) == ([], [])
     assert parse_gap_series([{"stream_a_ts_us": None, "position_gap_ms": 1.0}]) == ([], [])
+
+
+def test_parse_gap_series_holds_steady_across_a_backward_timestamp_jump():
+    # Mirrors a real ~5000s dual-panel run where the camera's own HW frame
+    # timestamp reset partway through (row 3's raw ts_us drops from 10s to
+    # 2s, as if the counter wrapped/reset) - elapsed time must hold steady
+    # across that one boundary (not go backward), then keep accumulating
+    # forward from the RAW deltas afterward, rather than corrupting every
+    # row after it into a negative elapsed time.
+    rows = [
+        _row(0, 0.0),
+        _row(5_000_000, 0.0),
+        _row(10_000_000, 1.0),
+        _row(2_000_000, 1.0),   # backward jump: 10s -> 2s
+        _row(4_000_000, 1.0),   # +2s from the post-jump raw value
+        _row(6_000_000, 2.0),   # +2s more
+    ]
+    elapsed_s, values = parse_gap_series(rows)
+    assert elapsed_s == [0.0, 5.0, 10.0, 10.0, 12.0, 14.0]
+    assert values == [0.0, 0.0, 1.0, 1.0, 1.0, 2.0]
+    # Never goes backward, even across the glitch.
+    assert all(b >= a for a, b in zip(elapsed_s, elapsed_s[1:]))
+
+
+def test_count_timestamp_discontinuities_zero_for_clean_monotonic_series():
+    rows = [_row(0, 0.0), _row(1_000_000, 0.0), _row(2_000_000, 1.0)]
+    assert count_timestamp_discontinuities(rows) == 0
+
+
+def test_count_timestamp_discontinuities_counts_backward_jumps():
+    rows = [
+        _row(0, 0.0), _row(5_000_000, 0.0), _row(10_000_000, 1.0),
+        _row(2_000_000, 1.0), _row(4_000_000, 1.0),
+    ]
+    assert count_timestamp_discontinuities(rows) == 1
 
 
 def test_linear_fit_rate_recovers_a_known_slope():

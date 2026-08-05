@@ -2,7 +2,17 @@
 panel_drift_stats.py's "how much do the two LED panels drift apart"
 question. No Qt, no pyrealsense2, no hardware - takes the same row dicts
 domain.csv_export.export_session_csvs writes/domain.plot_export.
-export_session_plot reads, same convention as every other domain module.
+export_session_plot reads.
+
+Lives in tools/, NOT domain/, even though it's pure/tested logic like
+everything in domain/ - it's used only by this project's standalone
+panel-drift tools (tools/panel_drift_stats.py, tools/
+panel_drift_overnight.py), never by the real app (gui/, engine/, main.py),
+so it belongs with the rest of that niche, occasional-use tooling rather
+than in the core app's own reusable logic layer. tools/__init__.py exists
+solely so this module (and its tests, tests/tools/test_panel_drift_analysis.py)
+can be imported normally - the other tools/*.py scripts remain standalone,
+run directly, no package structure needed for them.
 
 Real hardware runs showed the raw position_gap_ms series is NOT simply a
 clean staircase - a run can show several-second-long oscillation between
@@ -34,25 +44,68 @@ import matplotlib.pyplot as plt
 def parse_gap_series(rows, value_key="position_gap_ms", excluded_key="position_gap_ms_excluded",
                       ts_key="stream_a_ts_us"):
     """Extracts (elapsed_s, value) pairs for one metric column, in elapsed
-    seconds from the first row's own HW frame timestamp - accurate
-    regardless of any assumed constant fps. Skips excluded/missing samples
-    entirely (not NaN-padded, unlike domain.plot_export.export_session_plot -
-    this only ever plots one series, so there's no multi-series pair_index
-    alignment to preserve). Returns ([elapsed_s, ...], [value, ...]), both
-    empty if there's nothing usable."""
+    seconds reconstructed from the row-to-row deltas of the first row's own
+    HW frame timestamp - accurate regardless of any assumed constant fps.
+    Skips excluded/missing samples entirely (not NaN-padded, unlike
+    domain.plot_export.export_session_plot - this only ever plots one
+    series, so there's no multi-series pair_index alignment to preserve).
+    Returns ([elapsed_s, ...], [value, ...]), both empty if there's nothing
+    usable.
+
+    Deliberately accumulates consecutive PER-ROW deltas rather than a
+    single `raw_ts_us - first_row_ts_us` subtraction - a real ~5000s
+    dual-panel run showed the camera's own HW frame timestamp can have a
+    one-off discontinuity (a downward jump/reset) partway through a long
+    run, which under the plain-subtraction approach corrupted every row
+    after it into a nonsensical NEGATIVE elapsed time (and, downstream,
+    wild spurious spikes in compute_local_rates' derivative right at that
+    boundary). A backward step between two consecutive rows is clamped to
+    a 0-duration "glitch" - its true real-world duration is unknowable,
+    but holding elapsed time steady for just that one step keeps every row
+    after it correctly continuing forward from where it left off, instead
+    of the entire rest of the series being shifted into negative/wrong
+    territory. See count_timestamp_discontinuities to detect whether this
+    happened at all in a given run."""
     timestamped = [r for r in rows if r.get(ts_key) is not None]
     if not timestamped:
         return [], []
 
-    t0 = timestamped[0][ts_key]
     elapsed_s = []
     values = []
+    elapsed_us = 0.0
+    prev_raw = None
     for r in timestamped:
+        raw = r[ts_key]
+        if prev_raw is not None:
+            delta = raw - prev_raw
+            if delta < 0:
+                delta = 0  # discontinuity - hold steady rather than jump backward
+            elapsed_us += delta
+        prev_raw = raw
+
         if r.get(value_key) is None or r.get(excluded_key):
             continue
-        elapsed_s.append((r[ts_key] - t0) / 1_000_000.0)
+        elapsed_s.append(elapsed_us / 1_000_000.0)
         values.append(r[value_key])
     return elapsed_s, values
+
+
+def count_timestamp_discontinuities(rows, ts_key="stream_a_ts_us"):
+    """How many times the raw HW timestamp went backward from one row to
+    the next, in row order - each one is a moment where real elapsed time
+    across that boundary is not fully known (see parse_gap_series's own
+    comment on why it holds elapsed time steady rather than guessing).
+    0 for a clean run; a camera-timestamp reset/wraparound during a long
+    run shows up here as 1 (or more, if it happens more than once)."""
+    timestamped = [r for r in rows if r.get(ts_key) is not None]
+    count = 0
+    prev_raw = None
+    for r in timestamped:
+        raw = r[ts_key]
+        if prev_raw is not None and raw < prev_raw:
+            count += 1
+        prev_raw = raw
+    return count
 
 
 def linear_fit_rate(elapsed_s, values):
@@ -146,6 +199,7 @@ def summarize_drift(rows, bin_seconds=10.0, value_key="position_gap_ms",
         "binned": binned,
         "transitions": transitions,
         "local_rates": local_rates,
+        "n_timestamp_discontinuities": count_timestamp_discontinuities(rows),
     }
 
 

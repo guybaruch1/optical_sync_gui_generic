@@ -1,6 +1,6 @@
 """Standalone tool - NOT part of the shipped app, no automated tests for
-this file itself (the analysis it calls into, domain/panel_drift_analysis.py,
-IS unit-tested - see tests/domain/test_panel_drift_analysis.py - same "pure
+this file itself (the analysis it calls into, tools/panel_drift_analysis.py,
+IS unit-tested - see tests/tools/test_panel_drift_analysis.py - same "pure
 logic is tested, the thin hardware/IO script around it isn't" split every
 other tool in this project follows).
 
@@ -18,7 +18,7 @@ the drift between the two LED panels":
   binned/smoothed median plotted bold, transitions marked from the
   smoothed series (real hardware runs can oscillate for several seconds
   around a transition before settling - a raw per-sample "did it change"
-  check would count every one of those as its own step; see domain/
+  check would count every one of those as its own step; see tools/
   panel_drift_analysis.py's module docstring), and the overall linear-fit
   drift rate.
 - output/panel_drift_local_rate.png - the practical "derivative": local
@@ -42,7 +42,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from settings import load_settings, ensure_output_dir
 from domain.plot_export import export_session_plot
-from domain.panel_drift_analysis import export_drift_over_time_plot, export_local_rate_plot
+from tools.panel_drift_analysis import export_drift_over_time_plot, export_local_rate_plot
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SETTINGS_PATH = os.path.join(REPO_ROOT, "settings.yaml")
@@ -157,6 +157,16 @@ def main():
     print("=== Summary ===")
     print("Covered {:.1f}s of non-excluded samples ({:.1f}s to {:.1f}s elapsed), {} sample(s), "
           "smoothed into {}s bins.".format(end_s - start_s, start_s, end_s, summary["n_samples"], BIN_SECONDS))
+    if summary["n_timestamp_discontinuities"]:
+        print(
+            "NOTE: {} camera HW-timestamp discontinuity(ies) detected during this run (the raw "
+            "frame timestamp went backward at least once - see tools/panel_drift_analysis.py's "
+            "parse_gap_series). Elapsed time is reconstructed by holding steady across each one, so "
+            "the plots/rate below stay internally consistent, but the true real-world duration of "
+            "each glitch is unknown and not included in the covered elapsed time above.".format(
+                summary["n_timestamp_discontinuities"]
+            )
+        )
 
     if summary["transitions"]:
         print("{} clean transition(s) (smoothed - see BIN_SECONDS):".format(len(summary["transitions"])))

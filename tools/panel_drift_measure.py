@@ -184,8 +184,30 @@ def export_drift_over_time_plot(rows, path):
     if not timestamped:
         return None
 
-    t0 = timestamped[0]["stream_a_ts_us"]
-    elapsed_s = [(r["stream_a_ts_us"] - t0) / 1_000_000.0 for r in timestamped]
+    # Accumulates consecutive per-row deltas rather than a single
+    # `raw_ts_us - first_row_ts_us` subtraction - a real ~5000s dual-panel
+    # run showed the camera's own HW frame timestamp can have a one-off
+    # discontinuity (a downward jump/reset) partway through a long run,
+    # which under plain subtraction corrupted every row after it into a
+    # nonsensical NEGATIVE elapsed time. A backward step between two
+    # consecutive rows is clamped to a 0-duration "glitch" instead - see
+    # tools/panel_drift_analysis.py's parse_gap_series for the same fix,
+    # applied there for tools/panel_drift_stats.py's offline analysis.
+    elapsed_s = []
+    elapsed_us = 0.0
+    prev_raw = None
+    n_discontinuities = 0
+    for r in timestamped:
+        raw = r["stream_a_ts_us"]
+        if prev_raw is not None:
+            delta = raw - prev_raw
+            if delta < 0:
+                delta = 0
+                n_discontinuities += 1
+            elapsed_us += delta
+        prev_raw = raw
+        elapsed_s.append(elapsed_us / 1_000_000.0)
+
     gap_ms = [
         r["position_gap_ms"] if (r.get("position_gap_ms") is not None and not r.get("position_gap_ms_excluded"))
         else float("nan")
@@ -234,6 +256,7 @@ def export_drift_over_time_plot(rows, path):
         "elapsed_s_range": (valid[0][0], valid[-1][0]) if valid else None,
         "changes": changes,
         "slope_ms_per_s": slope_ms_per_s,
+        "n_timestamp_discontinuities": n_discontinuities,
     }
 
 
@@ -397,6 +420,14 @@ def main():
                 print("Covered {:.1f}s of non-excluded samples ({:.1f}s to {:.1f}s elapsed).".format(
                     end_s - start_s, start_s, end_s
                 ))
+            if summary["n_timestamp_discontinuities"]:
+                print(
+                    "NOTE: {} camera HW-timestamp discontinuity(ies) detected during this run - "
+                    "elapsed time was held steady across each one rather than corrupted; the true "
+                    "real-world duration of each glitch is unknown and not included above.".format(
+                        summary["n_timestamp_discontinuities"]
+                    )
+                )
             if summary["changes"]:
                 print("{} step change(s) - each is one more switch_time_ms of accumulated skew:".format(
                     len(summary["changes"])
