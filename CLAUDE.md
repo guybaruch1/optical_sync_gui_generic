@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A PySide6 desktop wizard app for measuring timing sync between ANY two video streams a connected Intel RealSense camera offers - two IR streams, IR+color, or two color streams on a Dual-RGB device - against an Image Engineering LED panel. It generalizes a sibling project that hardcoded a single IR-vs-RGB pairing (see "`resolve_and_group`..." below) into a wizard where the operator picks "Stream A" and "Stream B" from whatever the device actually reports. It replaces three standalone scripts (in the sibling `optical_sync_poc_/` directory, which this repo ports/lifts logic from) with one guided flow: Device Select -> Stream Config -> ROI Select -> Calibration -> Live Session.
+A PySide6 desktop wizard app for measuring timing sync between ANY two video streams a connected Intel RealSense camera offers - two IR streams, IR+color, or two color streams on a Dual-RGB device - against an Image Engineering LED panel. It generalizes a sibling project that hardcoded a single IR-vs-RGB pairing (see "`resolve_and_group`..." below) into a wizard where the operator picks "Stream A" and "Stream B" from whatever the device actually reports. It replaces three standalone scripts (in the sibling `optical_sync_poc_/` directory, which this repo ports/lifts logic from) with one guided flow: Device Select -> Stream Config -> ROI Select -> Calibration -> Threshold Tuning -> Live Session.
 
 ## Commands
 
@@ -33,7 +33,7 @@ python -m venv .venv
 - **`engine/`** - hardware and live-session orchestration. Splits into a pure-Python core and a thin hardware/Qt shell:
   - `engine/metrics.py` (`PairingGapMetric`, `PositionGapMetric` - the `Metric` ABC), `engine/test_session.py` (`TestSession` - start/stop/buffers rows), `engine/acquisition_loop.py` (`AcquisitionLoop` - drives one frame-pair at a time through the metrics) are all pure Python, unit-tested with fakes.
   - `engine/streams.py` is hardware-facing and generic: `list_video_stream_options`/`list_video_stream_options_from_device` enumerate every infrared/color video-stream profile a device offers as plain picker dicts (no hardcoded "Stereo Module"/"RGB Camera" sensor-name filtering), `resolve_and_group` unifies the two-picks-into-sensors problem (see below), `capture_synced_frame_pair` drives one-shot settled captures (ROI select, calibration) off a `groups` list, and `ContinuousCapture(device_serial, pick_a, pick_b)` drives the open-ended `rs.pipeline()`-based stream the live preview and live session both need. Most of this file's logic (`resolve_and_group`, `capture_synced_frame_pair`, `list_video_stream_options_from_device`, `stream_slug`, the camera-control setters, etc.) is pure enough to unit-test against fake sensor/device objects and has substantial coverage in `tests/engine/test_streams.py` - only `ContinuousCapture`'s real-`rs.pipeline()` internals are genuinely untested by design (hardware-only). `engine/led_panel.py` (`LEDPanel`, a static-method wrapper around the `LED-Panel.exe` CLI) and `engine/session_engine.py` (`SessionEngineThread`, a `QThread`) round out the hardware-facing layer and have NO automated tests by design - see the "Live Session pipeline" section below and the README's Project Structure note.
-- **`gui/`** - PySide6 wizard pages (`gui/pages/`) and reusable widgets (`gui/widgets/`), wired together by `gui/main_window.py` (`MainWindow`, a `QStackedWidget` driving the 5-page flow and persisting choices to `state.gui_state`).
+- **`gui/`** - PySide6 wizard pages (`gui/pages/`) and reusable widgets (`gui/widgets/`), wired together by `gui/main_window.py` (`MainWindow`, a `QStackedWidget` driving the 6-page flow and persisting choices to `state.gui_state`).
 - **`state/`** - `GuiState`, the wizard's own persisted state (`gui_state.json`: last device, `stream_a_*`/`stream_b_*` resolution/fps/ROI/camera-control fields). Separate from `settings.yaml` on purpose - see Configuration files below.
 
 When extending a metric or the live session's data flow, start from `engine/metrics.py`/`engine/test_session.py` (pure, testable) and only touch `engine/session_engine.py` for the hardware/Qt plumbing.
@@ -66,11 +66,171 @@ If `pick_a`/`pick_b` share the same `sensor_index`, they resolve to ONE physical
 
 Camera controls - `set_emitter_enabled(sensor, enabled)`, `set_manual_exposure(sensor, exposure, gain)`, `enable_auto_exposure(sensor)`, all in `engine/streams.py` - are applied once PER DISTINCT RESOLVED SENSOR (i.e. once per `resolve_and_group` group), not once per stream pick, since two picks might share a sensor. Stream Config's UI presents one "Camera Controls" group box per `group_camera_controls` group: an IR-emitter-disable checkbox (shown only if the group includes an infrared stream) plus an auto/manual exposure+gain radio-button pair, read back as `camera_controls` (a list of `{sensor_indices, emitter_enabled, auto_exposure, exposure, gain}` dicts, position-aligned with `resolve_and_group`'s own group order) at "Next".
 
-That `camera_controls` list is applied from three separate call sites, each of which re-derives `groups` via its own `resolve_and_group(device, pick_a, pick_b)` call and zips it against `camera_controls` position-for-position: `gui/pages/roi_select_page.py`'s `_apply_camera_controls` (used by both ROI Select and, imported directly, by `gui/pages/calibration_page.py`), and `engine/session_engine.py`'s `SessionEngineThread.run()` (duplicated inline rather than imported, since that file is hardware-thread code, not GUI code).
+That `camera_controls` list is applied from four separate call sites, each of which re-derives `groups` via its own `resolve_and_group(device, pick_a, pick_b)` call and zips it against `camera_controls` position-for-position: `gui/pages/roi_select_page.py`'s `_apply_camera_controls` (used by both ROI Select and, imported directly, by `gui/pages/calibration_page.py`), and `engine/session_engine.py`'s `SessionEngineThread.run()` and `engine/threshold_preview_thread.py`'s `ThresholdPreviewThread.run()` (each duplicated inline rather than imported, since these are hardware-thread files, not GUI code).
 
 ### Per-stream `config.yaml` slug keying
 
 `config.yaml`'s LED positions are keyed per-stream by a slug (`engine/streams.py`'s `stream_slug(pick)`, e.g. `"infrared1"`, `"color"`, `"color2"` - `stream_index` 0 is omitted from the slug so a single-RGB camera's slug still just reads `"color"`) nested under the camera name, via `domain/calibration.py`'s `update_config_leds`/`load_led_positions`. This is simpler than a joined pair-key (e.g. `"infrared1_color"`): each stream's calibration data stands on its own, so recalibrating one stream of a pair doesn't invalidate the other's saved positions, and the same `"color"` slug's data is reusable across different Stream-A/Stream-B pairings that both happen to include it.
+
+### Optional dual-LED-panel mode (manual operator toggle, not camera/test-driven)
+
+Some rigs run two physically separate LED panels instead of one - one per
+camera stream, since IR and RGB (or two different IR sensors) are
+physically separate, non-co-located sensors that can't both look at a
+single panel from the same angle. Both panels share one Acroname USB hub
+(only ONE panel's USB connection is visible to the OS at a time -
+`LED-Panel.exe` always talks to whichever panel is currently hub-exposed,
+never a specific one by identity) and one external USB relay that both
+panels' trigger inputs are wired to (NOT the camera - nothing in this
+codebase configures the camera to emit a hardware trigger). The relay is
+a **gate, not a one-shot start pulse**: once both panels are configured
+into trigger mode, they only keep stepping in lockstep WHILE the relay
+stays closed (energized) - releasing it freezes both wherever they happen
+to be. An earlier version of this code treated it as a brief ~0.2s
+kickoff pulse (modeled on a reference demo script's `time.sleep(100)`
+between closing/releasing it, wrongly assumed to be leftover debug timing
+rather than load-bearing) - real-hardware testing confirmed that was
+wrong: the hold time itself is what keeps the panels stepping.
+
+`_relay_on` also starts a background thread (`_relay_keepalive_loop`) that
+re-sends the same "ON" byte on the already-open connection every
+`_RELAY_KEEPALIVE_INTERVAL_S` (30s) for as long as the relay stays armed -
+a multi-minute test that holds the relay open but never writes to it
+again until the final OFF byte was observed to sometimes fail on its NEXT
+run, consistent with Windows USB Selective Suspend power-managing the
+idle USB-serial adapter and not cleanly recovering. `_relay_off` stops and
+joins this thread before it does anything else with the connection
+(pyserial's `Serial` isn't documented as safe for concurrent access from
+multiple threads).
+
+This is a **manual operator choice**, not inferred from the camera model,
+not auto-detected from the hub, and not a per-named-test `settings.yaml`
+flag - Device Select's "Use dual LED panel" checkbox
+(`gui/pages/device_select_page.py`) is read once in
+`MainWindow._on_device_chosen` into `self._dual_panel_config` (`None` for
+the normal single-panel case; `settings["dual_panel"]`'s port/COM-port
+wiring dict otherwise), then threaded through every downstream page's
+`set_context()` from ROI Select onward - unlike the single-panel case, a
+single `LEDPanel.*` call only ever reaches whichever panel is currently
+hub-exposed, so EVERY panel interaction (not just the actual timed test)
+needs the hub-switching dance repeated for both panels. `settings.yaml`'s
+`dual_panel.stream_a_panel_port`/`stream_b_panel_port` are keyed
+explicitly by STREAM, not by an arbitrary "first panel"/"second panel" -
+on the actual rig this was built for, stream_a (IR)'s panel is port 1 and
+stream_b (color)'s is port 0, the reverse of what the naming might
+suggest, so getting this mapping right matters once code depends on it
+(see below).
+
+`engine/dual_panel_control.py` centralizes all of this branching.
+`turn_all_leds_on`/`turn_all_leds_off`/`start_scanning`/`stop_scanning`
+each take a `dual_panel_config` and either call `engine/led_panel.py`'s
+`LEDPanel` directly (the `None`/single-panel case, byte-for-byte the same
+code path as before this existed) or route through
+`_run_on_both_panels`/`_relay_on`/`_relay_off` (both panels together, for
+callers that genuinely need them lit/dark/stepping in lockstep -
+Threshold Tuning and Live Session's actual timed test). `_relay_on` keeps
+its serial connection to the relay open at module level (rather than
+threading a handle back through every `start_scanning`/`stop_scanning`
+call site) and leaves the relay closed; `stop_scanning` is what calls
+`_relay_off()` to actually release it. These lazily import
+`engine/acroname_hub.py` (a ported `AcronameHub` wrapper around the
+Acroname `brainstem` SDK) and `pyserial` respectively, so every normal
+single-panel test can import/run this module without either dependency
+installed. `start_scanning`'s dual-panel path configures each panel with
+`LEDPanel.reset()` then `set_mode(1)`/`set_speed_ms()`/
+`set_trigger_mode(2)`/`set_camera_trigger(True)` - deliberately
+`set_mode(1)`, NOT `response_time_measurement_mode()` (which sends
+`--stop` first) and deliberately no `set_direction_single()` either:
+real-hardware testing confirmed that sending `--stop` before entering
+trigger mode prevents the panel from actually stepping once triggered,
+and the confirmed-working reference sequence
+(`docs/config_tigger_mode.bat`) never sets direction. Don't add either
+back without re-confirming on real hardware first.
+
+**The "only steps once, or right after an interrupted run" bug and its
+actual fix.** A run following one that completed NORMALLY never stepped
+on its next arm, while a run following one that was INTERRUPTED before
+`stop_scanning()` ran always did. A long investigation chased this from
+the `start_scanning` side - trying `LEDPanel.start()` in 3 different
+positions, forcing a real transition on `set_camera_trigger`/
+`set_trigger_mode`, forcing a real transition on the relay itself - all
+confirmed via `tools/diag_panel_query_state.py` (queries `LED-Panel.exe`'s
+own `--isRunning`/`--getCurrentLED`/etc., via a `pywin32`
+`win32console`-based reader, since these commands write via the low-level
+`WriteConsole` API and produce nothing under redirection - only works from
+a real, native Windows console, not an IDE-integrated one) to make no
+difference: `isRunning` never got set, and the panel never stepped.
+`tools/diag_arm_sequence_sweep.py` then automated an exhaustive sweep of
+12 arm-sequence variants (each starting from a `stop_scanning()`-forced
+"just stopped" precondition, detecting actual stepping automatically via
+`getCurrentLED` changing between 2 samples) and confirmed NONE of that
+`start_scanning`-side complexity ever fixed it - the only variant that
+produced stepping was calling `--start` right after entering External
+trigger mode, which free-runs the panel on its own internal clock
+immediately, bypassing the shared relay trigger entirely and breaking
+lockstep (since `configure_one_panel` runs separately per panel,
+hub-switched one at a time - panel A would start well before panel B).
+
+The actual root cause was never in `start_scanning` at all: it was
+`stop_scanning`'s own `LEDPanel.stop()` call (`--stop`: "stop AND reset to
+starting position"), which sets some internal panel state that nothing in
+`start_scanning`'s arm sequence can undo. The fix - confirmed by comparing
+against the original reference workflow (`docs/acroname_hub.py`'s
+`__main__` demo), which "always works" specifically because it never
+calls `--stop` at all - is that `stop_scanning`'s dual-panel path now
+calls `LEDPanel.reset()` ("--reset": reset to starting position WITHOUT
+stopping it) instead of `LEDPanel.stop()`. The relay release (which
+`stop_scanning` already does first) is what actually freezes both panels
+in place - a documented gate, not a one-shot pulse (see below) - so
+`--stop`'s own "stop" behavior was always redundant here; `reset()` still
+returns the LEDs to a clean starting position for the next run, just
+without the poisoning. `start_scanning`'s own arm sequence is back to the
+plain sequence above - none of the accumulated complexity was ever needed
+once this was fixed at its actual source. Do not add `LEDPanel.stop()`
+back into the dual-panel `stop_scanning` path without re-confirming on
+real hardware first (`tools/diag_panel_query_state.py`, checking
+`isRunning` after the NEXT arm).
+
+Any panel config change (e.g. switch time)
+needs this whole provisioning re-run - see `gui/pages/threshold_tuning_page.py`'s
+`_on_switch_time_changed`, which branches on `dual_panel_config` to either
+call `LEDPanel.set_speed_ms()` directly and instantly (single-panel) or
+re-run `start_scanning()` in full (dual-panel, visibly slower - no way
+around the hardware constraint); since this re-runs `start_scanning()`
+without an intervening `stop_scanning()`, `_relay_on()` closes any stale
+still-open connection from a previous call before opening its own.
+
+**Calibration and ROI Select do NOT use `turn_all_leds_on`/`off`** for the
+dual-panel case - capturing both streams' on/off frame from one
+simultaneous "both panels lit together" moment turned out unreliable (and
+isn't actually needed: neither page compares timing across streams the way
+Live Session does). Instead both fully calibrate/capture one stream at a
+time - `engine/streams.py`'s `group_for_pick(groups, pick)` isolates just
+that stream's own resolved sensor group, and
+`engine/dual_panel_control.py`'s `switched_to_stream_panel(dual_panel_config,
+stream_name)` context manager switches to that stream's OWN panel port
+ONCE and stays there for the whole `with` block (unlike
+`_run_on_both_panels`, which always touches both) - the caller issues
+plain `LEDPanel.all_leds_on()`/`all_leds_off()` calls directly inside the
+block, since only one panel is hub-exposed anyway. This also means only 2
+hub switches happen for a whole calibration run (one per stream), not one
+per on/off toggle.
+
+No automated tests for `engine/acroname_hub.py`/`_run_on_both_panels`/
+`switched_to_stream_panel`/`_relay_on`/`_relay_off` themselves
+(hardware-only, same "no tests by design" bucket as `engine/led_panel.py`/
+`engine/session_engine.py`) - but `turn_all_leds_on`/`off`/
+`start_scanning`/`stop_scanning`/`switched_to_stream_panel`'s own branching
+logic IS tested (`tests/engine/test_dual_panel_control.py`), by mocking
+`_run_on_both_panels`/`_relay_on`/`_relay_off`/`LEDPanel`/a fake Acroname hub.
+
+### Threshold Tuning page (per-stream, with a live detection preview)
+
+Inserted between Calibration and Live Session: `gui/pages/threshold_tuning_page.py`'s `ThresholdTuningPage` shows a live video feed of both streams, each with its own independently-tunable "Threshold Fraction" spinbox (different sensors - IR vs RGB, or two different IR sensors - have different brightness/exposure characteristics, so one shared fraction across both streams is wrong) plus a shared LED Switch Time spinbox, all live-editable while watching the same green/red on-off detection-circle overlay Live Session draws (`domain/realsense_utils.py`'s `draw_led_state_overlay`).
+
+Unlike `engine/session_engine.py`'s `SessionEngineThread`, `engine/threshold_preview_thread.py`'s `ThresholdPreviewThread` emits raw per-LED **brightness**, not a precomputed on/off mask - `ThresholdTuningPage._on_frame_ready` computes `threshold = domain.calibration.compute_threshold(on, off, fraction)` and the mask itself from whatever the relevant spinbox currently reads, so a threshold change is reflected on the very next incoming frame with no thread restart. The preview only runs between its own Start/Stop buttons (like Stream Config's opt-in preview, NOT auto-started on arrival), and has its own "Frame Sample Interval" spinbox (same idea as Live Session's, baked into the thread's constructor at Start so - like Live Session's own toolbar control - it's locked while a preview is running). Stop is deliberately non-blocking, re-enabling gated on the thread's own `finished` signal (mirrors `LiveSessionPage.stop_session`/`_on_engine_thread_finished`'s same reasoning) - but "Continue to Live Test" is NOT: it blocks on `request_stop()` + `wait()` before handing off, so Live Session's own capture/LED-panel setup can never race this page's still-in-progress hardware cleanup.
+
+"Continue to Live Test" emits a bare `tuning_done` signal (matching `CalibrationPage.calibration_done`'s convention); `gui/main_window.py`'s `_on_tuning_done` reads the final tuned arrays off `ThresholdTuningPage.stream_a_threshold`/`stream_b_threshold` properties (each a `compute_threshold(...)` call using that stream's own calibrated on/off values and its own live spinbox fraction) and passes them into `LiveSessionPage.set_context()`'s `stream_a_threshold`/`stream_b_threshold` params - Live Session itself no longer has any threshold-fraction control or on/off-to-threshold math of its own; tuning already happened, with visual confirmation, on the page before it. `MainWindow._on_calibration_done` stashes everything Live Session still needs but Threshold Tuning has no use for (CSV paths, `output_dir`, frame-drop/pairing-gap tuning, etc.) in `self._pending_ctx`, merged back in by `_on_tuning_done`.
 
 ### Live Session pipeline (the core runtime loop)
 

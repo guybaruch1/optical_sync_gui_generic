@@ -22,6 +22,15 @@ class VideoPanel(QLabel):
             # a squarer floor.
             self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             self.setMinimumSize(160, 160)
+            # Caps growth at the mockup's own natural size - without this,
+            # on a page whose video row has nothing else competing for
+            # leftover vertical space (e.g. Threshold Tuning, unlike Live
+            # Session's busier graphs/stats layout), this panel would
+            # stretch tall to fill it, rendering as a non-square rectangle.
+            # Expanding (above) + a real minimum still lets it shrink on a
+            # smaller/lower-resolution screen; this just stops it from
+            # growing past 320x320 in the other direction.
+            self.setMaximumSize(320, 320)
         else:
             # Without this, QLabel's sizeHint() defaults to the pixmap's
             # native resolution (e.g. 1280x720) once a frame is set, so two

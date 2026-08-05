@@ -257,6 +257,25 @@ def resolve_and_group(device, pick_a, pick_b):
     return [(sensor_a, [profile_a]), (sensor_b, [profile_b])]
 
 
+def group_for_pick(groups, pick):
+    """Isolates the ONE (sensor, profiles) group (from resolve_and_group's
+    output) that actually contains `pick`'s stream - for a caller that
+    needs to capture/control just ONE of two picked streams independently,
+    e.g. calibrating one stream's own dual-LED-panel-mode panel without
+    touching the other stream's sensor at all (see
+    gui/pages/calibration_page.py, gui/pages/roi_select_page.py).
+
+    Assumes pick_a/pick_b resolve to two DISTINCT sensors - true whenever
+    dual-panel mode is relevant (two physically separate panels imply two
+    physically separate camera sensors). If they instead share one sensor,
+    both picks already live in that same single group anyway (resolve_and_
+    group merged them), so this just returns that shared group either way."""
+    for sensor, profiles in groups:
+        if any(_pick_matches(p, pick) for p in profiles):
+            return [(sensor, profiles)]
+    raise RuntimeError("No resolved sensor group contains pick {!r}".format(pick))
+
+
 def _try_get_stream_key(profile):
     """Return (stream_type, stream_index) for a real profile object, or None
     if `profile` doesn't support those calls (e.g. a plain-string test-fake

@@ -6,7 +6,7 @@ import pyrealsense2 as rs
 from engine.streams import (
     list_devices, capture_synced_frame_pair,
     enable_auto_exposure,
-    list_video_stream_options_from_device, resolve_and_group,
+    list_video_stream_options_from_device, resolve_and_group, group_for_pick,
     set_emitter_enabled, set_manual_exposure, stream_slug,
     parse_camera_tests_config, resolve_camera_tests,
 )
@@ -311,6 +311,53 @@ def test_resolve_and_group_one_shared_sensor():
     sensor, profiles = groups[0]
     assert sensor is shared_sensor
     assert len(profiles) == 2
+
+
+# --- group_for_pick: isolates ONE resolved group for a caller (Calibration,
+# ROI Select) that needs to capture/control just one of the two picked
+# streams independently, e.g. for dual-LED-panel mode's sequential
+# per-stream calibration (see gui/pages/calibration_page.py). ---
+
+def test_group_for_pick_isolates_the_matching_sensor_group():
+    ir_profile = FakeProfile2(rs.stream.infrared, 1, rs.format.y8, 1280, 720, 30)
+    color_profile = FakeProfile2(rs.stream.color, 0, rs.format.bgr8, 1280, 720, 30)
+    ir_sensor = FakeSensor2(profiles=[ir_profile])
+    color_sensor = FakeSensor2(profiles=[color_profile])
+    groups = [(ir_sensor, [ir_profile]), (color_sensor, [color_profile])]
+    pick_a = {"sensor_index": 0, "stream_type": rs.stream.infrared, "stream_index": 1,
+              "format": rs.format.y8, "width": 1280, "height": 720, "fps": 30}
+    pick_b = {"sensor_index": 1, "stream_type": rs.stream.color, "stream_index": 0,
+              "format": rs.format.bgr8, "width": 1280, "height": 720, "fps": 30}
+
+    group_a = group_for_pick(groups, pick_a)
+    group_b = group_for_pick(groups, pick_b)
+
+    assert group_a == [(ir_sensor, [ir_profile])]
+    assert group_b == [(color_sensor, [color_profile])]
+
+
+def test_group_for_pick_returns_shared_group_for_both_picks_on_one_sensor():
+    left_profile = FakeProfile2(rs.stream.color, 1, rs.format.bgr8, 1280, 720, 30)
+    right_profile = FakeProfile2(rs.stream.color, 2, rs.format.bgr8, 1280, 720, 30)
+    shared_sensor = FakeSensor2(profiles=[left_profile, right_profile])
+    groups = [(shared_sensor, [left_profile, right_profile])]
+    pick_a = {"sensor_index": 0, "stream_type": rs.stream.color, "stream_index": 1,
+              "format": rs.format.bgr8, "width": 1280, "height": 720, "fps": 30}
+
+    group = group_for_pick(groups, pick_a)
+
+    assert group == [(shared_sensor, [left_profile, right_profile])]
+
+
+def test_group_for_pick_raises_when_no_group_matches():
+    ir_profile = FakeProfile2(rs.stream.infrared, 1, rs.format.y8, 1280, 720, 30)
+    ir_sensor = FakeSensor2(profiles=[ir_profile])
+    groups = [(ir_sensor, [ir_profile])]
+    unrelated_pick = {"sensor_index": 5, "stream_type": rs.stream.color, "stream_index": 0,
+                       "format": rs.format.bgr8, "width": 1280, "height": 720, "fps": 30}
+
+    with pytest.raises(RuntimeError):
+        group_for_pick(groups, unrelated_pick)
 
 
 def test_resolve_and_group_raises_when_picks_are_the_same_stream():

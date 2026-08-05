@@ -90,12 +90,15 @@ test:
   # can't silently diverge from what calibration used even though the two
   # are two separately-edited settings.yaml keys.
   neighborhood_size: 5
-  # Calibration's stored threshold assumes an LED held steady for a full
-  # exposure. At fast switch times only a fraction of that brightness is
-  # achievable, so the runtime threshold is recomputed as
-  # off + threshold_fraction*(on-off). Tune this per your own testing -
-  # below the calibration default of 0.5 for fast speeds.
-  threshold_fraction: 0.25
+  # Starting default for each stream's own Threshold Tuning page spinbox -
+  # both independently live-editable there while watching the live on/off
+  # detection preview, before the actual test. Calibration's stored
+  # threshold assumes an LED held steady for a full exposure; at fast
+  # switch times only a fraction of that brightness is achievable, so the
+  # runtime threshold is off + fraction*(on-off) - tune per-sensor since
+  # different sensors' brightness/exposure characteristics differ.
+  stream_a_threshold_fraction: 0.25
+  stream_b_threshold_fraction: 0.25
   # Save a full-image on/off overlay snapshot every N frame-pairs, up to a cap.
   # Snapshot filenames use the same pair_index as the CSV's pair_index column,
   # so you can cross-check the algorithm's on/off calls against the real image.
@@ -118,6 +121,32 @@ test:
   # convergence / an initial buffered-frame burst right after the pipeline
   # starts, which can otherwise look like real drops or real gaps.
   warmup_pairs_to_skip: 15
+
+# Only read when the operator checks Device Select's "Use dual LED panel"
+# box - two physically separate LED panels sharing one Acroname USB hub
+# (only one panel's USB connection can be visible to the OS at a time) and
+# one external USB relay that must stay closed (energized) for as long as
+# continuous stepping is wanted - it's a gate, not a one-shot start pulse;
+# releasing it freezes both panels wherever they happen to be. See
+# engine/dual_panel_control.py's start_scanning/stop_scanning.
+dual_panel:
+  # Acroname downstream USB port number each stream's OWN panel is wired
+  # to - NOT necessarily port 0 for stream_a/port 1 for stream_b; keyed
+  # explicitly by stream to avoid exactly that mix-up (on this rig,
+  # stream_a/IR is actually port 1 and stream_b/color is port 0).
+  stream_a_panel_port: 1
+  stream_b_panel_port: 0
+  # Port the USB relay device itself is wired to - must be hub-enabled
+  # before the relay can be triggered.
+  relay_port: 6
+  relay_com_port: "COM6"
+  # How long to wait after switching which panel's USB port is hub-enabled
+  # before sending it any command - UNVERIFIED, needs tuning on the real
+  # rig. Bumped up from an initial 1s guess since a full USB re-enumeration
+  # after an Acroname port switch was taking noticeably longer than that in
+  # practice; keep raising this (no code change needed) if commands still
+  # seem to reach a panel before it's actually ready.
+  hub_switch_settle_s: 3.0
 
 paths:
   config_path: config.yaml
