@@ -257,6 +257,18 @@ def test_on_tuning_done_passes_tuned_per_stream_thresholds_to_live_session(qapp,
     assert ctx["switch_time_ms"] == 5
 
 
+def test_on_tuning_done_passes_a_fractional_switch_time_to_live_session(qapp, monkeypatch, tmp_path):
+    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window.threshold_tuning_page.switch_time_spinbox.setValue(0.5)
+        window._on_tuning_done()
+
+    ctx = window.live_session_page._context
+    assert ctx["switch_time_ms"] == 0.5
+
+
 # --- Dual LED panel: a manual Device Select checkbox, NOT inferred from
 # camera/test/hardware - self._dual_panel_config is None (identical to
 # today's default behavior) unless the operator checks the box, in which

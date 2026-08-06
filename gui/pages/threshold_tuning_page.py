@@ -135,9 +135,15 @@ class ThresholdTuningPage(QWidget):
         control_row.addWidget(self.stop_button)
 
         control_row.addWidget(QLabel("LED Switch Time (ms):"))
-        self.switch_time_spinbox = QSpinBox()
-        self.switch_time_spinbox.setRange(1, 10000)
-        self.switch_time_spinbox.setValue(1)
+        self.switch_time_spinbox = QDoubleSpinBox()
+        # Same floor/precision reasoning as gui/pages/live_session_page.py's
+        # own switch_time_spinbox: 0.1 is the finest step
+        # LEDPanel.set_speed_ms's "--setTime {:.4f}" (4 decimal places of
+        # SECONDS) can actually represent (engine/led_panel.py).
+        self.switch_time_spinbox.setRange(0.1, 10000.0)
+        self.switch_time_spinbox.setDecimals(1)
+        self.switch_time_spinbox.setSingleStep(0.5)
+        self.switch_time_spinbox.setValue(1.0)
         self.switch_time_spinbox.valueChanged.connect(self._on_switch_time_changed)
         control_row.addWidget(self.switch_time_spinbox)
 
@@ -185,7 +191,10 @@ class ThresholdTuningPage(QWidget):
         )
         self.stream_a_threshold_fraction_spinbox.setValue(stream_a_threshold_fraction_default)
         self.stream_b_threshold_fraction_spinbox.setValue(stream_b_threshold_fraction_default)
-        self.switch_time_spinbox.setValue(int(round(switch_time_ms)))
+        # float(), not int(round(...)) - settings.yaml's switch_time_ms can
+        # already be fractional, and truncating it here would silently
+        # throw that precision away before the operator even sees it.
+        self.switch_time_spinbox.setValue(float(switch_time_ms))
         short_name = _short_camera_name(camera_name)
         self.stream_a_title_label.setText("{} - {}".format(short_name, stream_a_label))
         self.stream_b_title_label.setText("{} - {}".format(short_name, stream_b_label))

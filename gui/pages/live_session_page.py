@@ -85,8 +85,8 @@ import cv2
 from PySide6.QtCore import Qt, QSize, QRectF
 from PySide6.QtGui import QIcon, QPixmap, QPainter, QPen, QColor
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QSpinBox, QLabel, QCheckBox, QFrame, QApplication,
-    QScrollArea,
+    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QSpinBox, QDoubleSpinBox, QLabel, QCheckBox, QFrame,
+    QApplication, QScrollArea,
 )
 
 from gui.widgets.video_panel import VideoPanel
@@ -313,12 +313,19 @@ class LiveSessionPage(QWidget):
         control_row.addWidget(self.stop_button)
 
         control_row.addWidget(QLabel("LED Switch Time (ms):"))
-        self.switch_time_spinbox = QSpinBox()
-        self.switch_time_spinbox.setRange(1, 10000)
+        self.switch_time_spinbox = QDoubleSpinBox()
+        # Floor of 0.1, not 0 - a switch time of exactly 0 isn't physically
+        # meaningful, and 0.1ms is the finest step LEDPanel.set_speed_ms's
+        # own "--setTime {:.4f}" (4 decimal places of SECONDS) can actually
+        # represent - engine/led_panel.py, offering more decimals here would
+        # just suggest false precision the hardware command can't honor.
+        self.switch_time_spinbox.setRange(0.1, 10000.0)
+        self.switch_time_spinbox.setDecimals(1)
+        self.switch_time_spinbox.setSingleStep(0.5)
         # Overridden with the settings.yaml default in set_context(); kept
         # editable per-run (like duration) so switch speed can be tuned
         # without hand-editing settings.yaml between runs.
-        self.switch_time_spinbox.setValue(1)
+        self.switch_time_spinbox.setValue(1.0)
         control_row.addWidget(self.switch_time_spinbox)
 
         control_row.addWidget(QLabel("Frame Sample Interval:"))
@@ -330,9 +337,22 @@ class LiveSessionPage(QWidget):
         # way; this only throttles how often the GUI actually redraws.
         self.frame_sample_interval_spinbox.setValue(10)
         self.frame_sample_interval_spinbox.setToolTip(
-            "Frame-pairs between video/plot updates (every pair is still recorded)."
+            "Frame-pairs between video/plot updates (every pair is still recorded). "
+            "1 updates on every frame and can freeze the GUI - see the warning below the field."
         )
         control_row.addWidget(self.frame_sample_interval_spinbox)
+        # Non-blocking, live warning (not a raised minimum, not a blocking
+        # dialog) - 1 defeats the whole point of display_stride throttling
+        # (every frame triggers the expensive video/plot-update callbacks
+        # instead of every 10th), reproducing the exact "unbounded backlog
+        # of queued cross-thread Qt signal work" freeze _on_row_ready's own
+        # docstring describes as the reason that throttling exists at all.
+        # Still a legal, working value for whoever genuinely wants it -
+        # this only makes the risk visible the moment it's selected.
+        self.frame_sample_interval_warning_label = QLabel("")
+        self.frame_sample_interval_warning_label.setStyleSheet("QLabel { color: #b00020; }")
+        self.frame_sample_interval_spinbox.valueChanged.connect(self._on_frame_sample_interval_changed)
+        control_row.addWidget(self.frame_sample_interval_warning_label)
 
         control_row.addStretch(1)
         self.export_csv_button = QPushButton("Export CSV")
@@ -408,6 +428,17 @@ class LiveSessionPage(QWidget):
         self.drop_plot.set_series_visible("stream_a_frame_drops", checked)
         self.drop_plot.set_series_visible("stream_b_frame_drops", checked)
 
+    def _on_frame_sample_interval_changed(self, value):
+        # 1 is still a legal, working value (see the toolbar setup comment) -
+        # this only surfaces the risk the moment it's selected, live,
+        # without blocking or forcing a different value.
+        if value == 1:
+            self.frame_sample_interval_warning_label.setText(
+                "⚠ 1 updates on every frame - may freeze the GUI"
+            )
+        else:
+            self.frame_sample_interval_warning_label.setText("")
+
     def set_context(self, ctx, device_serial, pick_a, pick_b, camera_controls, switch_time_ms, scan_direction,
                      stream_a_threshold, stream_b_threshold,
                      stream_a_xy, stream_b_xy, num_leds, neighborhood_size,
@@ -445,8 +476,11 @@ class LiveSessionPage(QWidget):
         # ctx["switch_time_ms"]) is what a run actually uses, so it can be
         # tuned per-run without hand-editing settings.yaml. Not persisted
         # anywhere, so a fresh app launch always starts back from this
-        # settings.yaml default, not whatever was last typed.
-        self.switch_time_spinbox.setValue(int(round(switch_time_ms)))
+        # settings.yaml default, not whatever was last typed. float(), not
+        # int(round(...)) - the incoming value can already be fractional
+        # (e.g. tuned to 0.5 on Threshold Tuning), and truncating it here
+        # would silently throw that precision away.
+        self.switch_time_spinbox.setValue(float(switch_time_ms))
         short_name = _short_camera_name(camera_name)
         self.stream_a_title_label.setText("{} - {}".format(short_name, stream_a_label))
         self.stream_b_title_label.setText("{} - {}".format(short_name, stream_b_label))

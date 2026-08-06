@@ -196,6 +196,15 @@ def test_set_context_prefills_switch_time_spinbox_from_settings_value(qapp, tmp_
     assert page.switch_time_spinbox.value() == 7
 
 
+def test_set_context_prefills_switch_time_spinbox_with_a_fractional_value(qapp, tmp_path):
+    # Regression test: set_context() used to truncate via int(round(...)),
+    # silently throwing away a value already tuned to a fraction (e.g. 0.5)
+    # on the Threshold Tuning page before handoff.
+    page = LiveSessionPage()
+    page.set_context(**_minimal_context(tmp_path, switch_time_ms=7.5))
+    assert page.switch_time_spinbox.value() == 7.5
+
+
 def test_start_session_passes_toolbar_switch_time_and_frame_sample_interval(qapp, tmp_path):
     page = LiveSessionPage()
     page.set_context(**_minimal_context(tmp_path, switch_time_ms=1))
@@ -207,6 +216,17 @@ def test_start_session_passes_toolbar_switch_time_and_frame_sample_interval(qapp
 
     assert _FakeEngineThread.last_kwargs["switch_time_ms"] == 42
     assert _FakeEngineThread.last_kwargs["display_stride"] == 99
+
+
+def test_start_session_passes_a_fractional_toolbar_switch_time(qapp, tmp_path):
+    page = LiveSessionPage()
+    page.set_context(**_minimal_context(tmp_path, switch_time_ms=1))
+    page.switch_time_spinbox.setValue(2.5)
+
+    with patch("gui.pages.live_session_page.SessionEngineThread", _FakeEngineThread):
+        page.start_session()
+
+    assert _FakeEngineThread.last_kwargs["switch_time_ms"] == 2.5
 
 
 def test_start_session_passes_context_threshold_arrays_straight_through(qapp, tmp_path):
@@ -225,6 +245,16 @@ def test_start_session_passes_context_threshold_arrays_straight_through(qapp, tm
     position_gap_metric = _FakeEngineThread.last_kwargs["position_gap_metric"]
     assert list(position_gap_metric.stream_a_threshold) == [175.0, 175.0]
     assert list(position_gap_metric.stream_b_threshold) == [225.0, 225.0]
+
+
+def test_frame_sample_interval_of_one_shows_a_warning(qapp):
+    page = LiveSessionPage()
+
+    page.frame_sample_interval_spinbox.setValue(1)
+    assert page.frame_sample_interval_warning_label.text() != ""
+
+    page.frame_sample_interval_spinbox.setValue(10)
+    assert page.frame_sample_interval_warning_label.text() == ""
 
 
 def test_start_session_locks_duration_switch_time_and_frame_sample_interval(qapp, tmp_path):

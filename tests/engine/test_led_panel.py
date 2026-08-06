@@ -20,6 +20,17 @@ def test_set_speed_ms_converts_to_seconds_string():
             ["LED-Panel.exe", "--setTime", "0.0010"], timeout=LEDPanel.cmd_timeout_s)
 
 
+def test_set_speed_ms_accepts_a_fractional_value():
+    # Documents the supported precision: the GUI's switch-time spinboxes
+    # (gui/pages/live_session_page.py, gui/pages/threshold_tuning_page.py)
+    # allow fractional ms (e.g. 0.5) - this confirms set_speed_ms itself
+    # was already float-safe (no int() cast) before that GUI change.
+    with patch("engine.led_panel.check_call") as mock_check_call, patch("time.sleep"):
+        LEDPanel.set_speed_ms(0.5)
+        mock_check_call.assert_called_once_with(
+            ["LED-Panel.exe", "--setTime", "0.0005"], timeout=LEDPanel.cmd_timeout_s)
+
+
 def test_set_mode_sends_only_set_mode_no_preceding_stop():
     # Unlike response_time_measurement_mode()/all_leds_on()/off()/
     # rolling_shutter_mode() (which all send --stop first), set_mode()

@@ -85,6 +85,13 @@ def test_set_context_prefills_switch_time_spinbox(qapp):
     assert page.switch_time_spinbox.value() == 7
 
 
+def test_set_context_prefills_switch_time_spinbox_with_a_fractional_value(qapp):
+    # Regression test: set_context() used to truncate via int(round(...)),
+    # silently discarding a fractional switch time before it was ever shown.
+    page = _page_with_context(switch_time_ms=0.5)
+    assert page.switch_time_spinbox.value() == 0.5
+
+
 def test_set_context_does_not_auto_start_preview(qapp):
     page = _page_with_context()
     assert page.preview_thread is None
@@ -104,6 +111,16 @@ def test_start_button_starts_preview_with_correct_args(qapp):
     assert _FakePreviewThread.last_kwargs["switch_time_ms"] == 3
     assert _FakePreviewThread.last_kwargs["scan_direction"] == 1
     assert _FakePreviewThread.last_kwargs["display_stride"] == 5
+
+
+def test_start_button_starts_preview_with_a_fractional_switch_time(qapp):
+    page = _page_with_context(device_serial="abc123", switch_time_ms=1)
+    page.switch_time_spinbox.setValue(0.5)
+
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        page._on_start_clicked()
+
+    assert _FakePreviewThread.last_kwargs["switch_time_ms"] == 0.5
 
 
 def test_start_button_disables_itself_enables_stop_and_locks_frame_sample_interval(qapp):
@@ -157,6 +174,12 @@ def test_switch_time_ms_property_returns_current_spinbox_value(qapp):
     page = _page_with_context(switch_time_ms=1)
     page.switch_time_spinbox.setValue(42)
     assert page.switch_time_ms == 42
+
+
+def test_switch_time_ms_property_returns_a_fractional_spinbox_value(qapp):
+    page = _page_with_context(switch_time_ms=1)
+    page.switch_time_spinbox.setValue(0.5)
+    assert page.switch_time_ms == 0.5
 
 
 def test_on_frame_ready_computes_mask_from_current_spinbox_value_not_the_original_default(qapp, monkeypatch):
