@@ -11,7 +11,14 @@ filenames and log/warning text now use each pick's own slug/label (e.g.
 "infrared1"/"Infrared 1") instead of the old hardcoded "ir"/"rgb", so two
 different stream-pair calibration runs on the same camera don't clobber
 each other's debug PNGs, and update_config_leds writes per-stream-pair
-slug-keyed blocks into config.yaml (domain/calibration.py, Task 10)."""
+slug-keyed blocks into config.yaml (domain/calibration.py, Task 10).
+
+set_context() also mints a fresh timestamped output/calibration_<timestamp>/
+folder (domain.run_output.create_run_dir) once per page visit, so a later
+calibration run on this same camera doesn't overwrite an earlier one's debug
+PNGs. This is once per VISIT, not once per "Run Calibration" click - clicking
+Run multiple times in one visit (e.g. while tuning ROI) intentionally shares
+that same folder."""
 
 import os
 import time
@@ -20,6 +27,7 @@ from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QPlainTextEdit, QPushButton, QApplication
 
 from domain.calibration import assign_grid_ids, build_positions_with_thresholds, update_config_leds
+from domain.run_output import create_run_dir
 from domain.realsense_utils import (
     detect_led_centroids, merge_close_centroids, crop_to_roi, save_debug_detection_image,
     decode_frame,
@@ -68,9 +76,15 @@ class CalibrationPage(QWidget):
         QApplication.processEvents()
 
     def set_context(self, ctx, device_serial, pick_a, pick_b, camera_controls, stream_a_roi, stream_b_roi,
-                     config_path, camera_name, output_dir,
+                     config_path, camera_name, output_root,
                      settle_frames=15, min_blob_area=20, neighborhood_size=5, row_gap_px=15,
                      min_acceptable_contrast=20, dual_panel_config=None):
+        # Mints ONE fresh timestamped output/calibration_<timestamp>/ folder
+        # per page visit (i.e. per set_context() call), not per "Run
+        # Calibration" click - a user re-clicking Run a few times while
+        # tuning ROI/threshold within one visit shares that one folder
+        # rather than scattering a throwaway subfolder per click.
+        output_dir = create_run_dir(output_root, "calibration")
         self._pending_args = dict(
             ctx=ctx, device_serial=device_serial, pick_a=pick_a, pick_b=pick_b,
             camera_controls=camera_controls, stream_a_roi=stream_a_roi, stream_b_roi=stream_b_roi,

@@ -12,8 +12,6 @@ GuiState only stores a lossy, JSON-friendly prefill record (no `format`/
 full pick reconstruction usable later in this same run.
 """
 
-import os
-
 import numpy as np
 from PySide6.QtWidgets import QMainWindow, QStackedWidget, QMessageBox
 
@@ -195,7 +193,7 @@ class MainWindow(QMainWindow):
             stream_a_roi, stream_b_roi,
             config_path=self.settings["paths"]["config_path"],
             camera_name=self._current_device_name(),
-            output_dir=ensure_output_dir(self.settings),
+            output_root=ensure_output_dir(self.settings),
             settle_frames=calib_settings["settle_frames"],
             min_blob_area=calib_settings["min_blob_area"],
             neighborhood_size=calib_settings["neighborhood_size"],
@@ -239,9 +237,13 @@ class MainWindow(QMainWindow):
         stream_b_on = np.array([stream_b_positions[i][2] for i in stream_b_ids])
         stream_b_off = np.array([stream_b_positions[i][3] for i in stream_b_ids])
 
-        output_dir = ensure_output_dir(self.settings)
         # Everything Live Session will still need once tuning is done, but
         # that Threshold Tuning itself has no use for - see _on_tuning_done.
+        # output_root/kept_csv_filename/dropped_csv_filename are raw pieces,
+        # not a pre-joined output_dir/kept_csv_path/dropped_csv_path - each
+        # Start click on Live Session mints its OWN fresh timestamped run
+        # folder (see LiveSessionPage._begin_new_run_output), so nothing
+        # here can be pre-joined once and reused across multiple runs.
         self._pending_ctx = dict(
             device_serial=self.gui_state.device_serial, pick_a=pick_a, pick_b=pick_b,
             camera_controls=camera_controls,
@@ -251,9 +253,9 @@ class MainWindow(QMainWindow):
             frame_drop_threshold_factor=self.settings["test"]["frame_drop_threshold_factor"],
             warmup_pairs_to_skip=self.settings["test"]["warmup_pairs_to_skip"],
             pairing_gap_outlier_threshold_us=self.settings["test"]["pairing_gap_outlier_threshold_us"],
-            kept_csv_path=os.path.join(output_dir, self.settings["paths"]["raw_csv_path"]),
-            dropped_csv_path=os.path.join(output_dir, self.settings["paths"]["frame_drop_csv_path"]),
-            output_dir=output_dir,
+            output_root=ensure_output_dir(self.settings),
+            kept_csv_filename=self.settings["paths"]["raw_csv_path"],
+            dropped_csv_filename=self.settings["paths"]["frame_drop_csv_path"],
             snapshot_every_n_pairs=self.settings["test"]["snapshot_every_n_pairs"],
             max_snapshots=self.settings["test"]["max_snapshots"],
             stream_a_roi=self.gui_state.stream_a_roi, stream_b_roi=self.gui_state.stream_b_roi,
@@ -294,9 +296,9 @@ class MainWindow(QMainWindow):
             frame_drop_threshold_factor=pending["frame_drop_threshold_factor"],
             warmup_pairs_to_skip=pending["warmup_pairs_to_skip"],
             pairing_gap_outlier_threshold_us=pending["pairing_gap_outlier_threshold_us"],
-            kept_csv_path=pending["kept_csv_path"],
-            dropped_csv_path=pending["dropped_csv_path"],
-            output_dir=pending["output_dir"],
+            output_root=pending["output_root"],
+            kept_csv_filename=pending["kept_csv_filename"],
+            dropped_csv_filename=pending["dropped_csv_filename"],
             snapshot_every_n_pairs=pending["snapshot_every_n_pairs"],
             max_snapshots=pending["max_snapshots"],
             stream_a_roi=pending["stream_a_roi"], stream_b_roi=pending["stream_b_roi"],

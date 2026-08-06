@@ -7,14 +7,75 @@ GUI's live view took over; this reads the same buffered rows
 TestSession.stop() returns and domain.csv_export.export_session_csvs
 writes, so it never recomputes a metric - it only re-renders numbers
 that are already final.
+
+Three separate, stacked subplots (sharing one x-axis, "Pair index"), not
+two - Pairing gap (us), Position gap (ms), and Frame drop (per-stream) each
+get their own y-axis. An earlier version put pairing_gap_us and
+position_gap_ms on the SAME y-axis labeled just "Gap": since pairing gap's
+outlier threshold is ~100,000us and position gap is typically single-digit
+ms, one series would dwarf/flatten the other whenever both were legitimately
+in-range - the exact "shared/dual axis is misleading" problem
+gui/pages/live_session_page.py's own docstring already rejects for the live
+charts. Frame drop is split by stream (stream_a_frame_drop/
+stream_b_frame_drop), mirrored as +1/-1 the same way the live drop_plot
+already does (gui/pages/live_session_page.py) so a simultaneous A+B drop
+can't occlude one line behind the other - the old version collapsed both
+streams into one combined 0/1 "did anything drop" line, losing which
+stream actually dropped.
+
+Colors and dark-mode chrome (background/gridlines/axis text) come from
+domain/plot_theme.py, the same module gui/widgets/live_plot.py's LivePlot
+sources its own theme from, so this static export and the live view never
+visually drift apart.
+
+Figure width scales with how many pairs the session ran (see
+_figure_width) instead of a fixed size - a long run on a fixed-width figure
+squeezes thousands of points into the same few inches and reads as a dense,
+illegible smear. This deliberately does NOT decimate/drop any data point to
+control size instead: every row is still plotted, so a very long run gets a
+wider (but still complete and legible) image rather than a smaller,
+lossy one - fidelity matters more than file size for this metrology tool.
 """
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+from domain.plot_theme import (
+    SURFACE, GRIDLINE, MUTED_TEXT,
+    PAIRING_GAP_COLOR, POSITION_GAP_COLOR, STREAM_A_DROP_COLOR, STREAM_B_DROP_COLOR,
+)
 
-def export_session_plot(rows, path):
+# Width grows with run length so a long session's line has room to breathe
+# instead of flattening into a smear, but is capped so an extremely long
+# run doesn't produce an unreasonably large image file. Tuned against a
+# typical ~150 pairs/inch density; adjust these three constants together
+# if that ever needs revisiting.
+_MIN_FIGURE_WIDTH = 12.0
+_MAX_FIGURE_WIDTH = 48.0
+_PAIRS_PER_INCH = 150.0
+_FIGURE_HEIGHT = 10.0
+
+
+def _figure_width(num_rows):
+    return min(max(_MIN_FIGURE_WIDTH, num_rows / _PAIRS_PER_INCH), _MAX_FIGURE_WIDTH)
+
+
+def _style_axis(ax):
+    ax.set_facecolor(SURFACE)
+    ax.grid(True, color=GRIDLINE, alpha=0.6)
+    ax.tick_params(colors=MUTED_TEXT)
+    ax.xaxis.label.set_color(MUTED_TEXT)
+    ax.yaxis.label.set_color(MUTED_TEXT)
+    for spine in ax.spines.values():
+        spine.set_color(GRIDLINE)
+    ax.legend(facecolor=SURFACE, edgecolor=GRIDLINE, labelcolor=MUTED_TEXT)
+
+
+def _build_figure(rows):
+    """Builds (but doesn't save/close) the 3-axis figure - split out from
+    export_session_plot so tests can inspect the plotted line data directly
+    without round-tripping through a saved PNG."""
     pair_indices = [row["pair_index"] for row in rows]
     # Excluded pairs (syncer_outlier / frame_drop / warmup / miss) can carry
     # wild values (e.g. a multi-hundred-thousand-us pairing gap during the
@@ -27,30 +88,38 @@ def export_session_plot(rows, path):
     pairing_gap = [_to_plot_value(row.get("pairing_gap_us"), row.get("pairing_gap_us_excluded")) for row in rows]
     position_gap = [_to_plot_value(row.get("position_gap_ms"), row.get("position_gap_ms_excluded")) for row in rows]
 
-    # Per-pair delta (0/1), not a running total - one spike exactly where a
-    # drop happened, so it reads against the gap lines above on the same
-    # x-axis instead of an ever-climbing staircase.
-    dropped_this_pair = [
-        1 if row.get("position_gap_ms_exclude_reason") == "frame_drop" else 0
-        for row in rows
-    ]
+    # Mirrored +1/-1, not two 0/1 lines - a pair where BOTH streams drop at
+    # once would otherwise draw one line directly on top of the other, same
+    # convention gui/pages/live_session_page.py's live drop_plot already uses.
+    stream_a_drop = [1 if row.get("stream_a_frame_drop") else 0 for row in rows]
+    stream_b_drop = [-1 if row.get("stream_b_frame_drop") else 0 for row in rows]
 
-    fig, (gap_ax, drop_ax) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+    fig, (pairing_ax, position_ax, drop_ax) = plt.subplots(
+        3, 1, figsize=(_figure_width(len(rows)), _FIGURE_HEIGHT), sharex=True,
+    )
+    fig.patch.set_facecolor(SURFACE)
 
-    gap_ax.plot(pair_indices, pairing_gap, label="Pairing gap (us)", color="tab:red")
-    gap_ax.plot(pair_indices, position_gap, label="Position gap (ms)", color="tab:green")
-    gap_ax.set_ylabel("Gap")
-    gap_ax.legend()
-    gap_ax.grid(True, alpha=0.3)
+    pairing_ax.plot(pair_indices, pairing_gap, label="HW TS Latency (us)", color=PAIRING_GAP_COLOR)
+    pairing_ax.set_ylabel("Pairing gap (us)")
+    _style_axis(pairing_ax)
 
-    drop_ax.plot(pair_indices, dropped_this_pair, label="Frame drop (this pair)", color="tab:orange")
-    drop_ax.set_xlabel("Pair index")
+    position_ax.plot(pair_indices, position_gap, label="Optical Sync (ms)", color=POSITION_GAP_COLOR)
+    position_ax.set_ylabel("Position gap (ms)")
+    _style_axis(position_ax)
+
+    drop_ax.plot(pair_indices, stream_a_drop, label="Stream A frame drop", color=STREAM_A_DROP_COLOR)
+    drop_ax.plot(pair_indices, stream_b_drop, label="Stream B frame drop", color=STREAM_B_DROP_COLOR)
     drop_ax.set_ylabel("Frame drop")
-    drop_ax.legend()
-    drop_ax.grid(True, alpha=0.3)
+    drop_ax.set_xlabel("Pair index")
+    _style_axis(drop_ax)
 
     fig.tight_layout()
-    fig.savefig(path)
+    return fig
+
+
+def export_session_plot(rows, path):
+    fig = _build_figure(rows)
+    fig.savefig(path, facecolor=SURFACE)
     plt.close(fig)
 
 

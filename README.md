@@ -114,12 +114,15 @@ The window opens maximized. Walk through the wizard:
    press Enter, then repeat for Stream B's window.
 4. **Calibration** — click **Run Calibration** and watch the log. On
    failure, check the debug images named after each stream's own slug (e.g.
-   `output/debug_infrared1_detection.png`, `output/debug_color_detection.png`)
-   — these show the exact masked region and whatever was detected, even
-   when zero LEDs were found. With "Use dual LED panel" checked, each
-   stream is fully calibrated one at a time (its own panel on, capture, off,
-   capture) rather than both panels together, so the log will show this
-   happening sequentially per stream.
+   `output/calibration_<timestamp>/debug_infrared1_detection.png`,
+   `output/calibration_<timestamp>/debug_color_detection.png` — one fresh
+   timestamped subfolder per time you arrive at this page, shared by however
+   many times you click Run Calibration in that one visit) — these show the
+   exact masked region and whatever was detected, even when zero LEDs were
+   found. With "Use dual LED panel" checked, each stream is fully calibrated
+   one at a time (its own panel on, capture, off, capture) rather than both
+   panels together, so the log will show this happening sequentially per
+   stream.
 5. **Threshold Tuning** — click **Start** for a live video preview of both
    streams, each with the same on/off overlay Live Session uses (tune the
    Frame Sample Interval first if you want it slower/faster - locked once
@@ -135,8 +138,10 @@ The window opens maximized. Walk through the wizard:
    (toggle either metric series on/off), and the frame-drops plot. Click
    **Save Debug Snapshot** any time to check the LED on/off classification
    against the live video. Click **Stop** (or let the duration elapse) to
-   write the CSVs, a summary plot image, and a final debug snapshot under
-   `output/`.
+   write the CSVs, a summary plot image, PNGs of the 3 live charts, and a
+   final debug snapshot, all under a fresh
+   `output/live_session_<timestamp>/` folder minted by that Start click —
+   an earlier run's files are never overwritten.
 
 ## Configuration files
 
@@ -169,34 +174,47 @@ The window opens maximized. Walk through the wizard:
 
 ## Output
 
-Everything lands under `output/` (created automatically):
+Everything lands under `output/` (created automatically), each run in its
+own timestamped subfolder so a new run never overwrites a previous one:
 
-- `debug_<slug>_detection.png` for each of Stream A/Stream B (e.g.
-  `debug_infrared1_detection.png`, `debug_color_detection.png`) —
-  calibration's masked frame with detected LEDs circled and numbered.
-- `pipeline_sync_raw.csv` — every kept frame-pair from a live session
-  (timestamps, pairing gap, position gap, exclusion flags, and per-stream
-  `stream_a_frame_drop`/`stream_b_frame_drop` booleans).
-- `pipeline_sync_frame_drops.csv` — same schema, only the frame-drop-excluded
-  rows.
-- `pipeline_sync_plot.png` — a static end-of-session plot (pairing gap,
-  position gap, and a per-pair frame-drop spike, all vs. pair index),
-  rendered from the same rows as the CSVs.
-- `live_led_state_stream_a.png`, `live_led_state_stream_b.png` — LED on/off
-  debug snapshot from the most recent live-session frame: each calibrated
-  LED position circled green if currently classified "on", red if "off" -
-  lets you visually confirm the threshold classification is actually
-  correct. Written automatically at Stop, or any time via **Save Debug
-  Snapshot** (this same overlay is also shown live on the Stream A/Stream B
-  video panels during the session, not just in the saved files).
-- `periodic_led_state_stream_a_pair00020.png`,
-  `periodic_led_state_stream_b_pair00020.png`, etc. — the same on/off debug
-  overlay, saved automatically every `test.snapshot_every_n_pairs` pairs
-  during a live session (up to `test.max_snapshots` per stream), for
-  spot-checking detection quality over the course of a run rather than just
-  at the end. The pair index in the filename matches the CSV's `pair_index`
-  column and what was on screen at that exact moment. Cleared at the start
-  of each new session so files from a previous run don't linger.
+- `output/calibration_<timestamp>/` — one per Calibration page visit
+  (shared by however many times you click **Run Calibration** in that one
+  visit):
+  - `debug_<slug>_detection.png` for each of Stream A/Stream B (e.g.
+    `debug_infrared1_detection.png`, `debug_color_detection.png`) —
+    calibration's masked frame with detected LEDs circled and numbered.
+- `output/live_session_<timestamp>/` — one per **Start** click:
+  - `pipeline_sync_raw.csv` — every kept frame-pair from the run
+    (timestamps, pairing gap, position gap, exclusion flags, and per-stream
+    `stream_a_frame_drop`/`stream_b_frame_drop` booleans).
+  - `pipeline_sync_frame_drops.csv` — same schema, only the
+    frame-drop-excluded rows.
+  - `pipeline_sync_plot.png` — a static end-of-session plot: pairing gap
+    (us), position gap (ms), and per-stream frame drop (mirrored +1/-1 so a
+    simultaneous A+B drop can't hide one behind the other), each on its own
+    axis, all vs. pair index, dark-themed to match the live charts. Figure
+    width scales with how many pairs the run had (capped) so a long run's
+    line stays legible instead of a fixed-size smear — no data is decimated
+    to do this, every point is still plotted.
+  - `hw_ts_latency_chart.png`, `optical_sync_chart.png`,
+    `frame_drops_chart.png` — a PNG snapshot of each of the 3 live charts
+    exactly as they looked at Stop (same image the chart's own "Copy"
+    button would put on the clipboard, just auto-saved to disk too).
+  - `live_led_state_stream_a.png`, `live_led_state_stream_b.png` — LED
+    on/off debug snapshot from the most recent live-session frame: each
+    calibrated LED position circled green if currently classified "on", red
+    if "off" - lets you visually confirm the threshold classification is
+    actually correct. Written automatically at Stop, or any time via
+    **Save Debug Snapshot** (this same overlay is also shown live on the
+    Stream A/Stream B video panels during the session, not just in the
+    saved files).
+  - `periodic_led_state_stream_a_pair00020.png`,
+    `periodic_led_state_stream_b_pair00020.png`, etc. — the same on/off
+    debug overlay, saved automatically every `test.snapshot_every_n_pairs`
+    pairs during the run (up to `test.max_snapshots` per stream), for
+    spot-checking detection quality over the course of a run rather than
+    just at the end. The pair index in the filename matches the CSV's
+    `pair_index` column and what was on screen at that exact moment.
 
 ## Troubleshooting
 

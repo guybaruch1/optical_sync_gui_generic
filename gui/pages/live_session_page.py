@@ -17,9 +17,22 @@ pairs, capped at test.max_snapshots per stream, filename includes the
 pair_index so it can be cross-checked against what was on screen and
 against the CSV's pair_index column). At Stop, writes the CSVs
 (domain.csv_export.export_session_csvs), a static end-of-run plot image
-(domain.plot_export.export_session_plot), and one final LED on/off debug
+(domain.plot_export.export_session_plot), PNG snapshots of the 3 live
+charts themselves (_save_chart_images), and one final LED on/off debug
 snapshot for each stream - the same final snapshot can also be saved on
 demand mid-session via the "Save Debug Snapshot" button.
+
+Every Start click mints its OWN fresh timestamped
+output/live_session_<timestamp>/ folder (domain.run_output.create_run_dir,
+via _begin_new_run_output(), called first thing in start_session()) - a new
+run never overwrites a previous run's CSVs/graphs/snapshots the way one
+flat, fixed-filename output directory used to. The toolbar's "Export CSV"
+button and the periodic-snapshot/debug-image helpers below all read
+self._context["output_dir"]/["kept_csv_path"]/["dropped_csv_path"], which
+_begin_new_run_output() sets once per Start and which then stay pointed at
+that same run's folder until the next Start - so re-exporting mid-session
+or right after Stop still targets the run that's actually in progress or
+just finished, not a new folder.
 
 "HW TS Latency" and "Optical Sync" are the user-facing names for the
 underlying pairing_gap_us/position_gap_ms metrics (engine.metrics) - the
@@ -83,6 +96,7 @@ from domain.csv_export import export_session_csvs, export_series_csv
 from domain.plot_export import export_session_plot
 from domain.realsense_utils import draw_led_state_overlay, crop_to_roi
 from domain.running_stats import RunningStats
+from domain.run_output import create_run_dir
 
 
 def _build_copy_icon(color="#555555", size=18):
@@ -349,6 +363,20 @@ class LiveSessionPage(QWidget):
         QApplication.clipboard().setPixmap(plot_widget.grab())
         self.status_label.setText("Chart copied to clipboard as an image.")
 
+    def _save_chart_images(self, output_dir):
+        # Auto-saves the same grab() pixmap _copy_chart_image already
+        # produces for the clipboard, one PNG per live chart, into this
+        # run's own output folder - previously the only way to get these
+        # onto disk was manually clicking "Copy" per chart and pasting
+        # elsewhere; nothing saved them as files automatically.
+        chart_files = {
+            self.pairing_plot: "hw_ts_latency_chart.png",
+            self.position_plot: "optical_sync_chart.png",
+            self.drop_plot: "frame_drops_chart.png",
+        }
+        for plot_widget, filename in chart_files.items():
+            plot_widget.grab().save(os.path.join(output_dir, filename), "PNG")
+
     def _export_chart_csv(self, plot_widget, series_names):
         if self._context is None:
             self.status_label.setText("No session data yet - click Start first.")
@@ -381,7 +409,7 @@ class LiveSessionPage(QWidget):
                      stream_a_threshold, stream_b_threshold,
                      stream_a_xy, stream_b_xy, num_leds, neighborhood_size,
                      frame_drop_threshold_factor, warmup_pairs_to_skip, pairing_gap_outlier_threshold_us,
-                     kept_csv_path, dropped_csv_path, output_dir, snapshot_every_n_pairs, max_snapshots,
+                     output_root, kept_csv_filename, dropped_csv_filename, snapshot_every_n_pairs, max_snapshots,
                      stream_a_roi, stream_b_roi, camera_name, stream_a_label, stream_b_label,
                      dual_panel_config=None):
         self._context = dict(
@@ -397,7 +425,12 @@ class LiveSessionPage(QWidget):
             frame_drop_threshold_factor=frame_drop_threshold_factor,
             warmup_pairs_to_skip=warmup_pairs_to_skip,
             pairing_gap_outlier_threshold_us=pairing_gap_outlier_threshold_us,
-            kept_csv_path=kept_csv_path, dropped_csv_path=dropped_csv_path, output_dir=output_dir,
+            # Raw root + filename templates, not a pre-joined output_dir/
+            # kept_csv_path/dropped_csv_path - start_session() mints a fresh
+            # run folder (_begin_new_run_output) and joins these on every
+            # Start, so a new run never overwrites a previous one's files.
+            output_root=output_root, kept_csv_filename=kept_csv_filename,
+            dropped_csv_filename=dropped_csv_filename,
             snapshot_every_n_pairs=snapshot_every_n_pairs, max_snapshots=max_snapshots,
             stream_a_roi=stream_a_roi, stream_b_roi=stream_b_roi,
             stream_a_label=stream_a_label, stream_b_label=stream_b_label,
@@ -415,8 +448,24 @@ class LiveSessionPage(QWidget):
         self.stream_a_title_label.setText("{} - {}".format(short_name, stream_a_label))
         self.stream_b_title_label.setText("{} - {}".format(short_name, stream_b_label))
 
+    def _begin_new_run_output(self):
+        # Mints a fresh timestamped output/live_session_<timestamp>/ folder
+        # for THIS run and joins the CSV filename templates onto it - called
+        # first thing in start_session() so every other output_dir/
+        # kept_csv_path/dropped_csv_path reader below (and everything
+        # _on_session_finished/_export_chart_csv/_save_led_state_debug_images/
+        # _reexport_last_session_csvs read later) already sees this run's own
+        # folder, not a shared/overwritten one from a previous Start click.
+        ctx = self._context
+        output_dir = create_run_dir(ctx["output_root"], "live_session")
+        ctx["output_dir"] = output_dir
+        ctx["kept_csv_path"] = os.path.join(output_dir, ctx["kept_csv_filename"])
+        ctx["dropped_csv_path"] = os.path.join(output_dir, ctx["dropped_csv_filename"])
+        return output_dir
+
     def start_session(self):
         ctx = self._context
+        self._begin_new_run_output()
         duration_s = self.duration_spinbox.value() or None
         # Read live from the toolbar, not ctx["switch_time_ms"] - the
         # spinbox is what the operator can tune per-run (see set_context).
@@ -685,6 +734,7 @@ class LiveSessionPage(QWidget):
         self._last_session_rows = rows
         export_session_csvs(rows, self._context["kept_csv_path"], self._context["dropped_csv_path"])
         export_session_plot(rows, os.path.join(self._context["output_dir"], "pipeline_sync_plot.png"))
+        self._save_chart_images(self._context["output_dir"])
         self._save_led_state_debug_images()
         # Button re-enabling happens in _on_engine_thread_finished, not here -
         # this fires before SessionEngineThread.run()'s finally block (camera
