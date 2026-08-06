@@ -123,14 +123,23 @@ The window opens maximized. Walk through the wizard:
    one at a time (its own panel on, capture, off, capture) rather than both
    panels together, so the log will show this happening sequentially per
    stream.
-5. **Threshold Tuning** — click **Start** for a live video preview of both
-   streams, each with the same on/off overlay Live Session uses (tune the
-   Frame Sample Interval first if you want it slower/faster - locked once
-   running). Drag each stream's own Threshold Fraction (and LED Switch
-   Time, shared by both) while watching which LEDs are classified "on"
-   right now, click **Stop** any time, then click **Continue to Live Test**
-   once you're happy with both streams' classification (this stops the
-   preview automatically if it's still running).
+5. **Threshold Tuning** — if Calibration's automatic detection didn't go
+   well (wrong LED count, missed/merged blobs — check the debug images from
+   step 4), each stream has its own **LED Detection Threshold Tuning**
+   section above the Threshold Fraction control: drag the Detection
+   Threshold slider while watching the small preview and the "Detected: N /
+   num_leds" count update live, or click **Reset to Auto** to go back to
+   Calibration's own value. No new capture needed - this reuses the same
+   on/off frames Calibration already took. Otherwise, click **Start** for a
+   live video preview of both streams, each with the same on/off overlay
+   Live Session uses (tune the Frame Sample Interval first if you want it
+   slower/faster - locked once running). Drag each stream's own Threshold
+   Fraction (and LED Switch Time, shared by both) while watching which LEDs
+   are classified "on" right now, click **Stop** any time, then click
+   **Continue to Live Test** once you're happy with both streams'
+   classification (this stops the preview automatically if it's still
+   running, and saves whatever the current LED positions are — retuned or
+   original — back to `config.yaml`).
 6. **Live Session** — set an optional duration (0 = manual stop), tune the
    LED switch time and frame sample interval if needed (locked once a
    session is running), click **Start**, watch both video feeds (each with a

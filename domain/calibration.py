@@ -55,6 +55,22 @@ def centroids_in_grid_order(centroids, row_gap_px=15):
     return ordered, positions, row_layout
 
 
+def offset_positions(positions, roi):
+    """assign_grid_ids's/centroids_in_grid_order's centroids come from a
+    crop_to_roi'd image, so they're in that CROPPED image's own coordinates
+    (origin at the ROI's own top-left corner) - shifts every position back
+    to full-frame coordinates by the ROI's own (x, y) origin, since
+    build_positions_with_thresholds needs to sample brightness from the
+    full-frame on/off images, and everything downstream (Threshold Tuning,
+    Live Session) expects stream_a_xy/stream_b_xy in full-frame
+    coordinates too. Shared by gui/pages/calibration_page.py's own
+    detection flow and gui/pages/threshold_tuning_page.py's LED Detection
+    Threshold Tuning retuning - moved here (was calibration_page.py-private)
+    once a second caller needed it."""
+    roi_x, roi_y = roi[0], roi[1]
+    return {led_id: [x + roi_x, y + roi_y] for led_id, (x, y) in positions.items()}
+
+
 def build_positions_with_thresholds(xy_positions, on_frame, off_frame, neighborhood_size):
     # Caps neighborhood_size at what's actually safe for THIS run's real
     # measured LED pixel spacing (see safe_neighborhood_size's docstring) -
@@ -68,6 +84,29 @@ def build_positions_with_thresholds(xy_positions, on_frame, off_frame, neighborh
         threshold = off_value + 0.5 * (on_value - off_value)
         result[led_id] = [x, y, round(on_value, 2), round(off_value, 2), round(threshold, 2)]
     return result
+
+
+def build_grid_positions(centroids, roi, on_frame, off_frame, row_gap_px, neighborhood_size):
+    """Collapses the 3-step sequence both CalibrationPage's own auto-detect
+    flow and ThresholdTuningPage's LED Detection Threshold Tuning retuning
+    need, so neither duplicates it: grid-order assignment
+    (centroids_in_grid_order) -> offset back to full-frame coordinates
+    (offset_positions) -> per-LED on/off/threshold sampling
+    (build_positions_with_thresholds). `centroids` must already be
+    merge_close_centroids'd, in the CROPPED image's own coordinates (same
+    coordinate space crop_to_roi/detect_led_centroids produce).
+
+    Returns (positions, row_layout, debug_centroids) - positions is the
+    final {led_id: [x, y, on, off, threshold]} dict (full-frame
+    coordinates), debug_centroids is the grid-ordered (still cropped-frame)
+    centroid list a caller can hand to save_debug_detection_image for
+    correctly-numbered debug PNGs. Raises RuntimeError (propagated from
+    centroids_in_grid_order) when centroids is empty - same contract as
+    before this was extracted."""
+    debug_centroids, positions, row_layout = centroids_in_grid_order(centroids, row_gap_px)
+    positions = offset_positions(positions, roi)
+    positions = build_positions_with_thresholds(positions, on_frame, off_frame, neighborhood_size)
+    return positions, row_layout, debug_centroids
 
 
 def compute_threshold(on_values, off_values, fraction):

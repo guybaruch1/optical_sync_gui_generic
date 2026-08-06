@@ -4,7 +4,9 @@ import yaml
 from domain.calibration import (
     assign_grid_ids,
     centroids_in_grid_order,
+    offset_positions,
     build_positions_with_thresholds,
+    build_grid_positions,
     compute_threshold,
     update_config_leds,
     load_led_positions,
@@ -63,6 +65,41 @@ def test_build_positions_with_thresholds_computes_midpoint():
     assert on_value == 200.0
     assert off_value == 100.0
     assert threshold == 150.0
+
+
+def test_offset_positions_shifts_by_roi_origin():
+    positions = {"0": [10.0, 10.0], "1": [20.0, 30.0]}
+    result = offset_positions(positions, roi=(100, 50, 200, 200))
+    assert result["0"] == [110.0, 60.0]
+    assert result["1"] == [120.0, 80.0]
+
+
+def test_build_grid_positions_matches_the_old_inline_sequence():
+    # Same shuffled 2-row grid as test_assign_grid_ids_orders_row_major, in
+    # CROPPED coordinates - build_grid_positions must reproduce exactly what
+    # centroids_in_grid_order -> offset_positions -> build_positions_with_thresholds
+    # chained by hand would have produced.
+    centroids = [(20, 10), (10, 10), (30, 10), (20, 30), (10, 30), (30, 30)]
+    roi = (100, 50, 200, 200)
+    on_frame = np.full((300, 300), 200, dtype=np.uint8)
+    off_frame = np.full((300, 300), 100, dtype=np.uint8)
+
+    positions, row_layout, debug_centroids = build_grid_positions(
+        centroids, roi, on_frame, off_frame, row_gap_px=15, neighborhood_size=5,
+    )
+
+    assert row_layout == [3, 3]
+    assert debug_centroids[0] == (10.0, 10.0)  # still in CROPPED coordinates
+    x, y, on_value, off_value, threshold = positions["0"]
+    assert (x, y) == (110.0, 60.0)  # offset back to full-frame coordinates
+    assert on_value == 200.0
+    assert off_value == 100.0
+    assert threshold == 150.0
+
+
+def test_build_grid_positions_raises_on_empty_centroids():
+    with pytest.raises(RuntimeError):
+        build_grid_positions([], (0, 0, 10, 10), np.zeros((10, 10)), np.zeros((10, 10)), 15, 5)
 
 
 def test_compute_threshold_at_half_fraction_matches_calibrations_own_midpoint():

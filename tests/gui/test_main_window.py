@@ -223,6 +223,20 @@ def _window_after_config_chosen(qapp, monkeypatch, tmp_path, dual_panel=False):
     window._on_config_chosen((IR1, COLOR0, {
         "emitter_enabled": False, "auto_exposure": True, "exposure": None, "gain": None,
     }))
+    # This test harness skips ROI Select and Calibration entirely (jumps
+    # straight to _on_calibration_done), so neither gui_state's ROI fields
+    # nor calibration_page.last_calibration_result get populated by a real
+    # run the way the actual wizard flow would - fill in the same shape
+    # _on_calibration_done now needs (crop_to_roi requires a real ROI,
+    # LED Detection Threshold Tuning needs Calibration's retained frames).
+    window.gui_state.stream_a_roi = [0, 0, 50, 50]
+    window.gui_state.stream_b_roi = [0, 0, 50, 50]
+    window.calibration_page.last_calibration_result = dict(
+        image_a_on=np.full((50, 50), 50, dtype=np.uint8), image_a_off=np.full((50, 50), 50, dtype=np.uint8),
+        image_b_on=np.full((50, 50), 50, dtype=np.uint8), image_b_off=np.full((50, 50), 50, dtype=np.uint8),
+        stream_a_otsu_threshold=127, stream_b_otsu_threshold=127,
+        min_blob_area=5, row_gap_px=15, neighborhood_size=5,
+    )
     return window
 
 
@@ -237,6 +251,44 @@ def test_on_calibration_done_populates_threshold_tuning_page_and_switches_to_it(
     assert list(window.threshold_tuning_page.stream_a_threshold) == [150.0]
     # stream_b: off=200/on=600, same default fraction 0.25 -> 200+0.25*400=300
     assert list(window.threshold_tuning_page.stream_b_threshold) == [300.0]
+
+
+def test_on_calibration_done_threads_calibration_result_into_threshold_tuning_context(qapp, monkeypatch, tmp_path):
+    # LED Detection Threshold Tuning's own state (the already-captured
+    # frames + Otsu thresholds CalibrationPage retained) must actually reach
+    # ThresholdTuningPage's context, not just the pre-existing on/off-value
+    # arrays.
+    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+
+    ctx = window.threshold_tuning_page._context
+    calib_result = window.calibration_page.last_calibration_result
+    assert ctx["stream_a_image_on"] is calib_result["image_a_on"]
+    assert ctx["stream_b_image_on"] is calib_result["image_b_on"]
+    assert ctx["stream_a_otsu_threshold"] == calib_result["stream_a_otsu_threshold"]
+    assert ctx["config_path"] == window.settings["paths"]["config_path"]
+
+
+def test_on_tuning_done_reads_stream_xy_live_from_threshold_tuning_page_not_a_stale_snapshot(qapp, monkeypatch, tmp_path):
+    # Regression test: _on_tuning_done used to read stream_a_xy/stream_b_xy
+    # from self._pending_ctx - a snapshot frozen in _on_calibration_done,
+    # BEFORE Threshold Tuning ever ran. That accidentally worked only
+    # because nothing previously ever reassigned
+    # threshold_tuning_page._context["stream_a_xy"] after set_context().
+    # LED Detection Threshold Tuning can now do exactly that (a retune can
+    # change the LED count) - simulate one here and confirm Live Session
+    # gets the PAGE's current value, not the stale pre-tuning one.
+    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        retuned_stream_a_xy = np.array([(9.0, 9.0), (8.0, 8.0), (7.0, 7.0)])  # deliberately a different shape
+        window.threshold_tuning_page._context["stream_a_xy"] = retuned_stream_a_xy
+        window._on_tuning_done()
+
+    assert window.live_session_page._context["stream_a_xy"] is retuned_stream_a_xy
 
 
 def test_on_tuning_done_passes_tuned_per_stream_thresholds_to_live_session(qapp, monkeypatch, tmp_path):

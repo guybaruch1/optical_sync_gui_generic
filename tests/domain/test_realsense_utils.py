@@ -8,6 +8,7 @@ from domain.realsense_utils import (
     merge_close_centroids,
     detect_led_centroids,
     save_debug_detection_image,
+    draw_detected_centroids,
     draw_bundle_overlay,
     draw_led_state_overlay,
     combine_side_by_side,
@@ -160,6 +161,31 @@ def test_detect_led_centroids_finds_bright_blob():
     assert 20 <= cy <= 30
 
 
+def test_detect_led_centroids_manual_threshold_finds_the_same_blob():
+    # threshold=<int> is the manual override path (LED Detection Threshold
+    # Tuning) - must still find the same blob a manual value comfortably
+    # below its brightness (100) and above the background (0) would catch.
+    image = np.zeros((50, 50), dtype=np.uint8)
+    image[20:30, 20:30] = 200
+    centroids, chosen_threshold = detect_led_centroids(image, 100, min_area=20)
+    assert chosen_threshold == 100  # echoes the given value, not Otsu's own pick
+    assert len(centroids) == 1
+    cx, cy = centroids[0]
+    assert 20 <= cx <= 30
+    assert 20 <= cy <= 30
+
+
+def test_detect_led_centroids_manual_threshold_above_blob_brightness_finds_nothing():
+    # A manual threshold set ABOVE the blob's own brightness must exclude
+    # it - confirms this is a real fixed cutoff, not silently falling back
+    # to Otsu regardless of what's passed (the bug this function used to have).
+    image = np.zeros((50, 50), dtype=np.uint8)
+    image[20:30, 20:30] = 100
+    centroids, chosen_threshold = detect_led_centroids(image, 150, min_area=20)
+    assert chosen_threshold == 150
+    assert centroids == []
+
+
 def test_detect_led_centroids_separates_multiple_blurred_blobs_on_a_cropped_image():
     # Regression: a masked-but-not-cropped full frame (apply_roi_mask) has
     # a histogram dominated by masked-out zero pixels outside the ROI
@@ -226,6 +252,35 @@ def test_save_debug_detection_image_shrinks_circles_for_tight_spacing(tmp_path):
     # midpoint between the two centers should be untouched background.
     midpoint_pixel = saved[25, 25]
     assert midpoint_pixel.tolist() != [0, 255, 0]
+
+
+def test_draw_detected_centroids_marks_circles_without_numbering():
+    # Points far enough apart that _debug_circle_radius falls back to its
+    # default 8px (same distances test_draw_led_state_overlay's own circle
+    # test uses), so the radius here is unambiguous.
+    image = np.zeros((50, 50), dtype=np.uint8)
+    centroids = [(10, 10), (40, 40)]
+
+    result = draw_detected_centroids(image, centroids)
+
+    assert result.shape == (50, 50, 3)  # grayscale converted to BGR for drawing
+    assert result is not image  # doesn't mutate/return the caller's own array
+    assert (image == 0).all()  # original untouched
+    assert result[10, 10 + 8].tolist() == [0, 255, 0]  # circle drawn at the first centroid
+    # No numbering text (save_debug_detection_image draws "0"/"1" a few px
+    # right of each point) - well past the circle stays plain background.
+    assert result[10, 10 + 20].tolist() == [0, 0, 0]
+
+
+def test_draw_detected_centroids_does_not_write_to_disk(tmp_path, monkeypatch):
+    import cv2
+
+    def _fail_if_called(*args, **kwargs):
+        raise AssertionError("draw_detected_centroids must not touch disk")
+
+    monkeypatch.setattr(cv2, "imwrite", _fail_if_called)
+
+    draw_detected_centroids(np.zeros((20, 20), dtype=np.uint8), [(10, 10)])
 
 
 def test_draw_bundle_overlay_converts_grayscale_and_draws_text():

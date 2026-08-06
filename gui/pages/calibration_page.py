@@ -21,15 +21,22 @@ Run multiple times in one visit (e.g. while tuning ROI) intentionally shares
 that same folder.
 
 The debug detection PNG is numbered using domain.calibration.
-centroids_in_grid_order's row-major order (index i IS led_id i, the same ID
+build_grid_positions's row-major order (index i IS led_id i, the same ID
 config.yaml/Threshold Tuning/Live Session actually use for that LED), not
 detect_led_centroids' own raw, arbitrary contour-scan order - an earlier
 version numbered the raw order directly, which didn't correspond to any
 real LED ID at all despite looking superficially grid-like. Falls back to
-that raw order only when zero LEDs were detected (centroids_in_grid_order
-raises in that case, same as assign_grid_ids) - there's no real grid order
-to show yet, but the debug image still needs to exist for exactly that
-failure case."""
+that raw order only when zero LEDs were detected (build_grid_positions
+raises in that case, same as assign_grid_ids/centroids_in_grid_order) -
+there's no real grid order to show yet, but the debug image still needs to
+exist for exactly that failure case.
+
+self.last_calibration_result retains each stream's already-captured on/off
+frames and Otsu-chosen detection threshold after a successful run (None
+before any run, or if the last run failed) - read by MainWindow to give
+gui/pages/threshold_tuning_page.py's LED Detection Threshold Tuning section
+a manual detection-threshold override to work with, reusing these same
+frames rather than capturing its own."""
 
 import os
 import time
@@ -37,7 +44,7 @@ import time
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QPlainTextEdit, QPushButton, QApplication
 
-from domain.calibration import centroids_in_grid_order, build_positions_with_thresholds, update_config_leds
+from domain.calibration import build_grid_positions, update_config_leds
 from domain.run_output import create_run_dir
 from domain.realsense_utils import (
     detect_led_centroids, merge_close_centroids, crop_to_roi, save_debug_detection_image,
@@ -49,19 +56,6 @@ from engine.streams import (
 from engine.led_panel import LEDPanel
 from engine.dual_panel_control import turn_all_leds_on, turn_all_leds_off, switched_to_stream_panel
 from gui.pages.roi_select_page import stream_label, _apply_camera_controls
-
-
-def _offset_positions(positions, roi):
-    """assign_grid_ids's centroids come from a crop_to_roi'd image, so
-    they're in that CROPPED image's own coordinates (origin at the ROI's
-    own top-left corner) - shifts every position back to full-frame
-    coordinates by the ROI's own (x, y) origin, since
-    build_positions_with_thresholds needs to sample brightness from the
-    full-frame on/off images, and everything downstream (Threshold Tuning,
-    Live Session) expects stream_a_xy/stream_b_xy in full-frame
-    coordinates too."""
-    roi_x, roi_y = roi[0], roi[1]
-    return {led_id: [x + roi_x, y + roi_y] for led_id, (x, y) in positions.items()}
 
 
 class CalibrationPage(QWidget):
@@ -77,6 +71,15 @@ class CalibrationPage(QWidget):
         self.run_button.clicked.connect(self._on_run_clicked)
         layout.addWidget(self.run_button)
         self._pending_args = None
+        # None until a run completes successfully - read by MainWindow to
+        # thread the already-captured on/off frames (plus the Otsu threshold
+        # each stream found) into ThresholdTuningPage's LED Detection
+        # Threshold Tuning section, so it can offer a manual override
+        # without needing its own camera capture. Set only once, as the
+        # very last statement before calibration_done fires (see
+        # _run_calibration) - a later failed run leaves this at whatever
+        # the last SUCCESSFUL run left it, never partially overwritten.
+        self.last_calibration_result = None
 
     def _log(self, message):
         self.log_view.appendPlainText(message)
@@ -209,14 +212,17 @@ class CalibrationPage(QWidget):
         self._log("Detected {} LED(s) in {} (Otsu threshold {}).".format(len(centroids_a), label_a, otsu_a))
         debug_path_a = os.path.join(output_dir, "debug_{}_detection.png".format(slug_a))
         try:
-            # Numbered in the SAME row-major order assign_grid_ids itself
-            # assigns as led_id - NOT detect_led_centroids' raw,
-            # arbitrary contour-scan order (an earlier version drew that
-            # raw order directly, which bore no relation to the actual
-            # led_id config.yaml/Threshold Tuning/Live Session use for
-            # that same LED, while still happening to look grid-like
-            # enough to read as "wrong" rather than obviously arbitrary).
-            debug_centroids_a, positions_a, row_layout_a = centroids_in_grid_order(centroids_a, row_gap_px)
+            # build_grid_positions numbers the debug image in the SAME
+            # row-major order assign_grid_ids itself assigns as led_id -
+            # NOT detect_led_centroids' raw, arbitrary contour-scan order
+            # (an earlier version drew that raw order directly, which bore
+            # no relation to the actual led_id config.yaml/Threshold
+            # Tuning/Live Session use for that same LED, while still
+            # happening to look grid-like enough to read as "wrong" rather
+            # than obviously arbitrary).
+            positions_a, row_layout_a, debug_centroids_a = build_grid_positions(
+                centroids_a, stream_a_roi, image_a_on, image_a_off, row_gap_px, neighborhood_size,
+            )
         except RuntimeError:
             # No LEDs detected at all - there's no real grid order to
             # show yet, but a debug image (in raw, arbitrary detection
@@ -226,14 +232,6 @@ class CalibrationPage(QWidget):
             raise
         save_debug_detection_image(cropped_a, debug_centroids_a, debug_path_a)
         self._log("Saved debug image (cropped ROI + detected LEDs circled, numbered by grid ID): {}".format(debug_path_a))
-        # assign_grid_ids' centroids are in the CROPPED image's own
-        # coordinates (crop_to_roi's origin is the ROI's own top-left
-        # corner) - build_positions_with_thresholds below needs full-frame
-        # coordinates to sample brightness from the full-frame
-        # image_a_on/image_a_off, and everything downstream (Threshold
-        # Tuning, Live Session) expects stream_a_xy in full-frame
-        # coordinates too, so shift back by the ROI's own origin now.
-        positions_a = _offset_positions(positions_a, stream_a_roi)
 
         self._log("Detecting LEDs in {} frame...".format(label_b))
         centroids_b, otsu_b = detect_led_centroids(cropped_b, None, min_blob_area)
@@ -241,23 +239,20 @@ class CalibrationPage(QWidget):
         self._log("Detected {} LED(s) in {} (Otsu threshold {}).".format(len(centroids_b), label_b, otsu_b))
         debug_path_b = os.path.join(output_dir, "debug_{}_detection.png".format(slug_b))
         try:
-            debug_centroids_b, positions_b, row_layout_b = centroids_in_grid_order(centroids_b, row_gap_px)
+            positions_b, row_layout_b, debug_centroids_b = build_grid_positions(
+                centroids_b, stream_b_roi, image_b_on, image_b_off, row_gap_px, neighborhood_size,
+            )
         except RuntimeError:
             save_debug_detection_image(cropped_b, centroids_b, debug_path_b)
             raise
         save_debug_detection_image(cropped_b, debug_centroids_b, debug_path_b)
         self._log("Saved debug image (cropped ROI + detected LEDs circled, numbered by grid ID): {}".format(debug_path_b))
-        positions_b = _offset_positions(positions_b, stream_b_roi)
 
         if row_layout_a != row_layout_b:
             self._log(
                 "WARNING: {} row layout {} != {} row layout {} - led_id may not match the same "
                 "physical LED in both dicts.".format(label_a, row_layout_a, label_b, row_layout_b)
             )
-
-        self._log("Computing per-LED on/off/threshold values...")
-        positions_a = build_positions_with_thresholds(positions_a, image_a_on, image_a_off, neighborhood_size)
-        positions_b = build_positions_with_thresholds(positions_b, image_b_on, image_b_off, neighborhood_size)
 
         for label, positions in ((label_a, positions_a), (label_b, positions_b)):
             weakest_id, weakest_contrast = min(
@@ -272,6 +267,17 @@ class CalibrationPage(QWidget):
         self._log("Saved {} LED positions per stream ({}={}, {}={}) to {}".format(
             len(positions_a), label_a, slug_a, label_b, slug_b, config_path
         ))
+        # Retained for ThresholdTuningPage's LED Detection Threshold Tuning
+        # section - lets it offer a manual detection-threshold override
+        # using these SAME already-captured frames, with no new camera
+        # capture of its own. Set as the very last statement before
+        # calibration_done fires - see __init__'s comment on this attribute.
+        self.last_calibration_result = dict(
+            image_a_on=image_a_on, image_a_off=image_a_off,
+            image_b_on=image_b_on, image_b_off=image_b_off,
+            stream_a_otsu_threshold=int(round(otsu_a)), stream_b_otsu_threshold=int(round(otsu_b)),
+            min_blob_area=min_blob_area, row_gap_px=row_gap_px, neighborhood_size=neighborhood_size,
+        )
         self.calibration_done.emit()
 
     def _capture_on_off_for_stream(self, groups, pick, stream_name, dual_panel_config, settle_frames):

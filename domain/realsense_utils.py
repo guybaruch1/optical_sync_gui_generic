@@ -129,8 +129,21 @@ def merge_close_centroids(centroids, distance_fraction=0.5):
 
 
 def detect_led_centroids(image, threshold, min_area):
+    """threshold=None: automatic Otsu (this function's original, and still
+    default, behavior). threshold=<int 0-255>: a fixed manual value instead
+    - lets a caller override Otsu when it picks badly for a given frame's
+    actual exposure/contrast (gui/pages/threshold_tuning_page.py's LED
+    Detection Threshold Tuning section; matches tools/panel_drift/
+    panel_drift_calibrate.py's own _detect_centroids_at_threshold exactly).
+    Returns (centroids, chosen_threshold) either way - chosen_threshold is
+    Otsu's own computed value in the first case, an echo of the given
+    threshold in the second (cv2.threshold's own return value already
+    provides this, no special-casing needed)."""
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image.copy()
-    chosen_threshold, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    if threshold is None:
+        chosen_threshold, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    else:
+        chosen_threshold, binary = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY)
     kernel = np.ones((3, 3), np.uint8)
     binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -180,6 +193,26 @@ def save_debug_detection_image(image, centroids, path):
         cv2.putText(debug_img, str(i), (int(x) + 10, int(y)), cv2.FONT_HERSHEY_SIMPLEX,
                     0.4, (0, 0, 255), 1)
     cv2.imwrite(path, debug_img)
+
+
+def draw_detected_centroids(image, centroids):
+    """Circles-only draw (no numbering, no disk write) - for
+    gui/pages/threshold_tuning_page.py's LED Detection Threshold Tuning
+    live per-tick preview, where a fresh detection needs to be shown on
+    every slider drag. Deliberately independent of save_debug_detection_image
+    (not called by it, doesn't call it) rather than a shared circles-drawing
+    step factored out of it - that function's existing per-point
+    circle-then-text interleaving must stay byte-identical for its existing
+    callers, and a two-pass "draw all circles, then all text" refactor could
+    change the final pixels wherever a later LED's circle overlaps an
+    earlier one's number label at tight spacing. Small, already-idiomatic
+    duplication (draw_led_state_overlay below already repeats the same
+    grayscale-conversion prelude independently) traded for that guarantee."""
+    debug_img = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR) if len(image.shape) == 2 else image.copy()
+    radius = _debug_circle_radius(centroids)
+    for (x, y) in centroids:
+        cv2.circle(debug_img, (int(x), int(y)), radius, (0, 255, 0), 1)
+    return debug_img
 
 
 def draw_led_state_overlay(image, xy_positions, on_mask):

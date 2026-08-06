@@ -41,6 +41,15 @@ class _FakePreviewThread:
 
 
 def _minimal_context(**overrides):
+    # A real (non-zero) full-frame ROI + valid small images - unlike the
+    # rest of this context (which only feeds the pre-existing
+    # threshold-fraction on/off logic), set_context() now also runs LED
+    # Detection Threshold Tuning's own Tier 1 recompute synchronously
+    # (crop_to_roi + detect_led_centroids + draw_detected_centroids), so
+    # these need to be real, valid data even for tests that don't otherwise
+    # care about detection - a zero-size ROI (the old placeholder) would
+    # crop to an empty array and crash.
+    blank_image = np.full((20, 20), 50, dtype=np.uint8)
     ctx = dict(
         ctx=None, device_serial="123456",
         pick_a={"stream_type": "infrared", "stream_index": 1, "width": 4, "height": 4, "fps": 30, "format": "y8"},
@@ -51,8 +60,15 @@ def _minimal_context(**overrides):
         stream_b_on=np.full(2, 600.0), stream_b_off=np.full(2, 200.0),
         num_leds=2, neighborhood_size=5, scan_direction=1, switch_time_ms=1,
         stream_a_threshold_fraction_default=0.25, stream_b_threshold_fraction_default=0.25,
-        stream_a_roi=(0, 0, 0, 0), stream_b_roi=(0, 0, 0, 0), camera_name="Intel RealSense D455",
+        stream_a_roi=(0, 0, 20, 20), stream_b_roi=(0, 0, 20, 20), camera_name="Intel RealSense D455",
         stream_a_label="Infrared 1", stream_b_label="Color",
+        config_path="config.yaml",
+        image_a_on=blank_image, image_a_off=blank_image,
+        image_b_on=blank_image, image_b_off=blank_image,
+        stream_a_otsu_threshold=127, stream_b_otsu_threshold=127,
+        min_blob_area=5, row_gap_px=15, calibration_neighborhood_size=5,
+        stream_a_positions={"0": [1.0, 1.0, 300.0, 100.0, 200.0], "1": [2.0, 2.0, 300.0, 100.0, 200.0]},
+        stream_b_positions={"0": [1.0, 1.0, 600.0, 200.0, 400.0], "1": [2.0, 2.0, 600.0, 200.0, 400.0]},
     )
     ctx.update(overrides)
     return ctx
@@ -182,6 +198,99 @@ def test_switch_time_ms_property_returns_a_fractional_spinbox_value(qapp):
     assert page.switch_time_ms == 0.5
 
 
+# --- LED Detection Threshold Tuning: manual override of Calibration's
+# Otsu-based LED-position detection, per stream. ---
+
+def _two_blob_image():
+    import cv2
+    image = np.full((40, 40), 20, dtype=np.uint8)
+    cv2.circle(image, (10, 10), 5, 200, -1)
+    cv2.circle(image, (30, 30), 5, 200, -1)
+    return image
+
+
+def _detection_tuning_context(**overrides):
+    two_blobs = _two_blob_image()
+    return _minimal_context(
+        image_a_on=two_blobs, image_a_off=np.full((40, 40), 20, dtype=np.uint8),
+        stream_a_roi=(0, 0, 40, 40), stream_a_otsu_threshold=100, min_blob_area=10,
+        **overrides,
+    )
+
+
+def test_detection_slider_inits_to_cached_otsu_value_per_stream(qapp):
+    page = _page_with_context(stream_a_otsu_threshold=140, stream_b_otsu_threshold=90)
+    assert page.stream_a_detection_slider.value() == 140
+    assert page.stream_b_detection_slider.value() == 90
+
+
+def test_moving_detection_slider_updates_detected_count_label(qapp):
+    page = ThresholdTuningPage()
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        page.set_context(**_detection_tuning_context())
+
+    page.stream_a_detection_slider.setValue(100)  # below the blobs' 200 -> finds both
+    assert page.stream_a_detected_count_label.text() == "Detected: 2 / 2"
+
+    page.stream_a_detection_slider.setValue(255)  # above every pixel -> finds nothing
+    assert page.stream_a_detected_count_label.text() == "Detected: 0 / 2"
+
+
+def test_zero_centroids_leaves_context_xy_unchanged(qapp):
+    page = ThresholdTuningPage()
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        page.set_context(**_detection_tuning_context())
+    original_xy = page._context["stream_a_xy"]
+
+    page.stream_a_detection_slider.setValue(255)  # finds nothing
+    page._commit_detection_threshold("stream_a")  # bypass the debounce timer, same effect
+
+    assert page.stream_a_detected_count_label.text() == "Detected: 0 / 2"
+    assert page._context["stream_a_xy"] is original_xy  # untouched, not corrupted
+
+
+def test_commit_detection_threshold_updates_context_on_success(qapp):
+    page = ThresholdTuningPage()
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        page.set_context(**_detection_tuning_context())
+
+    page.stream_a_detection_slider.setValue(100)  # finds both real blobs
+    page._commit_detection_threshold("stream_a")
+
+    assert len(page._context["stream_a_xy"]) == 2
+    assert len(page._context["stream_a_positions"]) == 2
+
+
+def test_detection_spinbox_and_slider_stay_linked(qapp):
+    page = _page_with_context()
+    page.stream_a_detection_spinbox.setValue(77)
+    assert page.stream_a_detection_slider.value() == 77
+    page.stream_a_detection_slider.setValue(33)
+    assert page.stream_a_detection_spinbox.value() == 33
+
+
+def test_reset_to_auto_restores_the_cached_otsu_value(qapp):
+    page = _page_with_context(stream_a_otsu_threshold=140)
+    page.stream_a_detection_slider.setValue(50)
+
+    page.stream_a_reset_to_auto_button.click()
+
+    assert page.stream_a_detection_slider.value() == 140
+
+
+def test_detection_controls_disabled_while_preview_running(qapp):
+    page = _started_page()
+    assert not page.stream_a_detection_slider.isEnabled()
+    assert not page.stream_a_detection_spinbox.isEnabled()
+    assert not page.stream_a_reset_to_auto_button.isEnabled()
+
+    page.preview_thread.finished.emit()
+
+    assert page.stream_a_detection_slider.isEnabled()
+    assert page.stream_a_detection_spinbox.isEnabled()
+    assert page.stream_a_reset_to_auto_button.isEnabled()
+
+
 def test_on_frame_ready_computes_mask_from_current_spinbox_value_not_the_original_default(qapp, monkeypatch):
     page = _page_with_context()  # stream_a: off=100, on=300, default fraction=0.25 -> threshold 150
     page.stream_a_threshold_fraction_spinbox.setValue(0.5)  # -> threshold 200, not the original 150
@@ -207,13 +316,16 @@ def test_continue_button_blocks_until_preview_thread_stopped_and_emits_tuning_do
 
     received = []
     page.tuning_done.connect(lambda: received.append(True))
-    page._on_continue_clicked()
+    with patch("gui.pages.threshold_tuning_page.update_config_leds") as mock_update, \
+         patch("gui.pages.threshold_tuning_page.stream_slug", side_effect=["infrared1", "color"]):
+        page._on_continue_clicked()
 
     thread.request_stop.assert_called_once()
     thread.wait.assert_called_once()
     assert received == [True]
     assert page.preview_thread is None
     assert page.start_button.isEnabled()
+    mock_update.assert_called_once()
 
 
 def test_continue_button_is_a_noop_stop_when_nothing_is_running(qapp):
@@ -221,6 +333,35 @@ def test_continue_button_is_a_noop_stop_when_nothing_is_running(qapp):
 
     received = []
     page.tuning_done.connect(lambda: received.append(True))
-    page._on_continue_clicked()  # must not raise
+    with patch("gui.pages.threshold_tuning_page.update_config_leds"), \
+         patch("gui.pages.threshold_tuning_page.stream_slug", side_effect=["infrared1", "color"]):
+        page._on_continue_clicked()  # must not raise
 
     assert received == [True]
+
+
+def test_continue_button_persists_current_positions_to_config(qapp):
+    page = _page_with_context()
+
+    with patch("gui.pages.threshold_tuning_page.update_config_leds") as mock_update, \
+         patch("gui.pages.threshold_tuning_page.stream_slug", side_effect=["infrared1", "color"]):
+        page._on_continue_clicked()
+
+    args = mock_update.call_args.args
+    assert args[0] == "config.yaml"  # config_path from _minimal_context
+    assert args[2] == "infrared1" and args[5] == "color"
+    assert args[3] == page._context["stream_a_positions"]
+    assert args[6] == page._context["stream_b_positions"]
+
+
+def test_continue_button_warns_on_led_count_mismatch(qapp):
+    page = _page_with_context(
+        stream_a_positions={"0": [1.0, 1.0, 300.0, 100.0, 200.0]},  # 1 LED, num_leds=2
+    )
+
+    with patch("gui.pages.threshold_tuning_page.update_config_leds"), \
+         patch("gui.pages.threshold_tuning_page.stream_slug", side_effect=["infrared1", "color"]), \
+         patch("gui.pages.threshold_tuning_page.QMessageBox") as mock_message_box:
+        page._on_continue_clicked()
+
+    mock_message_box.warning.assert_called_once()

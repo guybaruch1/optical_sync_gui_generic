@@ -244,11 +244,16 @@ class MainWindow(QMainWindow):
         # Start click on Live Session mints its OWN fresh timestamped run
         # folder (see LiveSessionPage._begin_new_run_output), so nothing
         # here can be pre-joined once and reused across multiple runs.
+        # stream_a_xy/stream_b_xy are NOT stashed here (unlike before) -
+        # LED Detection Threshold Tuning on that page can now REASSIGN its
+        # own copy of these arrays (a retune can change the LED count), so
+        # _on_tuning_done reads them live off threshold_tuning_page's own
+        # properties instead of a snapshot frozen at this point, which would
+        # go stale the moment a retune actually changes anything.
         self._pending_ctx = dict(
             device_serial=self.gui_state.device_serial, pick_a=pick_a, pick_b=pick_b,
             camera_controls=camera_controls,
             scan_direction=self.settings["test"]["scan_direction"],
-            stream_a_xy=stream_a_xy, stream_b_xy=stream_b_xy,
             num_leds=num_leds, neighborhood_size=self.settings["test"]["neighborhood_size"],
             frame_drop_threshold_factor=self.settings["test"]["frame_drop_threshold_factor"],
             warmup_pairs_to_skip=self.settings["test"]["warmup_pairs_to_skip"],
@@ -263,6 +268,12 @@ class MainWindow(QMainWindow):
             stream_a_label=stream_label(pick_a), stream_b_label=stream_label(pick_b),
             dual_panel_config=self._dual_panel_config,
         )
+        # Already-captured on/off frames + each stream's Otsu-chosen
+        # detection threshold, retained by CalibrationPage after its own
+        # successful run - lets ThresholdTuningPage's LED Detection
+        # Threshold Tuning section offer a manual override with no new
+        # camera capture of its own.
+        calib_result = self.calibration_page.last_calibration_result
         self.threshold_tuning_page.set_context(
             self.ctx, self.gui_state.device_serial, pick_a, pick_b, camera_controls,
             stream_a_xy=stream_a_xy, stream_b_xy=stream_b_xy,
@@ -276,6 +287,14 @@ class MainWindow(QMainWindow):
             stream_a_roi=self.gui_state.stream_a_roi, stream_b_roi=self.gui_state.stream_b_roi,
             camera_name=camera_name,
             stream_a_label=stream_label(pick_a), stream_b_label=stream_label(pick_b),
+            config_path=config_path,
+            image_a_on=calib_result["image_a_on"], image_a_off=calib_result["image_a_off"],
+            image_b_on=calib_result["image_b_on"], image_b_off=calib_result["image_b_off"],
+            stream_a_otsu_threshold=calib_result["stream_a_otsu_threshold"],
+            stream_b_otsu_threshold=calib_result["stream_b_otsu_threshold"],
+            min_blob_area=calib_result["min_blob_area"], row_gap_px=calib_result["row_gap_px"],
+            calibration_neighborhood_size=calib_result["neighborhood_size"],
+            stream_a_positions=stream_a_positions, stream_b_positions=stream_b_positions,
             dual_panel_config=self._dual_panel_config,
         )
         self.stack.setCurrentWidget(self.threshold_tuning_page)
@@ -291,7 +310,12 @@ class MainWindow(QMainWindow):
             scan_direction=pending["scan_direction"],
             stream_a_threshold=self.threshold_tuning_page.stream_a_threshold,
             stream_b_threshold=self.threshold_tuning_page.stream_b_threshold,
-            stream_a_xy=pending["stream_a_xy"], stream_b_xy=pending["stream_b_xy"],
+            # Read live off the page's own properties, not a copy frozen in
+            # _pending_ctx before Threshold Tuning ever ran - LED Detection
+            # Threshold Tuning can reassign these (a retune may change the
+            # LED count), and _pending_ctx's own snapshot would go stale the
+            # moment that happens.
+            stream_a_xy=self.threshold_tuning_page.stream_a_xy, stream_b_xy=self.threshold_tuning_page.stream_b_xy,
             num_leds=pending["num_leds"], neighborhood_size=pending["neighborhood_size"],
             frame_drop_threshold_factor=pending["frame_drop_threshold_factor"],
             warmup_pairs_to_skip=pending["warmup_pairs_to_skip"],
