@@ -13,9 +13,12 @@ Threshold Tuning page (gui/pages/threshold_tuning_page.py) immediately
 before this one; set_context() receives the already-final
 stream_a_threshold/stream_b_threshold arrays. Saves periodic LED on/off debug
 snapshots during the run (every settings.yaml test.snapshot_every_n_pairs
-pairs, capped at test.max_snapshots per stream, filename includes the
-pair_index so it can be cross-checked against what was on screen and
-against the CSV's pair_index column). At Stop, writes the CSVs
+pairs, capped at test.max_snapshots per stream) as ONE combined image per
+pair - both streams' overlays side by side (domain.realsense_utils.
+combine_side_by_side), not two separate stream_a/stream_b files, so they're
+cross-checkable in a single glance/file. Filename includes the pair_index
+so it can be cross-checked against what was on screen and against the
+CSV's pair_index column. At Stop, writes the CSVs
 (domain.csv_export.export_session_csvs), a static end-of-run plot image
 (domain.plot_export.export_session_plot), PNG snapshots of the 3 live
 charts themselves (_save_chart_images), and one final LED on/off debug
@@ -94,7 +97,7 @@ from engine.test_session import TestSession, TestSessionConfig
 from engine.metrics import PairingGapMetric, PositionGapMetric
 from domain.csv_export import export_session_csvs, export_series_csv
 from domain.plot_export import export_session_plot
-from domain.realsense_utils import draw_led_state_overlay, crop_to_roi
+from domain.realsense_utils import draw_led_state_overlay, crop_to_roi, combine_side_by_side
 from domain.running_stats import RunningStats
 from domain.run_output import create_run_dir
 
@@ -624,17 +627,17 @@ class LiveSessionPage(QWidget):
         # pair_index in the filename lets you directly verify the saved
         # detection picture matches the frame that was on screen at that
         # exact moment - the same number the live display and the CSV's
-        # pair_index column both use.
-        stream_a_path = os.path.join(output_dir, "periodic_led_state_stream_a_pair{:05d}.png".format(pair_index))
-        stream_b_path = os.path.join(output_dir, "periodic_led_state_stream_b_pair{:05d}.png".format(pair_index))
+        # pair_index column both use. One combined side-by-side image (not
+        # two separate stream_a/stream_b files) so both streams for a given
+        # pair are cross-checkable in a single glance/file.
+        combined_path = os.path.join(output_dir, "periodic_led_state_pair{:05d}.png".format(pair_index))
         stream_a_debug = draw_led_state_overlay(
             self._last_stream_a_image, self._context["stream_a_xy"], self._last_stream_a_on_mask
         )
         stream_b_debug = draw_led_state_overlay(
             self._last_stream_b_image, self._context["stream_b_xy"], self._last_stream_b_on_mask
         )
-        cv2.imwrite(stream_a_path, stream_a_debug)
-        cv2.imwrite(stream_b_path, stream_b_debug)
+        cv2.imwrite(combined_path, combine_side_by_side(stream_a_debug, stream_b_debug))
         self._periodic_snapshot_count += 1
 
     def _clear_periodic_snapshots(self, output_dir):

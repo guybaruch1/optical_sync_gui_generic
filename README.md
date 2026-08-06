@@ -208,13 +208,14 @@ own timestamped subfolder so a new run never overwrites a previous one:
     **Save Debug Snapshot** (this same overlay is also shown live on the
     Stream A/Stream B video panels during the session, not just in the
     saved files).
-  - `periodic_led_state_stream_a_pair00020.png`,
-    `periodic_led_state_stream_b_pair00020.png`, etc. — the same on/off
-    debug overlay, saved automatically every `test.snapshot_every_n_pairs`
-    pairs during the run (up to `test.max_snapshots` per stream), for
+  - `periodic_led_state_pair00020.png`, etc. — the same on/off debug
+    overlay, saved automatically every `test.snapshot_every_n_pairs` pairs
+    during the run (up to `test.max_snapshots` per stream), for
     spot-checking detection quality over the course of a run rather than
-    just at the end. The pair index in the filename matches the CSV's
-    `pair_index` column and what was on screen at that exact moment.
+    just at the end. Both streams are combined into one side-by-side image
+    (Stream A left, Stream B right) so they're cross-checkable in a single
+    file. The pair index in the filename matches the CSV's `pair_index`
+    column and what was on screen at that exact moment.
 
 ## Troubleshooting
 

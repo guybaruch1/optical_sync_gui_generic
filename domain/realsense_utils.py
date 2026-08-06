@@ -197,6 +197,30 @@ def draw_led_state_overlay(image, xy_positions, on_mask):
     return debug_img
 
 
+def combine_side_by_side(image_a, image_b, gap_px=10, gap_color=(60, 60, 60)):
+    """Combines two BGR debug images into one, Stream A on the left/Stream B
+    on the right, separated by a thin gap column - lets a single saved PNG
+    be cross-checked at a glance instead of two separate files for the same
+    pair_index. Stream A/B can be different resolutions (e.g. an infrared
+    stream vs. a color stream), so the shorter image is vertically letterboxed
+    (padded with gap_color, not stretched/resized) to match the taller one's
+    height before concatenating - resizing would distort one stream's pixel
+    scale relative to the other's, misleading anyone comparing LED positions
+    across the two halves."""
+    height = max(image_a.shape[0], image_b.shape[0])
+
+    def _pad_to_height(image):
+        if image.shape[0] == height:
+            return image
+        pad = height - image.shape[0]
+        top = pad // 2
+        bottom = pad - top
+        return cv2.copyMakeBorder(image, top, bottom, 0, 0, cv2.BORDER_CONSTANT, value=gap_color)
+
+    gap = np.full((height, gap_px, 3), gap_color, dtype=np.uint8)
+    return np.hstack([_pad_to_height(image_a), gap, _pad_to_height(image_b)])
+
+
 def draw_bundle_overlay(image, bundle_index, stream_a_frame_number, stream_b_frame_number, stream_a_ts_us, stream_b_ts_us, delta_us):
     """Burns a live pairing-quality diagnostic overlay (bundle counter,
     each stream's own HW frame number, HW timestamps, and their delta) onto

@@ -10,6 +10,7 @@ from domain.realsense_utils import (
     save_debug_detection_image,
     draw_bundle_overlay,
     draw_led_state_overlay,
+    combine_side_by_side,
     decode_frame,
     DECODERS,
     _typical_spacing,
@@ -274,6 +275,44 @@ def test_draw_led_state_overlay_does_not_mutate_bgr_input():
 
     assert (image == 0).all()  # original untouched
     assert (result > 0).any()  # the copy has the drawn circle
+
+
+def test_combine_side_by_side_same_height_concatenates_with_gap():
+    image_a = np.full((20, 10, 3), 100, dtype=np.uint8)
+    image_b = np.full((20, 15, 3), 200, dtype=np.uint8)
+
+    result = combine_side_by_side(image_a, image_b, gap_px=4)
+
+    assert result.shape == (20, 10 + 4 + 15, 3)
+    assert (result[:, :10] == 100).all()          # stream A on the left, untouched
+    assert (result[:, 10 + 4:] == 200).all()       # stream B on the right, untouched
+
+
+def test_combine_side_by_side_pads_shorter_image_to_match_taller_height():
+    # Stream A (e.g. infrared) shorter than stream B (e.g. color) - the
+    # shorter one must be letterboxed (padded), never resized/stretched,
+    # so LED pixel positions stay comparable across the two halves.
+    image_a = np.full((10, 5, 3), 100, dtype=np.uint8)
+    image_b = np.full((20, 5, 3), 200, dtype=np.uint8)
+
+    result = combine_side_by_side(image_a, image_b, gap_px=2, gap_color=(0, 0, 0))
+
+    assert result.shape == (20, 5 + 2 + 5, 3)
+    # Stream A's own 10 rows of real content still show its original value
+    # somewhere in the padded column, not stretched into new rows.
+    stream_a_column = result[:, :5]
+    assert (stream_a_column == 100).any()
+    assert (stream_a_column == 0).any()  # the letterbox padding
+
+
+def test_combine_side_by_side_gap_column_uses_gap_color():
+    image_a = np.full((10, 5, 3), 100, dtype=np.uint8)
+    image_b = np.full((10, 5, 3), 200, dtype=np.uint8)
+
+    result = combine_side_by_side(image_a, image_b, gap_px=3, gap_color=(1, 2, 3))
+
+    gap_column = result[:, 5:5 + 3]
+    assert (gap_column == np.array([1, 2, 3], dtype=np.uint8)).all()
 
 
 def test_draw_bundle_overlay_does_not_mutate_bgr_input():

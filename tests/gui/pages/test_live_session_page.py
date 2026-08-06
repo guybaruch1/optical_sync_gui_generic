@@ -1,6 +1,7 @@
 import os
 from unittest.mock import MagicMock, patch
 
+import cv2
 import numpy as np
 from PySide6.QtWidgets import QScrollArea
 
@@ -81,7 +82,7 @@ def test_maybe_save_periodic_snapshot_skips_when_pair_index_not_a_multiple(qapp,
     page._maybe_save_periodic_snapshot(pair_index=7)  # 7 % 20 != 0
 
     assert page._periodic_snapshot_count == 0
-    assert not os.path.exists(os.path.join(page._context["output_dir"], "periodic_led_state_stream_a_pair00007.png"))
+    assert not os.path.exists(os.path.join(page._context["output_dir"], "periodic_led_state_pair00007.png"))
 
 
 def test_maybe_save_periodic_snapshot_saves_on_multiple_of_every_n(qapp, tmp_path):
@@ -91,8 +92,15 @@ def test_maybe_save_periodic_snapshot_saves_on_multiple_of_every_n(qapp, tmp_pat
 
     assert page._periodic_snapshot_count == 1
     output_dir = page._context["output_dir"]
-    assert os.path.exists(os.path.join(output_dir, "periodic_led_state_stream_a_pair00020.png"))
-    assert os.path.exists(os.path.join(output_dir, "periodic_led_state_stream_b_pair00020.png"))
+    # ONE combined side-by-side image, not two separate stream_a/stream_b
+    # files - both streams' 4px-wide overlays plus the gap column between
+    # them, so the saved file must be wider than either stream alone.
+    combined_path = os.path.join(output_dir, "periodic_led_state_pair00020.png")
+    assert os.path.exists(combined_path)
+    combined = cv2.imread(combined_path)
+    assert combined.shape[1] > 4
+    assert not os.path.exists(os.path.join(output_dir, "periodic_led_state_stream_a_pair00020.png"))
+    assert not os.path.exists(os.path.join(output_dir, "periodic_led_state_stream_b_pair00020.png"))
 
 
 def test_maybe_save_periodic_snapshot_stops_after_max_snapshots(qapp, tmp_path):
@@ -102,7 +110,7 @@ def test_maybe_save_periodic_snapshot_stops_after_max_snapshots(qapp, tmp_path):
     page._maybe_save_periodic_snapshot(pair_index=20)  # count already at max_snapshots -> skipped
 
     assert page._periodic_snapshot_count == 1
-    assert not os.path.exists(os.path.join(page._context["output_dir"], "periodic_led_state_stream_a_pair00020.png"))
+    assert not os.path.exists(os.path.join(page._context["output_dir"], "periodic_led_state_pair00020.png"))
 
 
 def test_maybe_save_periodic_snapshot_noop_without_context(qapp):
