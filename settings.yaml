@@ -79,6 +79,9 @@ test:
   scan_direction: 1
   # Per-LED dwell time in ms. Deliberately can be set FASTER than the
   # camera's own frame interval - that's the point of pipeline_sync_test_diff.py.
+  # Fractional values (e.g. 0.5) are supported end-to-end, down to 0.1ms
+  # resolution (the finest step LEDPanel.set_speed_ms's own CLI call can
+  # represent) - both wizard-page spinboxes accept them, not just this file.
   switch_time_ms: 1
   # Plain wall-clock capture duration - sweep-counting doesn't mean anything
   # at fast switch speeds (many sweeps per second).

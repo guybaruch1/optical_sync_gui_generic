@@ -8,8 +8,10 @@ from domain.realsense_utils import (
     merge_close_centroids,
     detect_led_centroids,
     save_debug_detection_image,
+    draw_detected_centroids,
     draw_bundle_overlay,
     draw_led_state_overlay,
+    combine_side_by_side,
     decode_frame,
     DECODERS,
     _typical_spacing,
@@ -159,6 +161,31 @@ def test_detect_led_centroids_finds_bright_blob():
     assert 20 <= cy <= 30
 
 
+def test_detect_led_centroids_manual_threshold_finds_the_same_blob():
+    # threshold=<int> is the manual override path (LED Detection Threshold
+    # Tuning) - must still find the same blob a manual value comfortably
+    # below its brightness (100) and above the background (0) would catch.
+    image = np.zeros((50, 50), dtype=np.uint8)
+    image[20:30, 20:30] = 200
+    centroids, chosen_threshold = detect_led_centroids(image, 100, min_area=20)
+    assert chosen_threshold == 100  # echoes the given value, not Otsu's own pick
+    assert len(centroids) == 1
+    cx, cy = centroids[0]
+    assert 20 <= cx <= 30
+    assert 20 <= cy <= 30
+
+
+def test_detect_led_centroids_manual_threshold_above_blob_brightness_finds_nothing():
+    # A manual threshold set ABOVE the blob's own brightness must exclude
+    # it - confirms this is a real fixed cutoff, not silently falling back
+    # to Otsu regardless of what's passed (the bug this function used to have).
+    image = np.zeros((50, 50), dtype=np.uint8)
+    image[20:30, 20:30] = 100
+    centroids, chosen_threshold = detect_led_centroids(image, 150, min_area=20)
+    assert chosen_threshold == 150
+    assert centroids == []
+
+
 def test_detect_led_centroids_separates_multiple_blurred_blobs_on_a_cropped_image():
     # Regression: a masked-but-not-cropped full frame (apply_roi_mask) has
     # a histogram dominated by masked-out zero pixels outside the ROI
@@ -227,6 +254,35 @@ def test_save_debug_detection_image_shrinks_circles_for_tight_spacing(tmp_path):
     assert midpoint_pixel.tolist() != [0, 255, 0]
 
 
+def test_draw_detected_centroids_marks_circles_without_numbering():
+    # Points far enough apart that _debug_circle_radius falls back to its
+    # default 8px (same distances test_draw_led_state_overlay's own circle
+    # test uses), so the radius here is unambiguous.
+    image = np.zeros((50, 50), dtype=np.uint8)
+    centroids = [(10, 10), (40, 40)]
+
+    result = draw_detected_centroids(image, centroids)
+
+    assert result.shape == (50, 50, 3)  # grayscale converted to BGR for drawing
+    assert result is not image  # doesn't mutate/return the caller's own array
+    assert (image == 0).all()  # original untouched
+    assert result[10, 10 + 8].tolist() == [0, 255, 0]  # circle drawn at the first centroid
+    # No numbering text (save_debug_detection_image draws "0"/"1" a few px
+    # right of each point) - well past the circle stays plain background.
+    assert result[10, 10 + 20].tolist() == [0, 0, 0]
+
+
+def test_draw_detected_centroids_does_not_write_to_disk(tmp_path, monkeypatch):
+    import cv2
+
+    def _fail_if_called(*args, **kwargs):
+        raise AssertionError("draw_detected_centroids must not touch disk")
+
+    monkeypatch.setattr(cv2, "imwrite", _fail_if_called)
+
+    draw_detected_centroids(np.zeros((20, 20), dtype=np.uint8), [(10, 10)])
+
+
 def test_draw_bundle_overlay_converts_grayscale_and_draws_text():
     image = np.zeros((100, 300), dtype=np.uint8)
 
@@ -274,6 +330,44 @@ def test_draw_led_state_overlay_does_not_mutate_bgr_input():
 
     assert (image == 0).all()  # original untouched
     assert (result > 0).any()  # the copy has the drawn circle
+
+
+def test_combine_side_by_side_same_height_concatenates_with_gap():
+    image_a = np.full((20, 10, 3), 100, dtype=np.uint8)
+    image_b = np.full((20, 15, 3), 200, dtype=np.uint8)
+
+    result = combine_side_by_side(image_a, image_b, gap_px=4)
+
+    assert result.shape == (20, 10 + 4 + 15, 3)
+    assert (result[:, :10] == 100).all()          # stream A on the left, untouched
+    assert (result[:, 10 + 4:] == 200).all()       # stream B on the right, untouched
+
+
+def test_combine_side_by_side_pads_shorter_image_to_match_taller_height():
+    # Stream A (e.g. infrared) shorter than stream B (e.g. color) - the
+    # shorter one must be letterboxed (padded), never resized/stretched,
+    # so LED pixel positions stay comparable across the two halves.
+    image_a = np.full((10, 5, 3), 100, dtype=np.uint8)
+    image_b = np.full((20, 5, 3), 200, dtype=np.uint8)
+
+    result = combine_side_by_side(image_a, image_b, gap_px=2, gap_color=(0, 0, 0))
+
+    assert result.shape == (20, 5 + 2 + 5, 3)
+    # Stream A's own 10 rows of real content still show its original value
+    # somewhere in the padded column, not stretched into new rows.
+    stream_a_column = result[:, :5]
+    assert (stream_a_column == 100).any()
+    assert (stream_a_column == 0).any()  # the letterbox padding
+
+
+def test_combine_side_by_side_gap_column_uses_gap_color():
+    image_a = np.full((10, 5, 3), 100, dtype=np.uint8)
+    image_b = np.full((10, 5, 3), 200, dtype=np.uint8)
+
+    result = combine_side_by_side(image_a, image_b, gap_px=3, gap_color=(1, 2, 3))
+
+    gap_column = result[:, 5:5 + 3]
+    assert (gap_column == np.array([1, 2, 3], dtype=np.uint8)).all()
 
 
 def test_draw_bundle_overlay_does_not_mutate_bgr_input():

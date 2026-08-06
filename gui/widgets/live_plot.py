@@ -13,10 +13,11 @@ import pyqtgraph as pg
 from PySide6.QtCore import Qt, QSize
 from PySide6.QtWidgets import QSizePolicy
 
-# dataviz skill's dark-mode chart chrome (references/palette.md).
-SURFACE = "#1a1a19"
-GRIDLINE = "#2c2c2a"
-MUTED_TEXT = "#898781"
+# dataviz skill's dark-mode chart chrome (references/palette.md) - lives in
+# domain/plot_theme.py so domain/plot_export.py's static matplotlib export
+# can share the exact same colors instead of visually drifting from this
+# live view over time.
+from domain.plot_theme import SURFACE, GRIDLINE, MUTED_TEXT
 
 
 class LivePlot(pg.PlotWidget):

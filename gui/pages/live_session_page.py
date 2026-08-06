@@ -13,13 +13,29 @@ Threshold Tuning page (gui/pages/threshold_tuning_page.py) immediately
 before this one; set_context() receives the already-final
 stream_a_threshold/stream_b_threshold arrays. Saves periodic LED on/off debug
 snapshots during the run (every settings.yaml test.snapshot_every_n_pairs
-pairs, capped at test.max_snapshots per stream, filename includes the
-pair_index so it can be cross-checked against what was on screen and
-against the CSV's pair_index column). At Stop, writes the CSVs
+pairs, capped at test.max_snapshots per stream) as ONE combined image per
+pair - both streams' overlays side by side (domain.realsense_utils.
+combine_side_by_side), not two separate stream_a/stream_b files, so they're
+cross-checkable in a single glance/file. Filename includes the pair_index
+so it can be cross-checked against what was on screen and against the
+CSV's pair_index column. At Stop, writes the CSVs
 (domain.csv_export.export_session_csvs), a static end-of-run plot image
-(domain.plot_export.export_session_plot), and one final LED on/off debug
+(domain.plot_export.export_session_plot), PNG snapshots of the 3 live
+charts themselves (_save_chart_images), and one final LED on/off debug
 snapshot for each stream - the same final snapshot can also be saved on
 demand mid-session via the "Save Debug Snapshot" button.
+
+Every Start click mints its OWN fresh timestamped
+output/live_session_<timestamp>/ folder (domain.run_output.create_run_dir,
+via _begin_new_run_output(), called first thing in start_session()) - a new
+run never overwrites a previous run's CSVs/graphs/snapshots the way one
+flat, fixed-filename output directory used to. The toolbar's "Export CSV"
+button and the periodic-snapshot/debug-image helpers below all read
+self._context["output_dir"]/["kept_csv_path"]/["dropped_csv_path"], which
+_begin_new_run_output() sets once per Start and which then stay pointed at
+that same run's folder until the next Start - so re-exporting mid-session
+or right after Stop still targets the run that's actually in progress or
+just finished, not a new folder.
 
 "HW TS Latency" and "Optical Sync" are the user-facing names for the
 underlying pairing_gap_us/position_gap_ms metrics (engine.metrics) - the
@@ -69,8 +85,8 @@ import cv2
 from PySide6.QtCore import Qt, QSize, QRectF
 from PySide6.QtGui import QIcon, QPixmap, QPainter, QPen, QColor
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QSpinBox, QLabel, QCheckBox, QFrame, QApplication,
-    QScrollArea,
+    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QSpinBox, QDoubleSpinBox, QLabel, QCheckBox, QFrame,
+    QApplication, QScrollArea,
 )
 
 from gui.widgets.video_panel import VideoPanel
@@ -81,8 +97,9 @@ from engine.test_session import TestSession, TestSessionConfig
 from engine.metrics import PairingGapMetric, PositionGapMetric
 from domain.csv_export import export_session_csvs, export_series_csv
 from domain.plot_export import export_session_plot
-from domain.realsense_utils import draw_led_state_overlay, crop_to_roi
+from domain.realsense_utils import draw_led_state_overlay, crop_to_roi, combine_side_by_side
 from domain.running_stats import RunningStats
+from domain.run_output import create_run_dir
 
 
 def _build_copy_icon(color="#555555", size=18):
@@ -296,12 +313,19 @@ class LiveSessionPage(QWidget):
         control_row.addWidget(self.stop_button)
 
         control_row.addWidget(QLabel("LED Switch Time (ms):"))
-        self.switch_time_spinbox = QSpinBox()
-        self.switch_time_spinbox.setRange(1, 10000)
+        self.switch_time_spinbox = QDoubleSpinBox()
+        # Floor of 0.1, not 0 - a switch time of exactly 0 isn't physically
+        # meaningful, and 0.1ms is the finest step LEDPanel.set_speed_ms's
+        # own "--setTime {:.4f}" (4 decimal places of SECONDS) can actually
+        # represent - engine/led_panel.py, offering more decimals here would
+        # just suggest false precision the hardware command can't honor.
+        self.switch_time_spinbox.setRange(0.1, 10000.0)
+        self.switch_time_spinbox.setDecimals(1)
+        self.switch_time_spinbox.setSingleStep(0.5)
         # Overridden with the settings.yaml default in set_context(); kept
         # editable per-run (like duration) so switch speed can be tuned
         # without hand-editing settings.yaml between runs.
-        self.switch_time_spinbox.setValue(1)
+        self.switch_time_spinbox.setValue(1.0)
         control_row.addWidget(self.switch_time_spinbox)
 
         control_row.addWidget(QLabel("Frame Sample Interval:"))
@@ -313,9 +337,22 @@ class LiveSessionPage(QWidget):
         # way; this only throttles how often the GUI actually redraws.
         self.frame_sample_interval_spinbox.setValue(10)
         self.frame_sample_interval_spinbox.setToolTip(
-            "Frame-pairs between video/plot updates (every pair is still recorded)."
+            "Frame-pairs between video/plot updates (every pair is still recorded). "
+            "1 updates on every frame and can freeze the GUI - see the warning below the field."
         )
         control_row.addWidget(self.frame_sample_interval_spinbox)
+        # Non-blocking, live warning (not a raised minimum, not a blocking
+        # dialog) - 1 defeats the whole point of display_stride throttling
+        # (every frame triggers the expensive video/plot-update callbacks
+        # instead of every 10th), reproducing the exact "unbounded backlog
+        # of queued cross-thread Qt signal work" freeze _on_row_ready's own
+        # docstring describes as the reason that throttling exists at all.
+        # Still a legal, working value for whoever genuinely wants it -
+        # this only makes the risk visible the moment it's selected.
+        self.frame_sample_interval_warning_label = QLabel("")
+        self.frame_sample_interval_warning_label.setStyleSheet("QLabel { color: #b00020; }")
+        self.frame_sample_interval_spinbox.valueChanged.connect(self._on_frame_sample_interval_changed)
+        control_row.addWidget(self.frame_sample_interval_warning_label)
 
         control_row.addStretch(1)
         self.export_csv_button = QPushButton("Export CSV")
@@ -349,6 +386,20 @@ class LiveSessionPage(QWidget):
         QApplication.clipboard().setPixmap(plot_widget.grab())
         self.status_label.setText("Chart copied to clipboard as an image.")
 
+    def _save_chart_images(self, output_dir):
+        # Auto-saves the same grab() pixmap _copy_chart_image already
+        # produces for the clipboard, one PNG per live chart, into this
+        # run's own output folder - previously the only way to get these
+        # onto disk was manually clicking "Copy" per chart and pasting
+        # elsewhere; nothing saved them as files automatically.
+        chart_files = {
+            self.pairing_plot: "hw_ts_latency_chart.png",
+            self.position_plot: "optical_sync_chart.png",
+            self.drop_plot: "frame_drops_chart.png",
+        }
+        for plot_widget, filename in chart_files.items():
+            plot_widget.grab().save(os.path.join(output_dir, filename), "PNG")
+
     def _export_chart_csv(self, plot_widget, series_names):
         if self._context is None:
             self.status_label.setText("No session data yet - click Start first.")
@@ -377,11 +428,22 @@ class LiveSessionPage(QWidget):
         self.drop_plot.set_series_visible("stream_a_frame_drops", checked)
         self.drop_plot.set_series_visible("stream_b_frame_drops", checked)
 
+    def _on_frame_sample_interval_changed(self, value):
+        # 1 is still a legal, working value (see the toolbar setup comment) -
+        # this only surfaces the risk the moment it's selected, live,
+        # without blocking or forcing a different value.
+        if value == 1:
+            self.frame_sample_interval_warning_label.setText(
+                "⚠ 1 updates on every frame - may freeze the GUI"
+            )
+        else:
+            self.frame_sample_interval_warning_label.setText("")
+
     def set_context(self, ctx, device_serial, pick_a, pick_b, camera_controls, switch_time_ms, scan_direction,
                      stream_a_threshold, stream_b_threshold,
                      stream_a_xy, stream_b_xy, num_leds, neighborhood_size,
                      frame_drop_threshold_factor, warmup_pairs_to_skip, pairing_gap_outlier_threshold_us,
-                     kept_csv_path, dropped_csv_path, output_dir, snapshot_every_n_pairs, max_snapshots,
+                     output_root, kept_csv_filename, dropped_csv_filename, snapshot_every_n_pairs, max_snapshots,
                      stream_a_roi, stream_b_roi, camera_name, stream_a_label, stream_b_label,
                      dual_panel_config=None):
         self._context = dict(
@@ -397,7 +459,12 @@ class LiveSessionPage(QWidget):
             frame_drop_threshold_factor=frame_drop_threshold_factor,
             warmup_pairs_to_skip=warmup_pairs_to_skip,
             pairing_gap_outlier_threshold_us=pairing_gap_outlier_threshold_us,
-            kept_csv_path=kept_csv_path, dropped_csv_path=dropped_csv_path, output_dir=output_dir,
+            # Raw root + filename templates, not a pre-joined output_dir/
+            # kept_csv_path/dropped_csv_path - start_session() mints a fresh
+            # run folder (_begin_new_run_output) and joins these on every
+            # Start, so a new run never overwrites a previous one's files.
+            output_root=output_root, kept_csv_filename=kept_csv_filename,
+            dropped_csv_filename=dropped_csv_filename,
             snapshot_every_n_pairs=snapshot_every_n_pairs, max_snapshots=max_snapshots,
             stream_a_roi=stream_a_roi, stream_b_roi=stream_b_roi,
             stream_a_label=stream_a_label, stream_b_label=stream_b_label,
@@ -409,14 +476,33 @@ class LiveSessionPage(QWidget):
         # ctx["switch_time_ms"]) is what a run actually uses, so it can be
         # tuned per-run without hand-editing settings.yaml. Not persisted
         # anywhere, so a fresh app launch always starts back from this
-        # settings.yaml default, not whatever was last typed.
-        self.switch_time_spinbox.setValue(int(round(switch_time_ms)))
+        # settings.yaml default, not whatever was last typed. float(), not
+        # int(round(...)) - the incoming value can already be fractional
+        # (e.g. tuned to 0.5 on Threshold Tuning), and truncating it here
+        # would silently throw that precision away.
+        self.switch_time_spinbox.setValue(float(switch_time_ms))
         short_name = _short_camera_name(camera_name)
         self.stream_a_title_label.setText("{} - {}".format(short_name, stream_a_label))
         self.stream_b_title_label.setText("{} - {}".format(short_name, stream_b_label))
 
+    def _begin_new_run_output(self):
+        # Mints a fresh timestamped output/live_session_<timestamp>/ folder
+        # for THIS run and joins the CSV filename templates onto it - called
+        # first thing in start_session() so every other output_dir/
+        # kept_csv_path/dropped_csv_path reader below (and everything
+        # _on_session_finished/_export_chart_csv/_save_led_state_debug_images/
+        # _reexport_last_session_csvs read later) already sees this run's own
+        # folder, not a shared/overwritten one from a previous Start click.
+        ctx = self._context
+        output_dir = create_run_dir(ctx["output_root"], "live_session")
+        ctx["output_dir"] = output_dir
+        ctx["kept_csv_path"] = os.path.join(output_dir, ctx["kept_csv_filename"])
+        ctx["dropped_csv_path"] = os.path.join(output_dir, ctx["dropped_csv_filename"])
+        return output_dir
+
     def start_session(self):
         ctx = self._context
+        self._begin_new_run_output()
         duration_s = self.duration_spinbox.value() or None
         # Read live from the toolbar, not ctx["switch_time_ms"] - the
         # spinbox is what the operator can tune per-run (see set_context).
@@ -575,17 +661,17 @@ class LiveSessionPage(QWidget):
         # pair_index in the filename lets you directly verify the saved
         # detection picture matches the frame that was on screen at that
         # exact moment - the same number the live display and the CSV's
-        # pair_index column both use.
-        stream_a_path = os.path.join(output_dir, "periodic_led_state_stream_a_pair{:05d}.png".format(pair_index))
-        stream_b_path = os.path.join(output_dir, "periodic_led_state_stream_b_pair{:05d}.png".format(pair_index))
+        # pair_index column both use. One combined side-by-side image (not
+        # two separate stream_a/stream_b files) so both streams for a given
+        # pair are cross-checkable in a single glance/file.
+        combined_path = os.path.join(output_dir, "periodic_led_state_pair{:05d}.png".format(pair_index))
         stream_a_debug = draw_led_state_overlay(
             self._last_stream_a_image, self._context["stream_a_xy"], self._last_stream_a_on_mask
         )
         stream_b_debug = draw_led_state_overlay(
             self._last_stream_b_image, self._context["stream_b_xy"], self._last_stream_b_on_mask
         )
-        cv2.imwrite(stream_a_path, stream_a_debug)
-        cv2.imwrite(stream_b_path, stream_b_debug)
+        cv2.imwrite(combined_path, combine_side_by_side(stream_a_debug, stream_b_debug))
         self._periodic_snapshot_count += 1
 
     def _clear_periodic_snapshots(self, output_dir):
@@ -685,6 +771,7 @@ class LiveSessionPage(QWidget):
         self._last_session_rows = rows
         export_session_csvs(rows, self._context["kept_csv_path"], self._context["dropped_csv_path"])
         export_session_plot(rows, os.path.join(self._context["output_dir"], "pipeline_sync_plot.png"))
+        self._save_chart_images(self._context["output_dir"])
         self._save_led_state_debug_images()
         # Button re-enabling happens in _on_engine_thread_finished, not here -
         # this fires before SessionEngineThread.run()'s finally block (camera
