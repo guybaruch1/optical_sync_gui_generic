@@ -3,6 +3,7 @@ import numpy as np
 import yaml
 from domain.calibration import (
     assign_grid_ids,
+    centroids_in_grid_order,
     build_positions_with_thresholds,
     compute_threshold,
     update_config_leds,
@@ -24,6 +25,29 @@ def test_assign_grid_ids_orders_row_major():
 def test_assign_grid_ids_raises_on_empty_input():
     try:
         assign_grid_ids([])
+        assert False, "expected RuntimeError"
+    except RuntimeError:
+        pass
+
+
+def test_centroids_in_grid_order_matches_led_id_index():
+    # Same shuffled input as test_assign_grid_ids_orders_row_major - the
+    # ordered list this returns must line up with positions["0"], ["1"], ...
+    # (index i IS led_id i), so a debug image numbered by enumerate() over
+    # this list shows the SAME id assign_grid_ids itself assigned - not
+    # detect_led_centroids' raw, arbitrary contour-scan order.
+    centroids = [(20, 10), (10, 10), (30, 10), (20, 30), (10, 30), (30, 30)]
+    ordered, positions, row_layout = centroids_in_grid_order(centroids, row_gap_px=15)
+    assert row_layout == [3, 3]
+    assert ordered == [tuple(positions[str(i)]) for i in range(6)]
+    assert ordered[0] == (10.0, 10.0)
+    assert ordered[1] == (20.0, 10.0)
+    assert ordered[5] == (30.0, 30.0)
+
+
+def test_centroids_in_grid_order_raises_on_empty_input_same_as_assign_grid_ids():
+    try:
+        centroids_in_grid_order([])
         assert False, "expected RuntimeError"
     except RuntimeError:
         pass

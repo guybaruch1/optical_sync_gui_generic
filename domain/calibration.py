@@ -34,6 +34,27 @@ def assign_grid_ids(centroids, row_gap_px=15):
     return positions, row_layout
 
 
+def centroids_in_grid_order(centroids, row_gap_px=15):
+    """Reorders centroids into the exact row-major order assign_grid_ids
+    itself assigns as led_id (index i in the returned list IS led_id i) -
+    lets a debug-image caller number LEDs by their REAL grid ID instead of
+    detect_led_centroids' raw, arbitrary contour-scan order, which bears no
+    relation to the actual led_id config.yaml/Threshold Tuning/Live Session
+    use for that same LED (an earlier version of the debug image drew that
+    raw order directly, which just happened to look grid-like enough - row
+    by row, but each row descending right-to-left with occasional
+    neighbor swaps - to read as "wrong" rather than obviously arbitrary).
+
+    Returns (ordered_centroids, positions, row_layout) - the same
+    positions/row_layout assign_grid_ids itself returns, computed only
+    once, so a caller needing both doesn't call assign_grid_ids twice.
+    Raises the same RuntimeError as assign_grid_ids when centroids is
+    empty - there's no grid order to produce in that case."""
+    positions, row_layout = assign_grid_ids(centroids, row_gap_px)
+    ordered = [tuple(positions[str(i)]) for i in range(len(positions))]
+    return ordered, positions, row_layout
+
+
 def build_positions_with_thresholds(xy_positions, on_frame, off_frame, neighborhood_size):
     # Caps neighborhood_size at what's actually safe for THIS run's real
     # measured LED pixel spacing (see safe_neighborhood_size's docstring) -

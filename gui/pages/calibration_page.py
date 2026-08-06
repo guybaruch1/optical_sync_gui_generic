@@ -18,7 +18,18 @@ folder (domain.run_output.create_run_dir) once per page visit, so a later
 calibration run on this same camera doesn't overwrite an earlier one's debug
 PNGs. This is once per VISIT, not once per "Run Calibration" click - clicking
 Run multiple times in one visit (e.g. while tuning ROI) intentionally shares
-that same folder."""
+that same folder.
+
+The debug detection PNG is numbered using domain.calibration.
+centroids_in_grid_order's row-major order (index i IS led_id i, the same ID
+config.yaml/Threshold Tuning/Live Session actually use for that LED), not
+detect_led_centroids' own raw, arbitrary contour-scan order - an earlier
+version numbered the raw order directly, which didn't correspond to any
+real LED ID at all despite looking superficially grid-like. Falls back to
+that raw order only when zero LEDs were detected (centroids_in_grid_order
+raises in that case, same as assign_grid_ids) - there's no real grid order
+to show yet, but the debug image still needs to exist for exactly that
+failure case."""
 
 import os
 import time
@@ -26,7 +37,7 @@ import time
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QPlainTextEdit, QPushButton, QApplication
 
-from domain.calibration import assign_grid_ids, build_positions_with_thresholds, update_config_leds
+from domain.calibration import centroids_in_grid_order, build_positions_with_thresholds, update_config_leds
 from domain.run_output import create_run_dir
 from domain.realsense_utils import (
     detect_led_centroids, merge_close_centroids, crop_to_roi, save_debug_detection_image,
@@ -196,13 +207,25 @@ class CalibrationPage(QWidget):
         centroids_a, otsu_a = detect_led_centroids(cropped_a, None, min_blob_area)
         centroids_a = merge_close_centroids(centroids_a)
         self._log("Detected {} LED(s) in {} (Otsu threshold {}).".format(len(centroids_a), label_a, otsu_a))
-        # Saved BEFORE assign_grid_ids, which raises on zero detections - this
-        # is exactly the case where seeing the cropped ROI matters most, so it
-        # must not be skipped by that exception.
         debug_path_a = os.path.join(output_dir, "debug_{}_detection.png".format(slug_a))
-        save_debug_detection_image(cropped_a, centroids_a, debug_path_a)
-        self._log("Saved debug image (cropped ROI + detected LEDs circled): {}".format(debug_path_a))
-        positions_a, row_layout_a = assign_grid_ids(centroids_a, row_gap_px)
+        try:
+            # Numbered in the SAME row-major order assign_grid_ids itself
+            # assigns as led_id - NOT detect_led_centroids' raw,
+            # arbitrary contour-scan order (an earlier version drew that
+            # raw order directly, which bore no relation to the actual
+            # led_id config.yaml/Threshold Tuning/Live Session use for
+            # that same LED, while still happening to look grid-like
+            # enough to read as "wrong" rather than obviously arbitrary).
+            debug_centroids_a, positions_a, row_layout_a = centroids_in_grid_order(centroids_a, row_gap_px)
+        except RuntimeError:
+            # No LEDs detected at all - there's no real grid order to
+            # show yet, but a debug image (in raw, arbitrary detection
+            # order) still needs to exist for exactly this failure case,
+            # where seeing the cropped ROI/threshold matters most.
+            save_debug_detection_image(cropped_a, centroids_a, debug_path_a)
+            raise
+        save_debug_detection_image(cropped_a, debug_centroids_a, debug_path_a)
+        self._log("Saved debug image (cropped ROI + detected LEDs circled, numbered by grid ID): {}".format(debug_path_a))
         # assign_grid_ids' centroids are in the CROPPED image's own
         # coordinates (crop_to_roi's origin is the ROI's own top-left
         # corner) - build_positions_with_thresholds below needs full-frame
@@ -217,9 +240,13 @@ class CalibrationPage(QWidget):
         centroids_b = merge_close_centroids(centroids_b)
         self._log("Detected {} LED(s) in {} (Otsu threshold {}).".format(len(centroids_b), label_b, otsu_b))
         debug_path_b = os.path.join(output_dir, "debug_{}_detection.png".format(slug_b))
-        save_debug_detection_image(cropped_b, centroids_b, debug_path_b)
-        self._log("Saved debug image (cropped ROI + detected LEDs circled): {}".format(debug_path_b))
-        positions_b, row_layout_b = assign_grid_ids(centroids_b, row_gap_px)
+        try:
+            debug_centroids_b, positions_b, row_layout_b = centroids_in_grid_order(centroids_b, row_gap_px)
+        except RuntimeError:
+            save_debug_detection_image(cropped_b, centroids_b, debug_path_b)
+            raise
+        save_debug_detection_image(cropped_b, debug_centroids_b, debug_path_b)
+        self._log("Saved debug image (cropped ROI + detected LEDs circled, numbered by grid ID): {}".format(debug_path_b))
         positions_b = _offset_positions(positions_b, stream_b_roi)
 
         if row_layout_a != row_layout_b:
