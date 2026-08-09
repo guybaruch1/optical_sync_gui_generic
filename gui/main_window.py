@@ -220,6 +220,17 @@ class MainWindow(QMainWindow):
         stream_b_xy = np.array([stream_b_positions[i][:2] for i in stream_b_ids])
 
         num_leds = self.settings["test"]["num_leds"]
+        # .get() with defaults rather than a hard lookup - an existing
+        # hand-maintained settings.yaml predating this section shouldn't
+        # break, it just gets the same behavior as leaving both off (except
+        # color_stream_first, which is safe enough to default on - see that
+        # section's own comment in settings.yaml).
+        camera_sync = self.settings.get("camera_sync") or {}
+        camera_sync = {
+            "color_stream_first": camera_sync.get("color_stream_first", True),
+            "hardware_reset_before_start": camera_sync.get("hardware_reset_before_start", False),
+            "hardware_reset_settle_s": camera_sync.get("hardware_reset_settle_s", 8.0),
+        }
         if len(stream_a_ids) != len(stream_b_ids) or len(stream_a_ids) != num_leds:
             QMessageBox.warning(
                 self,
@@ -267,6 +278,11 @@ class MainWindow(QMainWindow):
             camera_name=camera_name,
             stream_a_label=stream_label(pick_a), stream_b_label=stream_label(pick_b),
             dual_panel_config=self._dual_panel_config,
+            # settings.yaml camera_sync: - the two inter-sensor-sync knobs,
+            # stashed here so _on_tuning_done can hand them to Live Session.
+            color_stream_first=camera_sync["color_stream_first"],
+            hardware_reset_before_start=camera_sync["hardware_reset_before_start"],
+            hardware_reset_settle_s=camera_sync["hardware_reset_settle_s"],
         )
         # Already-captured on/off frames + each stream's Otsu-chosen
         # detection threshold, retained by CalibrationPage after its own
@@ -296,6 +312,7 @@ class MainWindow(QMainWindow):
             calibration_neighborhood_size=calib_result["neighborhood_size"],
             stream_a_positions=stream_a_positions, stream_b_positions=stream_b_positions,
             dual_panel_config=self._dual_panel_config,
+            color_stream_first=camera_sync["color_stream_first"],
         )
         self.stack.setCurrentWidget(self.threshold_tuning_page)
 
@@ -329,6 +346,9 @@ class MainWindow(QMainWindow):
             camera_name=pending["camera_name"],
             stream_a_label=pending["stream_a_label"], stream_b_label=pending["stream_b_label"],
             dual_panel_config=pending["dual_panel_config"],
+            color_stream_first=pending["color_stream_first"],
+            hardware_reset_before_start=pending["hardware_reset_before_start"],
+            hardware_reset_settle_s=pending["hardware_reset_settle_s"],
         )
         self.stack.setCurrentWidget(self.live_session_page)
 

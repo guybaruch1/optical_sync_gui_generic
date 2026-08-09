@@ -4,7 +4,7 @@ import time
 import pytest
 import pyrealsense2 as rs
 from engine.streams import (
-    list_devices, capture_synced_frame_pair,
+    list_devices, capture_synced_frame_pair, ContinuousCapture,
     enable_auto_exposure,
     list_video_stream_options_from_device, resolve_and_group, group_for_pick,
     set_emitter_enabled, set_manual_exposure, stream_slug,
@@ -644,3 +644,65 @@ def test_resolve_camera_tests_preserves_config_order_for_tests_and_options():
     resolved = resolve_camera_tests(device_options, parsed_tests)
 
     assert [o["pick_a"]["fps"] for o in resolved[0]["options"]] == [60, 30]
+
+
+# --- ContinuousCapture._ordered_picks: which order the two streams are handed
+# to config.enable_stream(). Pure/testable even though ContinuousCapture's
+# real rs.pipeline() internals are hardware-only by design. Motivated by a
+# real measured discrepancy - a reference script enabling COLOR first saw a
+# ~3.5ms inter-sensor timestamp gap where this app, enabling stream_a (IR)
+# first, consistently saw ~11.3ms on the same rig. ---
+
+def _ir_pick(stream_index=1):
+    return {"stream_type": rs.stream.infrared, "stream_index": stream_index,
+            "width": 1280, "height": 720, "fps": 30, "format": rs.format.y8}
+
+
+def _color_pick(stream_index=0):
+    return {"stream_type": rs.stream.color, "stream_index": stream_index,
+            "width": 1280, "height": 720, "fps": 30, "format": rs.format.bgr8}
+
+
+def test_ordered_picks_puts_color_before_infrared():
+    capture = ContinuousCapture("SN1", _ir_pick(), _color_pick(), color_stream_first=True)
+    ordered = capture._ordered_picks()
+    assert [p["stream_type"] for p in ordered] == [rs.stream.color, rs.stream.infrared]
+
+
+def test_ordered_picks_leaves_color_first_pairing_untouched():
+    capture = ContinuousCapture("SN1", _color_pick(), _ir_pick(), color_stream_first=True)
+    ordered = capture._ordered_picks()
+    assert [p["stream_type"] for p in ordered] == [rs.stream.color, rs.stream.infrared]
+
+
+def test_ordered_picks_is_a_noop_for_two_infrared_streams():
+    # Stable sort - a same-type pairing must keep pick_a/pick_b's own order,
+    # since there's no color stream to promote.
+    pick_a, pick_b = _ir_pick(1), _ir_pick(2)
+    capture = ContinuousCapture("SN1", pick_a, pick_b, color_stream_first=True)
+    assert capture._ordered_picks() == [pick_a, pick_b]
+
+
+def test_ordered_picks_is_a_noop_for_two_color_streams():
+    pick_a, pick_b = _color_pick(0), _color_pick(1)
+    capture = ContinuousCapture("SN1", pick_a, pick_b, color_stream_first=True)
+    assert capture._ordered_picks() == [pick_a, pick_b]
+
+
+def test_ordered_picks_preserves_original_order_when_disabled():
+    # The A/B "off" arm of the experiment - reproduces the pre-change
+    # behavior exactly (stream_a enabled first, whatever type it is).
+    pick_a, pick_b = _ir_pick(), _color_pick()
+    capture = ContinuousCapture("SN1", pick_a, pick_b, color_stream_first=False)
+    assert capture._ordered_picks() == [pick_a, pick_b]
+
+
+def test_ordered_picks_never_changes_which_pick_is_stream_a():
+    # Load-bearing safety property: reordering is ONLY about enable order.
+    # _get_frame still resolves stream_a/stream_b from pick_a/pick_b, so the
+    # data mapping must be completely unaffected by this setting.
+    pick_a, pick_b = _ir_pick(), _color_pick()
+    capture = ContinuousCapture("SN1", pick_a, pick_b, color_stream_first=True)
+    capture._ordered_picks()
+    assert capture.pick_a is pick_a
+    assert capture.pick_b is pick_b

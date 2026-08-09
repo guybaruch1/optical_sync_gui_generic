@@ -25,7 +25,7 @@ class ThresholdPreviewThread(QThread):
     def __init__(self, ctx, device_serial, pick_a, pick_b, camera_controls,
                  stream_a_xy, stream_b_xy, neighborhood_size=5,
                  scan_direction=None, switch_time_ms=None, display_stride=10,
-                 dual_panel_config=None, parent=None):
+                 dual_panel_config=None, color_stream_first=True, parent=None):
         super().__init__(parent)
         self.ctx = ctx
         self.device_serial = device_serial
@@ -35,6 +35,14 @@ class ThresholdPreviewThread(QThread):
         self.stream_a_xy = stream_a_xy
         self.stream_b_xy = stream_b_xy
         self.dual_panel_config = dual_panel_config
+        # Kept in step with SessionEngineThread's own setting so this
+        # preview streams the two sensors in the same enable order the real
+        # timed run will - otherwise the preview could show a different
+        # inter-sensor offset than the session it's meant to be previewing.
+        # No hardware_reset_before_start counterpart here on purpose: this
+        # preview is started/stopped repeatedly while tuning, and an 8s
+        # reset per Start would make it unusable.
+        self.color_stream_first = color_stream_first
         # See SessionEngineThread's identical comment - capped once here at
         # what's actually safe for THIS run's real measured LED spacing.
         self._stream_a_safe_size = safe_neighborhood_size(stream_a_xy, neighborhood_size)
@@ -91,7 +99,10 @@ class ThresholdPreviewThread(QThread):
             if self.switch_time_ms is not None:
                 start_scanning(self.switch_time_ms, self.scan_direction, self.dual_panel_config)
 
-            self._capture = ContinuousCapture(self.device_serial, self.pick_a, self.pick_b)
+            self._capture = ContinuousCapture(
+                self.device_serial, self.pick_a, self.pick_b,
+                color_stream_first=self.color_stream_first,
+            )
             self._capture.start()
 
             frame_index = 0

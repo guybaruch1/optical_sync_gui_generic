@@ -218,6 +218,38 @@ def test_start_session_passes_toolbar_switch_time_and_frame_sample_interval(qapp
     assert _FakeEngineThread.last_kwargs["display_stride"] == 99
 
 
+# --- settings.yaml camera_sync: knobs must actually reach the engine thread,
+# since they change how the camera is brought up and therefore the very
+# inter-sensor offset the app measures. ---
+
+def test_start_session_passes_camera_sync_settings_through_to_the_engine(qapp, tmp_path):
+    page = LiveSessionPage()
+    page.set_context(**_minimal_context(
+        tmp_path, color_stream_first=False,
+        hardware_reset_before_start=True, hardware_reset_settle_s=3.5,
+    ))
+
+    with patch("gui.pages.live_session_page.SessionEngineThread", _FakeEngineThread):
+        page.start_session()
+
+    assert _FakeEngineThread.last_kwargs["color_stream_first"] is False
+    assert _FakeEngineThread.last_kwargs["hardware_reset_before_start"] is True
+    assert _FakeEngineThread.last_kwargs["hardware_reset_settle_s"] == 3.5
+
+
+def test_start_session_camera_sync_defaults_are_color_first_and_no_reset(qapp, tmp_path):
+    # Defaults must preserve the safe/cheap combination: reorder streams
+    # (free), but never pay the multi-second hardware reset unless asked.
+    page = LiveSessionPage()
+    page.set_context(**_minimal_context(tmp_path))
+
+    with patch("gui.pages.live_session_page.SessionEngineThread", _FakeEngineThread):
+        page.start_session()
+
+    assert _FakeEngineThread.last_kwargs["color_stream_first"] is True
+    assert _FakeEngineThread.last_kwargs["hardware_reset_before_start"] is False
+
+
 def test_start_session_passes_a_fractional_toolbar_switch_time(qapp, tmp_path):
     page = LiveSessionPage()
     page.set_context(**_minimal_context(tmp_path, switch_time_ms=1))

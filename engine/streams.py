@@ -462,11 +462,38 @@ def set_manual_exposure(sensor, exposure, gain):
 
 
 class ContinuousCapture:
-    def __init__(self, device_serial, pick_a, pick_b):
+    def __init__(self, device_serial, pick_a, pick_b, color_stream_first=True):
         self.device_serial = device_serial
         self.pick_a = pick_a
         self.pick_b = pick_b
+        # See _ordered_picks - purely an ENABLE-ORDER knob for the rs.config,
+        # never a change to which pick is stream_a vs stream_b.
+        self.color_stream_first = color_stream_first
         self._pipeline = None
+
+    def _ordered_picks(self):
+        """The order picks are handed to config.enable_stream() - deliberately
+        SEPARATE from the stream_a/stream_b identity, which _get_frame still
+        resolves from self.pick_a/self.pick_b regardless of what this returns.
+
+        Why the order matters at all: on RealSense devices whose two sensors
+        are internally sync'd (per Intel's docs, the RGB sensor acts as MASTER
+        and pulses the stereo/depth sensor at the start of each frame, as long
+        as both run at the same fps and exposure stays under the frame period),
+        bringing the stereo module up BEFORE any master exists to lock onto can
+        leave the two sensors free-running with a fixed phase offset instead of
+        genuinely sync'd. A standalone reference script that enables color
+        first measured a ~3.5ms inter-sensor timestamp gap on the same rig
+        where this app - which used to always enable pick_a (typically the IR
+        stream) first - consistently measured ~11.3ms.
+
+        Stable sort: color picks move ahead of non-color ones, and two picks
+        of the same kind (color+color, or infrared+infrared) keep their
+        original relative order, so this is a no-op for those pairings."""
+        picks = (self.pick_a, self.pick_b)
+        if not self.color_stream_first:
+            return list(picks)
+        return sorted(picks, key=lambda pick: pick["stream_type"] != rs.stream.color)
 
     def start(self):
         config = rs.config()
@@ -477,7 +504,7 @@ class ContinuousCapture:
         # which resolves via find_device_by_serial, correctly uses for
         # ROI/calibration), producing a wrong-camera bug with no error.
         config.enable_device(self.device_serial)
-        for pick in (self.pick_a, self.pick_b):
+        for pick in self._ordered_picks():
             config.enable_stream(pick["stream_type"], pick["stream_index"], pick["width"], pick["height"], pick["format"], pick["fps"])
         self._pipeline = rs.pipeline()
         self._pipeline.start(config)

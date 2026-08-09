@@ -7,6 +7,18 @@ processing, metric computation, session buffering) already lives in
 AcquisitionLoop/TestSession/Metric, which are unit-tested without Qt or
 hardware. This class exists only so that logic can run on a background
 thread and reach the UI safely.
+
+Two settings.yaml camera_sync: knobs land here because they change how the
+CAMERA is brought up, which shifts the very inter-sensor offset this app
+measures: color_stream_first (passed down to ContinuousCapture - see its
+_ordered_picks) and hardware_reset_before_start/hardware_reset_settle_s
+(applied in run() before anything else touches the device). Both exist to
+A/B a measured discrepancy - this app consistently reported a ~11.3ms
+inter-sensor HW-timestamp gap where a standalone reference script driving
+the identical rs.pipeline() on the same rig consistently reported ~3.5ms,
+and enable order + a startup hardware reset are the only two structural
+differences between them. Each is independently switchable so a run can
+isolate one at a time; see settings.yaml's camera_sync: section.
 """
 
 import pyrealsense2 as rs
@@ -41,7 +53,9 @@ class SessionEngineThread(QThread):
     def __init__(self, ctx, device_serial, pick_a, pick_b, camera_controls,
                  test_session, stream_a_xy=None, stream_b_xy=None, neighborhood_size=5,
                  scan_direction=None, switch_time_ms=None,
-                 display_stride=10, position_gap_metric=None, dual_panel_config=None, parent=None):
+                 display_stride=10, position_gap_metric=None, dual_panel_config=None,
+                 color_stream_first=True, hardware_reset_before_start=False,
+                 hardware_reset_settle_s=8.0, parent=None):
         super().__init__(parent)
         self.ctx = ctx
         self.device_serial = device_serial
@@ -50,6 +64,13 @@ class SessionEngineThread(QThread):
         self.camera_controls = camera_controls
         self.test_session = test_session
         self.dual_panel_config = dual_panel_config
+        # Two independent inter-sensor-sync knobs, both settings.yaml-driven
+        # (camera_sync:) so a run can A/B either one on its own - see
+        # ContinuousCapture._ordered_picks and run()'s reset block below for
+        # what each actually does and why.
+        self.color_stream_first = color_stream_first
+        self.hardware_reset_before_start = hardware_reset_before_start
+        self.hardware_reset_settle_s = hardware_reset_settle_s
         self.stream_a_xy = stream_a_xy
         self.stream_b_xy = stream_b_xy
         self.neighborhood_size = neighborhood_size
@@ -99,6 +120,23 @@ class SessionEngineThread(QThread):
         import time
 
         try:
+            if self.hardware_reset_before_start:
+                # Mirrors the standalone reference script's own opening step
+                # (hardware_reset() + a fixed settle, then re-acquire the
+                # device handle) - that script consistently measured a ~3.5ms
+                # inter-sensor timestamp gap on the same rig where this app
+                # consistently measured ~11.3ms, and the reset is one of only
+                # two structural differences between them (the other being
+                # stream enable order, see ContinuousCapture._ordered_picks).
+                # A reset invalidates the current device handle and drops the
+                # device off USB for several seconds, so the handle MUST be
+                # re-acquired afterwards rather than reused.
+                self.error.emit("Hardware-resetting the camera (settling for {:.0f}s)...".format(
+                    self.hardware_reset_settle_s
+                ))
+                find_device_by_serial(self.ctx, self.device_serial).hardware_reset()
+                time.sleep(self.hardware_reset_settle_s)
+
             device = find_device_by_serial(self.ctx, self.device_serial)
             groups = resolve_and_group(device, self.pick_a, self.pick_b)
             # Applies the ONE global self.camera_controls dict (from Stream Select)
@@ -143,7 +181,10 @@ class SessionEngineThread(QThread):
             if self.switch_time_ms is not None:
                 start_scanning(self.switch_time_ms, self.scan_direction, self.dual_panel_config)
 
-            self._capture = ContinuousCapture(self.device_serial, self.pick_a, self.pick_b)
+            self._capture = ContinuousCapture(
+                self.device_serial, self.pick_a, self.pick_b,
+                color_stream_first=self.color_stream_first,
+            )
             self._capture.start()
             self._start_time = time.time()
 

@@ -291,6 +291,54 @@ def test_on_tuning_done_reads_stream_xy_live_from_threshold_tuning_page_not_a_st
     assert window.live_session_page._context["stream_a_xy"] is retuned_stream_a_xy
 
 
+# --- settings.yaml camera_sync: read-through. Deliberately tolerant of a
+# hand-maintained settings.yaml that predates the section entirely (note
+# _full_settings above has no camera_sync key at all). ---
+
+def test_camera_sync_falls_back_to_defaults_when_section_absent(qapp, monkeypatch, tmp_path):
+    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window._on_tuning_done()
+
+    ctx = window.live_session_page._context
+    assert ctx["color_stream_first"] is True
+    assert ctx["hardware_reset_before_start"] is False
+    assert ctx["hardware_reset_settle_s"] == 8.0
+
+
+def test_camera_sync_settings_are_read_and_passed_to_live_session(qapp, monkeypatch, tmp_path):
+    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+    window.settings["camera_sync"] = {
+        "color_stream_first": False,
+        "hardware_reset_before_start": True,
+        "hardware_reset_settle_s": 2.5,
+    }
+
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window._on_tuning_done()
+
+    ctx = window.live_session_page._context
+    assert ctx["color_stream_first"] is False
+    assert ctx["hardware_reset_before_start"] is True
+    assert ctx["hardware_reset_settle_s"] == 2.5
+
+
+def test_camera_sync_color_stream_first_also_reaches_threshold_tuning(qapp, monkeypatch, tmp_path):
+    # The preview must stream in the same enable order the real run will, or
+    # it could show a different inter-sensor offset than the session it's
+    # previewing.
+    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+    window.settings["camera_sync"] = {"color_stream_first": False}
+
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+
+    assert window.threshold_tuning_page._context["color_stream_first"] is False
+
+
 def test_on_tuning_done_passes_tuned_per_stream_thresholds_to_live_session(qapp, monkeypatch, tmp_path):
     window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
 
