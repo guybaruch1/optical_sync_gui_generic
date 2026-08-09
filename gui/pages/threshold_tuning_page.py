@@ -30,21 +30,49 @@ still-in-progress hardware cleanup.
 "Continue to Live Test" hands the tuned per-stream threshold arrays
 (domain.calibration.compute_threshold, applied to each stream's own
 calibrated on/off values) to MainWindow via the stream_a_threshold/
-stream_b_threshold properties - see main_window.py's _on_tuning_done."""
+stream_b_threshold properties - see main_window.py's _on_tuning_done.
+stream_a_xy/stream_b_xy properties read live from self._context too (not a
+copy stashed in MainWindow) - required once LED Detection Threshold Tuning
+(below) can reassign these to a different-length array; MainWindow used to
+read a copy frozen before this page ever ran, which happened to work only
+because nothing previously ever changed these arrays after set_context().
+
+LED Detection Threshold Tuning (above each stream's existing Threshold
+Fraction control, a different axis entirely) lets the operator manually
+override Calibration's automatic Otsu-based LED-position detection, per
+stream, if it went badly (wrong count, missed/merged blobs) - reusing
+Calibration's own already-captured on/off frames (domain.calibration.
+build_grid_positions), no new camera capture needed here. A small preview
++ live "Detected: N / num_leds" count updates on every slider tick
+(cheap: detect_led_centroids + merge_close_centroids + draw_detected_centroids,
+no grid sort, no per-LED brightness sampling); the full pipeline (grid-order
+assignment + on/off/threshold sampling, replacing self._context's
+stream_a_xy/stream_a_on/stream_a_off) is debounced ~150ms after the last
+drag, since build_positions_with_thresholds' per-LED brightness sampling
+does its own full-frame grayscale conversion per call and would lag on a
+color stream if run on every single tick. "Continue to Live Test" persists
+whatever the current positions are (retuned or original, a safe no-op
+rewrite if untouched) to config.yaml via update_config_leds too, not just
+to Live Session in-memory - same as Calibration's own original write."""
+
+import numpy as np
 
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QSpinBox, QDoubleSpinBox, QLabel, QFrame, QScrollArea,
-    QApplication,
+    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QSpinBox, QDoubleSpinBox, QSlider, QLabel, QFrame,
+    QScrollArea, QApplication, QMessageBox,
 )
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Signal, Qt, QTimer
 
 from gui.widgets.video_panel import VideoPanel
 from gui.pages.live_session_page import _short_camera_name
 from engine.threshold_preview_thread import ThresholdPreviewThread
 from engine.led_panel import LEDPanel
 from engine.dual_panel_control import start_scanning
-from domain.calibration import compute_threshold
-from domain.realsense_utils import draw_led_state_overlay, crop_to_roi
+from engine.streams import stream_slug
+from domain.calibration import compute_threshold, build_grid_positions, update_config_leds
+from domain.realsense_utils import (
+    draw_led_state_overlay, crop_to_roi, detect_led_centroids, merge_close_centroids, draw_detected_centroids,
+)
 
 
 class ThresholdTuningPage(QWidget):
@@ -94,9 +122,29 @@ class ThresholdTuningPage(QWidget):
                 "preview above - each change is reflected on the very next frame."
             )
 
+        # Per-stream debounce timers for LED Detection Threshold Tuning's
+        # commit step (see _on_detection_threshold_changed/
+        # _commit_detection_threshold) - one per stream since retuning one
+        # stream must never restart the other's pending commit.
+        self._stream_a_detection_commit_timer = QTimer(self)
+        self._stream_a_detection_commit_timer.setSingleShot(True)
+        self._stream_a_detection_commit_timer.timeout.connect(lambda: self._commit_detection_threshold("stream_a"))
+        self._stream_b_detection_commit_timer = QTimer(self)
+        self._stream_b_detection_commit_timer.setSingleShot(True)
+        self._stream_b_detection_commit_timer.timeout.connect(lambda: self._commit_detection_threshold("stream_b"))
+        self._stream_a_pending_centroids = []
+        self._stream_b_pending_centroids = []
+        # Tracked so a change to one stream's detected count can also
+        # refresh the OTHER stream's mismatch styling (Live Session's math
+        # needs both streams' LED counts to agree, not just each vs
+        # num_leds) - None until the first detection ever runs.
+        self._stream_a_last_detected_count = None
+        self._stream_b_last_detected_count = None
+
         stream_a_column = QVBoxLayout()
         stream_a_column.addWidget(self.stream_a_title_label)
         stream_a_column.addWidget(self.stream_a_panel)
+        stream_a_column.addLayout(self._build_detection_tuning_row("stream_a"))
         stream_a_fraction_row = QHBoxLayout()
         stream_a_fraction_row.addWidget(QLabel("Threshold Fraction:"))
         stream_a_fraction_row.addWidget(self.stream_a_threshold_fraction_spinbox)
@@ -105,6 +153,7 @@ class ThresholdTuningPage(QWidget):
         stream_b_column = QVBoxLayout()
         stream_b_column.addWidget(self.stream_b_title_label)
         stream_b_column.addWidget(self.stream_b_panel)
+        stream_b_column.addLayout(self._build_detection_tuning_row("stream_b"))
         stream_b_fraction_row = QHBoxLayout()
         stream_b_fraction_row.addWidget(QLabel("Threshold Fraction:"))
         stream_b_fraction_row.addWidget(self.stream_b_threshold_fraction_spinbox)
@@ -135,9 +184,15 @@ class ThresholdTuningPage(QWidget):
         control_row.addWidget(self.stop_button)
 
         control_row.addWidget(QLabel("LED Switch Time (ms):"))
-        self.switch_time_spinbox = QSpinBox()
-        self.switch_time_spinbox.setRange(1, 10000)
-        self.switch_time_spinbox.setValue(1)
+        self.switch_time_spinbox = QDoubleSpinBox()
+        # Same floor/precision reasoning as gui/pages/live_session_page.py's
+        # own switch_time_spinbox: 0.1 is the finest step
+        # LEDPanel.set_speed_ms's "--setTime {:.4f}" (4 decimal places of
+        # SECONDS) can actually represent (engine/led_panel.py).
+        self.switch_time_spinbox.setRange(0.1, 10000.0)
+        self.switch_time_spinbox.setDecimals(1)
+        self.switch_time_spinbox.setSingleStep(0.5)
+        self.switch_time_spinbox.setValue(1.0)
         self.switch_time_spinbox.valueChanged.connect(self._on_switch_time_changed)
         control_row.addWidget(self.switch_time_spinbox)
 
@@ -169,11 +224,165 @@ class ThresholdTuningPage(QWidget):
         self.status_label = QLabel("")
         layout.addWidget(self.status_label)
 
+    def _build_detection_tuning_row(self, stream_name):
+        # One per stream (stream_name: "stream_a"/"stream_b") - manual
+        # override of Calibration's automatic Otsu-based LED-position
+        # detection, in case it went badly. Widget attribute names all
+        # follow "{stream_name}_..." so the per-tick/debounced-commit
+        # handlers below can address either stream's widgets generically via
+        # getattr() instead of duplicating this method's logic per stream.
+        column = QVBoxLayout()
+        title_label = QLabel("LED Detection Threshold Tuning")
+        title_label.setStyleSheet("color: #555555; font-weight: 600; font-size: 8pt; border: none; background: transparent;")
+        column.addWidget(title_label)
+
+        detection_panel = VideoPanel(force_square=True)
+        detection_panel.setMaximumSize(160, 160)
+        detection_panel.setStyleSheet("background-color: #3a3a3a; border-radius: 4px;")
+        setattr(self, "{}_detection_panel".format(stream_name), detection_panel)
+        column.addWidget(detection_panel)
+
+        detected_count_label = QLabel("Detected: - / -")
+        setattr(self, "{}_detected_count_label".format(stream_name), detected_count_label)
+        column.addWidget(detected_count_label)
+
+        slider = QSlider(Qt.Horizontal)
+        slider.setRange(0, 255)
+        spinbox = QSpinBox()
+        spinbox.setRange(0, 255)
+        spinbox.setToolTip(
+            "Manual pixel-brightness cutoff for detecting an LED blob (0-255) - overrides "
+            "Calibration's automatic Otsu threshold if it picked badly (wrong count, "
+            "missed/merged blobs). Drag while watching the preview above."
+        )
+        setattr(self, "{}_detection_slider".format(stream_name), slider)
+        setattr(self, "{}_detection_spinbox".format(stream_name), spinbox)
+        self._link_slider_and_spinbox(
+            slider, spinbox, lambda value: self._on_detection_threshold_changed(stream_name, value)
+        )
+        slider_row = QHBoxLayout()
+        slider_row.addWidget(QLabel("Detection Threshold:"))
+        slider_row.addWidget(slider)
+        slider_row.addWidget(spinbox)
+        column.addLayout(slider_row)
+
+        reset_button = QPushButton("Reset to Auto")
+        reset_button.clicked.connect(lambda: self._reset_stream_to_auto(stream_name))
+        setattr(self, "{}_reset_to_auto_button".format(stream_name), reset_button)
+        column.addWidget(reset_button)
+
+        return column
+
+    def _link_slider_and_spinbox(self, slider, spinbox, on_change):
+        # Keeps the two mirrored (drag OR type a precise value) without a
+        # feedback loop - each side's own setValue() call to sync the other
+        # is signal-blocked, so on_change() fires exactly once per genuine
+        # user-driven change, from whichever widget the user actually used.
+        def _slider_changed(value):
+            spinbox.blockSignals(True)
+            spinbox.setValue(value)
+            spinbox.blockSignals(False)
+            on_change(value)
+
+        def _spinbox_changed(value):
+            slider.blockSignals(True)
+            slider.setValue(value)
+            slider.blockSignals(False)
+            on_change(value)
+
+        slider.valueChanged.connect(_slider_changed)
+        spinbox.valueChanged.connect(_spinbox_changed)
+
+    def _on_detection_threshold_changed(self, stream_name, value):
+        # Tier 1 - every tick, cheap: redetect + redraw + recount only. No
+        # grid sort, no per-LED brightness sampling, no self._context
+        # mutation - see the module docstring's "two-tier recompute"
+        # rationale. The actual context update is debounced (below).
+        ctx = self._context
+        if ctx is None:
+            return
+        cropped = ctx["{}_cropped_on".format(stream_name)]
+        centroids, _ = detect_led_centroids(cropped, value, ctx["min_blob_area"])
+        centroids = merge_close_centroids(centroids)
+        setattr(self, "_{}_pending_centroids".format(stream_name), centroids)
+
+        preview = draw_detected_centroids(cropped, centroids)
+        getattr(self, "{}_detection_panel".format(stream_name)).set_frame(preview)
+        self._update_detected_count_label(stream_name, len(centroids))
+
+        getattr(self, "_{}_detection_commit_timer".format(stream_name)).start(150)
+
+    def _update_detected_count_label(self, stream_name, count):
+        ctx = self._context
+        num_leds = ctx["num_leds"] if ctx is not None else None
+        other_stream = "stream_b" if stream_name == "stream_a" else "stream_a"
+
+        setattr(self, "_{}_last_detected_count".format(stream_name), count)
+        other_count = getattr(self, "_{}_last_detected_count".format(other_stream))
+
+        for name, this_count, compare_count in (
+            (stream_name, count, other_count), (other_stream, other_count, count),
+        ):
+            if this_count is None:
+                continue
+            label = getattr(self, "{}_detected_count_label".format(name))
+            label.setText("Detected: {} / {}".format(this_count, num_leds))
+            mismatched = (num_leds is not None and this_count != num_leds) or (
+                compare_count is not None and this_count != compare_count
+            )
+            label.setStyleSheet("color: #b00020; font-weight: 600;" if mismatched else "color: #555555;")
+
+    def _commit_detection_threshold(self, stream_name):
+        # Tier 2 - debounced ~150ms after the last slider/spinbox tick:
+        # the actual grid-order assignment + per-LED on/off/threshold
+        # sampling, replacing self._context's stream_a_xy/on/off (and
+        # stream_a_positions, needed by _on_continue_clicked's
+        # update_config_leds call) so the existing moving-LED preview
+        # (which reads self._context live in _on_frame_ready) reactively
+        # reflects the retune on its very next frame.
+        ctx = self._context
+        if ctx is None:
+            return
+        centroids = getattr(self, "_{}_pending_centroids".format(stream_name))
+        if not centroids:
+            return  # nothing detected - leave the last-good context untouched
+        roi = ctx["{}_roi".format(stream_name)]
+        image_on = ctx["{}_image_on".format(stream_name)]
+        image_off = ctx["{}_image_off".format(stream_name)]
+        try:
+            positions, _row_layout, _debug_centroids = build_grid_positions(
+                centroids, roi, image_on, image_off, ctx["row_gap_px"], ctx["calibration_neighborhood_size"],
+            )
+        except RuntimeError:
+            return  # 0 centroids after all (shouldn't happen given the guard above) - leave context untouched
+
+        ctx["{}_positions".format(stream_name)] = positions
+        ids = list(positions.keys())
+        ctx["{}_xy".format(stream_name)] = np.array([positions[i][:2] for i in ids])
+        ctx["{}_on".format(stream_name)] = np.array([positions[i][2] for i in ids])
+        ctx["{}_off".format(stream_name)] = np.array([positions[i][3] for i in ids])
+
+    def _reset_stream_to_auto(self, stream_name):
+        # Reproduces Calibration's original Otsu result byte-for-byte -
+        # Otsu and the manual path both apply the same cv2.THRESH_BINARY
+        # logic at whatever value is chosen, so setting the slider back to
+        # Otsu's own computed value is equivalent to re-running Otsu. No
+        # separate code path needed - setValue() naturally re-triggers the
+        # same Tier 1/Tier 2 pipeline above.
+        if self._context is None:
+            return
+        slider = getattr(self, "{}_detection_slider".format(stream_name))
+        slider.setValue(self._context["{}_otsu_threshold".format(stream_name)])
+
     def set_context(self, ctx, device_serial, pick_a, pick_b, camera_controls,
                      stream_a_xy, stream_b_xy, stream_a_on, stream_a_off, stream_b_on, stream_b_off,
                      num_leds, neighborhood_size, scan_direction, switch_time_ms,
                      stream_a_threshold_fraction_default, stream_b_threshold_fraction_default,
                      stream_a_roi, stream_b_roi, camera_name, stream_a_label, stream_b_label,
+                     config_path, image_a_on, image_a_off, image_b_on, image_b_off,
+                     stream_a_otsu_threshold, stream_b_otsu_threshold,
+                     min_blob_area, row_gap_px, calibration_neighborhood_size,
+                     stream_a_positions, stream_b_positions,
                      dual_panel_config=None):
         self._context = dict(
             ctx=ctx, device_serial=device_serial, pick_a=pick_a, pick_b=pick_b, camera_controls=camera_controls,
@@ -182,14 +391,52 @@ class ThresholdTuningPage(QWidget):
             stream_b_on=stream_b_on, stream_b_off=stream_b_off,
             num_leds=num_leds, neighborhood_size=neighborhood_size, scan_direction=scan_direction,
             stream_a_roi=stream_a_roi, stream_b_roi=stream_b_roi, dual_panel_config=dual_panel_config,
+            # LED Detection Threshold Tuning's own state - config_path/
+            # stream_a_positions/stream_b_positions are what
+            # _on_continue_clicked persists via update_config_leds;
+            # stream_a_image_on/off are Calibration's own already-captured
+            # frames (deliberately NOT reusing the "image_a_on" kwarg name
+            # internally - every other per-stream context key here is
+            # prefixed "stream_a_"/"stream_b_", so this matches that
+            # convention for the generic getattr()-based access the
+            # detection-tuning handlers above use).
+            config_path=config_path, camera_name=camera_name,
+            stream_a_image_on=image_a_on, stream_a_image_off=image_a_off,
+            stream_b_image_on=image_b_on, stream_b_image_off=image_b_off,
+            stream_a_otsu_threshold=stream_a_otsu_threshold, stream_b_otsu_threshold=stream_b_otsu_threshold,
+            min_blob_area=min_blob_area, row_gap_px=row_gap_px,
+            calibration_neighborhood_size=calibration_neighborhood_size,
+            stream_a_positions=stream_a_positions, stream_b_positions=stream_b_positions,
+            # Cropped ONCE here, not per detection-threshold tick -
+            # detect_led_centroids/draw_detected_centroids both operate on
+            # this same cropped "on" frame throughout the page's lifetime.
+            stream_a_cropped_on=crop_to_roi(image_a_on, stream_a_roi),
+            stream_b_cropped_on=crop_to_roi(image_b_on, stream_b_roi),
         )
         self.stream_a_threshold_fraction_spinbox.setValue(stream_a_threshold_fraction_default)
         self.stream_b_threshold_fraction_spinbox.setValue(stream_b_threshold_fraction_default)
-        self.switch_time_spinbox.setValue(int(round(switch_time_ms)))
+        # float(), not int(round(...)) - settings.yaml's switch_time_ms can
+        # already be fractional, and truncating it here would silently
+        # throw that precision away before the operator even sees it.
+        self.switch_time_spinbox.setValue(float(switch_time_ms))
         short_name = _short_camera_name(camera_name)
         self.stream_a_title_label.setText("{} - {}".format(short_name, stream_a_label))
         self.stream_b_title_label.setText("{} - {}".format(short_name, stream_b_label))
         self.status_label.setText("")
+
+        self._stream_a_last_detected_count = None
+        self._stream_b_last_detected_count = None
+        # setValue() to the SAME value a widget already holds (e.g.
+        # revisiting this page with an unchanged camera) won't fire
+        # valueChanged, so the detection preview/count could otherwise show
+        # stale data from a previous visit - explicitly (re)run the
+        # recompute for both streams regardless of whether the slider value
+        # actually changes.
+        self.stream_a_detection_slider.setValue(stream_a_otsu_threshold)
+        self.stream_b_detection_slider.setValue(stream_b_otsu_threshold)
+        self._on_detection_threshold_changed("stream_a", self.stream_a_detection_slider.value())
+        self._on_detection_threshold_changed("stream_b", self.stream_b_detection_slider.value())
+
         # Defensive - a stale preview from a previous context (if
         # set_context is ever called again) must not keep running against
         # the new one's stream_a_xy/on/off arrays.
@@ -220,6 +467,7 @@ class ThresholdTuningPage(QWidget):
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.frame_sample_interval_spinbox.setEnabled(False)
+        self._set_detection_controls_enabled(False)
 
     def _on_stop_clicked(self):
         if self.preview_thread is not None:
@@ -230,6 +478,7 @@ class ThresholdTuningPage(QWidget):
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         self.frame_sample_interval_spinbox.setEnabled(True)
+        self._set_detection_controls_enabled(True)
 
     def _stop_preview_blocking(self):
         # Unlike _on_stop_clicked (non-blocking - the Stop button just asks
@@ -244,6 +493,20 @@ class ThresholdTuningPage(QWidget):
             self.start_button.setEnabled(True)
             self.stop_button.setEnabled(False)
             self.frame_sample_interval_spinbox.setEnabled(True)
+            self._set_detection_controls_enabled(True)
+
+    def _set_detection_controls_enabled(self, enabled):
+        # ThresholdPreviewThread bakes stream_a_xy/stream_b_xy in at
+        # construction time (_on_start_clicked) - retuning detection while a
+        # preview is running would change self._context's array length out
+        # from under the thread's already-fixed brightness-array shape,
+        # silently zip()-truncating _on_frame_ready's overlay to a wrong,
+        # partial result. Locked for the same reason
+        # frame_sample_interval_spinbox already is during a run.
+        for stream_name in ("stream_a", "stream_b"):
+            getattr(self, "{}_detection_slider".format(stream_name)).setEnabled(enabled)
+            getattr(self, "{}_detection_spinbox".format(stream_name)).setEnabled(enabled)
+            getattr(self, "{}_reset_to_auto_button".format(stream_name)).setEnabled(enabled)
 
     def _on_error(self, message):
         self.status_label.setText(message)
@@ -315,9 +578,50 @@ class ThresholdTuningPage(QWidget):
         )
 
     @property
+    def stream_a_xy(self):
+        # Read live from self._context, NOT a copy stashed elsewhere -
+        # LED Detection Threshold Tuning can REASSIGN this key (a different
+        # LED count needs a new array, not an in-place mutation) once the
+        # operator retunes detection, and MainWindow._on_tuning_done must
+        # see that reassignment, not a value frozen before Threshold Tuning
+        # ever ran. Mirrors stream_a_threshold/stream_b_threshold's own
+        # already-live-read convention.
+        return self._context["stream_a_xy"]
+
+    @property
+    def stream_b_xy(self):
+        return self._context["stream_b_xy"]
+
+    @property
     def switch_time_ms(self):
         return self.switch_time_spinbox.value()
 
     def _on_continue_clicked(self):
+        ctx = self._context
+        slug_a, slug_b = stream_slug(ctx["pick_a"]), stream_slug(ctx["pick_b"])
+        res_a = (ctx["pick_a"]["width"], ctx["pick_a"]["height"])
+        res_b = (ctx["pick_b"]["width"], ctx["pick_b"]["height"])
+        stream_a_ids = list(ctx["stream_a_positions"].keys())
+        stream_b_ids = list(ctx["stream_b_positions"].keys())
+        if len(stream_a_ids) != len(stream_b_ids) or len(stream_a_ids) != ctx["num_leds"]:
+            QMessageBox.warning(
+                self,
+                "LED count mismatch",
+                "Detection tuning found {} LED(s) for one stream and {} for the other, but "
+                "settings.yaml's test.num_leds is {}. The live session's position-gap math "
+                "assumes all three match - proceeding anyway, but treat position-gap results "
+                "with caution until this is resolved (retune detection, or fix "
+                "test.num_leds).".format(len(stream_a_ids), len(stream_b_ids), ctx["num_leds"]),
+            )
+        # Persists whatever the CURRENT positions are - the original
+        # Calibration-computed ones if the operator never touched the
+        # detection-threshold sliders (a safe no-op rewrite), or the
+        # retuned ones if they did. Same helper CalibrationPage's own
+        # _run_calibration already uses to write its first-ever result.
+        update_config_leds(
+            ctx["config_path"], ctx["camera_name"],
+            slug_a, ctx["stream_a_positions"], res_a,
+            slug_b, ctx["stream_b_positions"], res_b,
+        )
         self._stop_preview_blocking()
         self.tuning_done.emit()

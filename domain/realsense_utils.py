@@ -129,8 +129,21 @@ def merge_close_centroids(centroids, distance_fraction=0.5):
 
 
 def detect_led_centroids(image, threshold, min_area):
+    """threshold=None: automatic Otsu (this function's original, and still
+    default, behavior). threshold=<int 0-255>: a fixed manual value instead
+    - lets a caller override Otsu when it picks badly for a given frame's
+    actual exposure/contrast (gui/pages/threshold_tuning_page.py's LED
+    Detection Threshold Tuning section; matches tools/panel_drift/
+    panel_drift_calibrate.py's own _detect_centroids_at_threshold exactly).
+    Returns (centroids, chosen_threshold) either way - chosen_threshold is
+    Otsu's own computed value in the first case, an echo of the given
+    threshold in the second (cv2.threshold's own return value already
+    provides this, no special-casing needed)."""
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image.copy()
-    chosen_threshold, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    if threshold is None:
+        chosen_threshold, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    else:
+        chosen_threshold, binary = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY)
     kernel = np.ones((3, 3), np.uint8)
     binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -182,6 +195,26 @@ def save_debug_detection_image(image, centroids, path):
     cv2.imwrite(path, debug_img)
 
 
+def draw_detected_centroids(image, centroids):
+    """Circles-only draw (no numbering, no disk write) - for
+    gui/pages/threshold_tuning_page.py's LED Detection Threshold Tuning
+    live per-tick preview, where a fresh detection needs to be shown on
+    every slider drag. Deliberately independent of save_debug_detection_image
+    (not called by it, doesn't call it) rather than a shared circles-drawing
+    step factored out of it - that function's existing per-point
+    circle-then-text interleaving must stay byte-identical for its existing
+    callers, and a two-pass "draw all circles, then all text" refactor could
+    change the final pixels wherever a later LED's circle overlaps an
+    earlier one's number label at tight spacing. Small, already-idiomatic
+    duplication (draw_led_state_overlay below already repeats the same
+    grayscale-conversion prelude independently) traded for that guarantee."""
+    debug_img = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR) if len(image.shape) == 2 else image.copy()
+    radius = _debug_circle_radius(centroids)
+    for (x, y) in centroids:
+        cv2.circle(debug_img, (int(x), int(y)), radius, (0, 255, 0), 1)
+    return debug_img
+
+
 def draw_led_state_overlay(image, xy_positions, on_mask):
     """Debug snapshot for the live session: circles each calibrated LED
     position green if the live threshold classification says it's on right
@@ -195,6 +228,30 @@ def draw_led_state_overlay(image, xy_positions, on_mask):
         color = (0, 255, 0) if is_on else (0, 0, 255)  # BGR: green=on, red=off
         cv2.circle(debug_img, (int(x), int(y)), radius, color, 2)
     return debug_img
+
+
+def combine_side_by_side(image_a, image_b, gap_px=10, gap_color=(60, 60, 60)):
+    """Combines two BGR debug images into one, Stream A on the left/Stream B
+    on the right, separated by a thin gap column - lets a single saved PNG
+    be cross-checked at a glance instead of two separate files for the same
+    pair_index. Stream A/B can be different resolutions (e.g. an infrared
+    stream vs. a color stream), so the shorter image is vertically letterboxed
+    (padded with gap_color, not stretched/resized) to match the taller one's
+    height before concatenating - resizing would distort one stream's pixel
+    scale relative to the other's, misleading anyone comparing LED positions
+    across the two halves."""
+    height = max(image_a.shape[0], image_b.shape[0])
+
+    def _pad_to_height(image):
+        if image.shape[0] == height:
+            return image
+        pad = height - image.shape[0]
+        top = pad // 2
+        bottom = pad - top
+        return cv2.copyMakeBorder(image, top, bottom, 0, 0, cv2.BORDER_CONSTANT, value=gap_color)
+
+    gap = np.full((height, gap_px, 3), gap_color, dtype=np.uint8)
+    return np.hstack([_pad_to_height(image_a), gap, _pad_to_height(image_b)])
 
 
 def draw_bundle_overlay(image, bundle_index, stream_a_frame_number, stream_b_frame_number, stream_a_ts_us, stream_b_ts_us, delta_us):
