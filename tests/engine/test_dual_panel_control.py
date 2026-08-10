@@ -2,6 +2,8 @@ import threading
 import time
 from unittest.mock import patch, call
 
+import pytest
+
 import engine.dual_panel_control as dual_panel_control
 from engine.dual_panel_control import (
     turn_all_leds_on, turn_all_leds_off, start_scanning, stop_scanning, switched_to_stream_panel,
@@ -16,6 +18,18 @@ DUAL_PANEL_CONFIG = {
     "stream_a_panel_port": 1, "stream_b_panel_port": 0, "relay_port": 6,
     "relay_com_port": "COM6", "hub_switch_settle_s": 3.0,
 }
+
+
+@pytest.fixture(autouse=True)
+def _reset_dual_panel_primed_flag():
+    # _dual_panel_primed is module-level state that persists across tests
+    # in the same process - reset to its real fresh-process defaults
+    # before EVERY test in this file, so no test's outcome depends on what
+    # some earlier test happened to leave it as.
+    fresh = {"primed": False, "switch_time_ms": None, "scan_direction": None}
+    dual_panel_control._dual_panel_primed.update(fresh)
+    yield
+    dual_panel_control._dual_panel_primed.update(fresh)
 
 
 # --- dual_panel_config=None must take the EXACT same code path as before
@@ -90,16 +104,44 @@ def test_turn_all_leds_off_with_dual_panel_config_routes_through_run_on_both_pan
         mock_run_on_both.assert_called_once_with(DUAL_PANEL_CONFIG, dual_panel_control.LEDPanel.all_leds_off)
 
 
-def test_start_scanning_with_dual_panel_config_configures_both_panels_and_closes_relay():
+def test_start_scanning_with_dual_panel_config_arms_twice_when_not_yet_primed():
+    # Confirmed on real hardware (tools/dual_panel_diag/
+    # diag_double_arm_hypothesis.py): a SINGLE arm cycle - even one
+    # immediately preceded by stop_scanning() - never gets the panel
+    # stepping on its first arm after Calibration (isRunning stays '0'
+    # despite getCameraTriggerState correctly flipping to 1 - the panel
+    # sees the trigger edge but doesn't trust it yet). A SECOND, IDENTICAL
+    # arm cycle - after a real stop_scanning() - steps every time. See
+    # start_scanning's own comment for the full reasoning. This only fires
+    # when _dual_panel_primed isn't set yet - see the fixture at the top of
+    # this file resetting it before every test, and the "already primed"
+    # test right below for the fast path.
+    call_order = []
     with patch("engine.dual_panel_control.LEDPanel") as mock_led_panel, \
-         patch.object(dual_panel_control, "_run_on_both_panels") as mock_run_on_both, \
-         patch.object(dual_panel_control, "_relay_on") as mock_relay_on:
+         patch.object(dual_panel_control, "stop_scanning",
+                      side_effect=lambda cfg: call_order.append("stop_scanning")) as mock_stop_scanning, \
+         patch.object(dual_panel_control, "_run_on_both_panels",
+                      side_effect=lambda cfg, action: call_order.append("_run_on_both_panels")) as mock_run_on_both, \
+         patch.object(dual_panel_control, "_relay_on",
+                      side_effect=lambda cfg: call_order.append("_relay_on")) as mock_relay_on:
         start_scanning(5, 1, DUAL_PANEL_CONFIG)
 
-        mock_run_on_both.assert_called_once()
-        assert mock_run_on_both.call_args[0][0] == DUAL_PANEL_CONFIG
-        # Actually invoke the action callback _run_on_both_panels was given,
-        # to confirm it sends reset() first (a cheap "known starting
+        # Two full arm cycles, ONE stop_scanning() between them - not
+        # before-then-once, which is what the previous (failed) fix did.
+        assert mock_run_on_both.call_count == 2
+        assert mock_relay_on.call_count == 2
+        mock_stop_scanning.assert_called_once_with(DUAL_PANEL_CONFIG)
+        assert call_order == ["_run_on_both_panels", "_relay_on", "stop_scanning",
+                               "_run_on_both_panels", "_relay_on"]
+
+        for call in mock_run_on_both.call_args_list:
+            assert call[0][0] == DUAL_PANEL_CONFIG
+        for call in mock_relay_on.call_args_list:
+            assert call[0][0] == DUAL_PANEL_CONFIG
+
+        # Actually invoke the action callback _run_on_both_panels was given
+        # (both calls pass the SAME configure_one_panel closure), to
+        # confirm it sends reset() first (a cheap "known starting
         # position" step), then the plain docs/config_tigger_mode.bat
         # sequence - set_mode/set_speed_ms/set_trigger_mode/
         # set_camera_trigger, nothing more. A long investigation piled a lot
@@ -123,7 +165,94 @@ def test_start_scanning_with_dual_panel_config_configures_both_panels_and_closes
         mock_led_panel.set_trigger_mode.assert_called_once_with(2)
         mock_led_panel.set_camera_trigger.assert_called_once_with(True)
 
+    # After a successful double-arm, the pair is marked primed - so the
+    # NEXT start_scanning() call (switch_time change, Continue to Live
+    # Test, Live Session's own Start) can take the fast, single-arm path.
+    assert dual_panel_control._dual_panel_primed["primed"] is True
+
+
+def test_start_scanning_with_dual_panel_config_reconfigures_once_when_primed_but_settings_changed():
+    # Primed, but with DIFFERENT switch_time_ms/scan_direction than last
+    # time (e.g. the operator tweaked the switch-time spinbox) - a real
+    # settings change needs one reconfigure+relay cycle; this isn't the
+    # priming bug at all, just a normal re-provision, same as this function
+    # always did for every call before any of this investigation started.
+    dual_panel_control._dual_panel_primed["primed"] = True
+    dual_panel_control._dual_panel_primed["switch_time_ms"] = 99
+    dual_panel_control._dual_panel_primed["scan_direction"] = 1
+    call_order = []
+    with patch("engine.dual_panel_control.LEDPanel"), \
+         patch.object(dual_panel_control, "stop_scanning",
+                      side_effect=lambda cfg: call_order.append("stop_scanning")) as mock_stop_scanning, \
+         patch.object(dual_panel_control, "_run_on_both_panels",
+                      side_effect=lambda cfg, action: call_order.append("_run_on_both_panels")) as mock_run_on_both, \
+         patch.object(dual_panel_control, "_relay_on",
+                      side_effect=lambda cfg: call_order.append("_relay_on")) as mock_relay_on:
+        start_scanning(5, 1, DUAL_PANEL_CONFIG)  # switch_time_ms=5, different from the 99 tracked above
+
+        mock_stop_scanning.assert_not_called()
+        assert mock_run_on_both.call_count == 1
+        assert mock_relay_on.call_count == 1
+        assert call_order == ["_run_on_both_panels", "_relay_on"]
+
+    # Still primed afterward, and now tracking the NEW settings.
+    assert dual_panel_control._dual_panel_primed["primed"] is True
+    assert dual_panel_control._dual_panel_primed["switch_time_ms"] == 5
+    assert dual_panel_control._dual_panel_primed["scan_direction"] == 1
+
+
+def test_start_scanning_with_dual_panel_config_only_retriggers_relay_when_settings_unchanged():
+    # The actual "we only need to trigger both panels" fast path: already
+    # primed AND the exact same switch_time_ms/scan_direction as last
+    # time - configure_one_panel()'s own reset() only ever touched LED
+    # POSITION, never mode/trigger config, so a panel already sitting in
+    # mode 1/trigger mode 2/camera-trigger-enabled from the last arm is
+    # still fully configured. Skips the per-panel hub-switch entirely -
+    # that's what dominates wall-clock cost, not the LEDPanel CLI commands
+    # sent during it - and re-triggers only the relay (a direct serial
+    # connection, no hub involved at all).
+    dual_panel_control._dual_panel_primed["primed"] = True
+    dual_panel_control._dual_panel_primed["switch_time_ms"] = 5
+    dual_panel_control._dual_panel_primed["scan_direction"] = 1
+    with patch("engine.dual_panel_control.LEDPanel"), \
+         patch.object(dual_panel_control, "stop_scanning") as mock_stop_scanning, \
+         patch.object(dual_panel_control, "_run_on_both_panels") as mock_run_on_both, \
+         patch.object(dual_panel_control, "_relay_on") as mock_relay_on:
+        start_scanning(5, 1, DUAL_PANEL_CONFIG)  # identical switch_time_ms/scan_direction
+
+        mock_stop_scanning.assert_not_called()
+        mock_run_on_both.assert_not_called()
         mock_relay_on.assert_called_once_with(DUAL_PANEL_CONFIG)
+
+    assert dual_panel_control._dual_panel_primed["primed"] is True
+    assert dual_panel_control._dual_panel_primed["switch_time_ms"] == 5
+    assert dual_panel_control._dual_panel_primed["scan_direction"] == 1
+
+
+def test_start_scanning_with_dual_panel_config_tracks_settings_after_first_double_arm():
+    # After the FIRST (double-arm) call, the settings it was armed with
+    # must be recorded too - otherwise the very next call (even with
+    # identical settings) couldn't recognize them as unchanged.
+    with patch("engine.dual_panel_control.LEDPanel"), \
+         patch.object(dual_panel_control, "_run_on_both_panels"), \
+         patch.object(dual_panel_control, "_relay_on"):
+        start_scanning(7, -1, DUAL_PANEL_CONFIG)
+
+    assert dual_panel_control._dual_panel_primed["primed"] is True
+    assert dual_panel_control._dual_panel_primed["switch_time_ms"] == 7
+    assert dual_panel_control._dual_panel_primed["scan_direction"] == -1
+
+
+def test_start_scanning_with_none_config_does_not_call_stop_scanning_again():
+    # The single-panel case already calls LEDPanel.stop() unconditionally
+    # at the top of its own branch, regardless of precondition - it must
+    # NOT also route through the dual-panel stop_scanning() automation.
+    with patch("engine.dual_panel_control.LEDPanel"), \
+         patch.object(dual_panel_control, "stop_scanning") as mock_stop_scanning, \
+         patch.object(dual_panel_control, "_run_on_both_panels"), \
+         patch.object(dual_panel_control, "_relay_on"):
+        start_scanning(5, 1, None)
+        mock_stop_scanning.assert_not_called()
 
 
 def test_stop_scanning_with_dual_panel_config_releases_relay_before_touching_hub_again():
@@ -258,6 +387,7 @@ def test_switched_to_stream_panel_switches_to_stream_as_own_port():
         return type("module", (), {"AcronameHub": lambda: fake_hub})
 
     with patch.dict("sys.modules", {"engine.acroname_hub": fake_acroname_hub_module()}), \
+         patch("engine.dual_panel_control.LEDPanel") as mock_led_panel, \
          patch("time.sleep") as mock_sleep:
         with switched_to_stream_panel(DUAL_PANEL_CONFIG, "stream_a"):
             pass
@@ -271,6 +401,7 @@ def test_switched_to_stream_panel_switches_to_stream_as_own_port():
         "disconnect",
     ]
     mock_sleep.assert_called_once_with(3.0)
+    mock_led_panel.reset.assert_called_once()
 
 
 def test_switched_to_stream_panel_switches_to_stream_bs_own_port():
@@ -280,6 +411,7 @@ def test_switched_to_stream_panel_switches_to_stream_bs_own_port():
         return type("module", (), {"AcronameHub": lambda: fake_hub})
 
     with patch.dict("sys.modules", {"engine.acroname_hub": fake_acroname_hub_module()}), \
+         patch("engine.dual_panel_control.LEDPanel"), \
          patch("time.sleep"):
         with switched_to_stream_panel(DUAL_PANEL_CONFIG, "stream_b"):
             pass
@@ -298,6 +430,7 @@ def test_switched_to_stream_panel_only_switches_once_for_multiple_actions_inside
         return type("module", (), {"AcronameHub": lambda: fake_hub})
 
     with patch.dict("sys.modules", {"engine.acroname_hub": fake_acroname_hub_module()}), \
+         patch("engine.dual_panel_control.LEDPanel"), \
          patch("time.sleep") as mock_sleep:
         with switched_to_stream_panel(DUAL_PANEL_CONFIG, "stream_a"):
             pass  # caller would issue several plain LEDPanel calls here in real use
@@ -315,12 +448,95 @@ def test_switched_to_stream_panel_disconnects_even_if_block_raises():
         return type("module", (), {"AcronameHub": lambda: fake_hub})
 
     with patch.dict("sys.modules", {"engine.acroname_hub": fake_acroname_hub_module()}), \
+         patch("engine.dual_panel_control.LEDPanel"), \
          patch("time.sleep"):
         try:
             with switched_to_stream_panel(DUAL_PANEL_CONFIG, "stream_a"):
                 raise ValueError("boom")
         except ValueError:
             pass
+
+    assert fake_hub.calls[-1] == "disconnect"  # cleanup still ran despite the raise
+
+
+# --- Regression: the panel would fail to step on the very FIRST
+# start_scanning() after Calibration/ROI Select specifically - both end
+# their per-stream capture with LEDPanel.all_leds_off(), which internally
+# sends LEDPanel.stop() (--stop), the exact command already identified as
+# poisoning the panel's next arm (see start_scanning's own comment). Manually
+# pressing Stop then Start again always cleared it, because stop_scanning's
+# own LEDPanel.reset() call undoes that poisoning - switched_to_stream_panel
+# now does the same reset() automatically before switching away, so
+# Calibration/ROI Select's own LED panel cleanup can no longer poison the
+# panel for whatever start_scanning() call comes after them. ---
+
+def test_switched_to_stream_panel_resets_panel_before_disconnecting():
+    fake_hub = _FakeHubForSwitch()
+
+    def fake_acroname_hub_module():
+        return type("module", (), {"AcronameHub": lambda: fake_hub})
+
+    with patch.dict("sys.modules", {"engine.acroname_hub": fake_acroname_hub_module()}), \
+         patch("engine.dual_panel_control.LEDPanel") as mock_led_panel, \
+         patch("time.sleep"):
+        with switched_to_stream_panel(DUAL_PANEL_CONFIG, "stream_a"):
+            mock_led_panel.all_leds_off()  # what Calibration/ROI Select's own cleanup does
+
+    mock_led_panel.reset.assert_called_once()
+    # Reset happens while STILL hub-exposed on my_port - no extra hub
+    # switch beyond the single enable/disable pair already asserted
+    # elsewhere; disconnect is still the very last hub call.
+    assert fake_hub.calls[-1] == "disconnect"
+
+
+def test_switched_to_stream_panel_marks_the_pair_as_no_longer_primed():
+    # This IS the de-priming action start_scanning's own primed-flag check
+    # is designed around: Calibration/ROI Select's all_leds_on()/
+    # all_leds_off() (the caller's own code inside the `with` block) is
+    # what actually necessitates a fresh double-arm next time - marked
+    # here since this is the one place both callers route through.
+    dual_panel_control._dual_panel_primed["primed"] = True
+    fake_hub = _FakeHubForSwitch()
+
+    def fake_acroname_hub_module():
+        return type("module", (), {"AcronameHub": lambda: fake_hub})
+
+    with patch.dict("sys.modules", {"engine.acroname_hub": fake_acroname_hub_module()}), \
+         patch("engine.dual_panel_control.LEDPanel"), \
+         patch("time.sleep"):
+        with switched_to_stream_panel(DUAL_PANEL_CONFIG, "stream_a"):
+            pass
+
+    assert dual_panel_control._dual_panel_primed["primed"] is False
+
+
+def test_switched_to_stream_panel_is_a_noop_when_config_is_none_does_not_reset():
+    # The single-panel case never routes through here at all (no hub, no
+    # panel of its own to un-poison) - start_scanning's own unconditional
+    # LEDPanel.stop() at the top of its single-panel branch already handles
+    # this case regardless of precondition.
+    with patch("engine.dual_panel_control.LEDPanel") as mock_led_panel:
+        with switched_to_stream_panel(None, "stream_a"):
+            pass
+    mock_led_panel.reset.assert_not_called()
+
+
+def test_switched_to_stream_panel_reset_failure_does_not_mask_block_exception():
+    fake_hub = _FakeHubForSwitch()
+
+    def fake_acroname_hub_module():
+        return type("module", (), {"AcronameHub": lambda: fake_hub})
+
+    with patch.dict("sys.modules", {"engine.acroname_hub": fake_acroname_hub_module()}), \
+         patch("engine.dual_panel_control.LEDPanel") as mock_led_panel, \
+         patch("time.sleep"):
+        mock_led_panel.reset.side_effect = RuntimeError("panel command failed")
+        with pytest.raises(ValueError, match="boom"):
+            with switched_to_stream_panel(DUAL_PANEL_CONFIG, "stream_a"):
+                raise ValueError("boom")
+
+    # Cleanup still completed despite reset() itself failing.
+    assert fake_hub.calls[-1] == "disconnect"
 
     assert "disconnect" in fake_hub.calls
 
@@ -387,3 +603,64 @@ def test_relay_keepalive_loop_stops_silently_on_write_error():
     # print a traceback and die silently anyway; this does the same without
     # the noise.
     _relay_keepalive_loop(_FailingRelayConnection(), stop_event, interval_s=0.01)
+
+
+# --- _dual_panel_lock: defense-in-depth against two overlapping start_
+# scanning()/stop_scanning() calls both touching the relay's serial
+# connection at once (observed on real hardware via
+# gui/pages/threshold_tuning_page.py's switch-time control, before it was
+# fixed to only apply on an explicit Confirm click, as
+# "WriteFile failed (PermissionError(13, 'Access is denied.', ...))"). ---
+
+def test_dual_panel_lock_is_reentrant():
+    # Must be an RLock, not a plain Lock - start_scanning's dual-panel
+    # branch calls stop_scanning() internally (the double-arm fix), so a
+    # non-reentrant lock would deadlock the exact code path this is meant
+    # to protect. Acquiring it twice on the SAME thread must not block.
+    acquired_twice = dual_panel_control._dual_panel_lock.acquire(timeout=1)
+    try:
+        assert acquired_twice
+        acquired_again = dual_panel_control._dual_panel_lock.acquire(timeout=1)
+        assert acquired_again
+        dual_panel_control._dual_panel_lock.release()
+    finally:
+        dual_panel_control._dual_panel_lock.release()
+
+
+def test_dual_panel_lock_blocks_a_second_thread_until_released():
+    lock = dual_panel_control._dual_panel_lock
+    lock.acquire()
+    second_thread_acquired = threading.Event()
+
+    def try_acquire_from_another_thread():
+        if lock.acquire(timeout=0.3):
+            second_thread_acquired.set()
+            lock.release()
+
+    thread = threading.Thread(target=try_acquire_from_another_thread)
+    try:
+        thread.start()
+        thread.join(timeout=1)
+        # Held by the main thread the whole time this test's own thread
+        # tried and failed to acquire it within its short timeout.
+        assert not second_thread_acquired.is_set()
+    finally:
+        lock.release()
+
+    # Once released, a fresh attempt from another thread succeeds.
+    second_thread_acquired.clear()
+    thread2 = threading.Thread(target=try_acquire_from_another_thread)
+    thread2.start()
+    thread2.join(timeout=1)
+    assert second_thread_acquired.is_set()
+
+
+def test_start_scanning_and_stop_scanning_still_work_together_under_the_lock():
+    # Regression guard for the RLock choice: start_scanning's dual-panel
+    # branch calling stop_scanning() internally (the double-arm fix) must
+    # not deadlock now that both are wrapped in _dual_panel_lock.
+    with patch("engine.dual_panel_control.LEDPanel"), \
+         patch.object(dual_panel_control, "_run_on_both_panels"), \
+         patch.object(dual_panel_control, "_relay_on"), \
+         patch.object(dual_panel_control, "_relay_off"):
+        start_scanning(5, 1, DUAL_PANEL_CONFIG)  # not yet primed -> calls stop_scanning() internally

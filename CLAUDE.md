@@ -205,14 +205,229 @@ back into the dual-panel `stop_scanning` path without re-confirming on
 real hardware first (`tools/dual_panel_diag/diag_panel_query_state.py`, checking
 `isRunning` after the NEXT arm).
 
-Any panel config change (e.g. switch time)
-needs this whole provisioning re-run - see `gui/pages/threshold_tuning_page.py`'s
-`_on_switch_time_changed`, which branches on `dual_panel_config` to either
-call `LEDPanel.set_speed_ms()` directly and instantly (single-panel) or
-re-run `start_scanning()` in full (dual-panel, visibly slower - no way
-around the hardware constraint); since this re-runs `start_scanning()`
-without an intervening `stop_scanning()`, `_relay_on()` closes any stale
-still-open connection from a previous call before opening its own.
+**The same poisoning, from a second call site the original fix never
+covered: the panel would fail to step on its very FIRST arm after
+Calibration/ROI Select specifically.** `LEDPanel.all_leds_off()`
+(`engine/led_panel.py`) internally calls `LEDPanel.stop()` - i.e. sends the
+exact same `--stop` identified above as the root cause - as its own first
+step. Calibration's and ROI Select's per-stream capture code (the only two
+callers of `switched_to_stream_panel`) both end their block by calling
+`all_leds_off()` as cleanup, right before the hub switches away from that
+panel. So every calibration run left both panels freshly poisoned, and the
+very next `start_scanning()` (Threshold Tuning's first Start, right after
+Calibration) would fail to step - while every LATER `start_scanning`/
+`stop_scanning` cycle within that same Threshold Tuning/Live Session
+session worked fine, since `stop_scanning`'s own `reset()` kept curing it
+each time. Manually pressing Stop then Start again "fixed" it for the same
+reason. `switched_to_stream_panel` now calls `LEDPanel.reset()` itself
+right before disconnecting from the hub (while still switched to that
+panel - no extra hub switch needed), un-poisoning both panels as part of
+Calibration/ROI Select's own cleanup instead of leaving it to accidentally
+depend on the operator's next `start_scanning()` call being preceded by an
+explicit `stop_scanning()`.
+
+**That `switched_to_stream_panel` fix alone did not fully resolve it on real
+hardware - the panel still failed to step on its first arm.** The reason:
+`tools/dual_panel_diag/diag_arm_sequence_sweep.py`'s exhaustive 12-variant
+sweep - the investigation that found the `--stop`->`--reset` fix above -
+always forced its test precondition via `dual_panel_control.stop_scanning()`
+itself (see that script's own `run_variant`). Every variant it ever tested,
+including plain `reset()`, was validated ONLY against a panel that had
+PREVIOUSLY been armed into response-time-measurement mode (mode 1, trigger
+mode 2) and then stopped. It was never tested against the precondition that
+actually exists here: a panel that has NEVER been in mode 1 at all, coming
+straight from Calibration's `all_leds_on()`/`all_leds_off()` (modes 5 then
+3 - a different, unvalidated transition). The `switched_to_stream_panel`
+fix was the direct equivalent of the sweep's own `reset_then_baseline`
+variant, just applied to a precondition that variant was never actually
+tested against.
+
+The actual fix: `start_scanning()`'s dual-panel branch now calls
+`stop_scanning(dual_panel_config)` itself, unconditionally, before its own
+`configure_one_panel()`/`_relay_on()` - i.e. it automates "press Stop then
+press Start", the operator's own confirmed-100%-reliable manual recovery,
+rather than guessing a brand new arm sequence blind for a transition
+nothing has actually swept. Safe to call even when nothing was ever armed:
+`_relay_off()` no-ops when the relay was never on, and sending an extra
+`reset()` to an already-reset panel is harmless (confirmed safe by the
+sweep's own `reset_twice_then_baseline` variant). This also makes
+`gui/pages/threshold_tuning_page.py`'s `_on_confirm_switch_time_clicked` -
+which re-runs `start_scanning()` without an intervening `stop_scanning()` -
+correct by construction instead of only working via `_relay_on()`'s own
+stale-connection guard. Keep the `switched_to_stream_panel` fix too - it's
+still correct on its own terms and cheap, genuine defense-in-depth alongside
+this one, not a replacement for it.
+
+**This `stop_scanning()`-inside-`start_scanning()` fix ALSO did not resolve
+it on real hardware** - confirmed by the operator, still fails to step on
+the first arm after Calibration. Two informed guesses in a row, both
+pattern-matched from the ORIGINAL bug's fix, have now both failed against
+this specific untested transition. Per this project's own established
+lesson from the original investigation ("Rather than keep hand-editing
+`start_scanning()` and asking for one more real-hardware round trip per
+idea, this sweeps a whole list of VARIANTS in one unattended run") -
+guessing a third sequence by hand is not the right next move.
+
+`tools/dual_panel_diag/diag_first_arm_after_calibration.py` adapted
+`diag_arm_sequence_sweep.py`'s proven harness with the precondition step
+corrected to the REAL one - `switched_to_stream_panel()` +
+`LEDPanel.stop(); LEDPanel.all_leds_on(); LEDPanel.all_leds_off()` per
+stream, byte-for-byte matching `_capture_on_off_for_stream()` - and swept 8
+candidate single-shot arm sequences from it, including the current shipped
+`start_scanning()` as a negative control. **Result on real hardware: ALL 8
+showed "no movement", including the negative control** (confirming the
+script's own precondition/detection was valid). Raw per-variant output
+showed something precise: `isRunning` read `'1'` on both panels right
+after the precondition (before any arm attempt), then `'0'` after EVERY
+single arm attempt - the exact signature already documented above for the
+original bug before its fix, now showing up via this different,
+never-swept route too.
+
+**The actual fix, confirmed via `tools/dual_panel_diag/diag_double_arm_hypothesis.py`:**
+across BOTH sweeps (12 old variants + 8 new = 20 single-shot sequences
+total), the one thing never tested was genuinely arming TWICE, with a real
+`stop_scanning()` in between, using the IDENTICAL command sequence both
+times - which is inherently what the operator's own 100%-reliable manual
+fix (Start, fails, Stop, Start again, works) does. That script forced the
+real precondition once, then called the current shipped `start_scanning()`
+(arm #1), then a real `stop_scanning()`, then `start_scanning()` again
+(arm #2 - the exact same call), capturing the full 8-field query
+(`isRunning`/`getCurrentLED`/`getMode`/`getTriggerMode`/`getCameraTrigger`/
+`getCameraTriggerState`/`getStopTrigger`/`getStopTriggerState`) at each
+checkpoint. **Arm #1: no movement, `isRunning='0'`, but
+`getCameraTriggerState='1'` - the panel DOES see the relay's trigger edge
+electrically, exactly matching this file's own earlier note ("this
+relay-edge guarantee is confirmed harmless/correct... but is NOT sufficient
+on its own"). Arm #2 (identical command sequence): STEPPED on both panels,
+`isRunning='1'`.** Two identical arm sequences, one difference - having
+already gone through one full relay close->open cycle. Sequence CONTENT
+was never the variable that mattered across all 20 single-shot variants
+tried in this investigation; the panel's own trigger-detection logic
+needs to see one full "priming" cycle before it trusts the next one.
+
+`start_scanning()`'s dual-panel branch arms TWICE - `_arm_once()` (configure
+both panels + close relay), a real `stop_scanning()`, then `_arm_once()`
+again - directly encoding this confirmed sequence, but **only on the FIRST
+arm since Calibration/ROI Select last touched the panels**, tracked via a
+module-level `_dual_panel_primed` flag. Unconditionally double-arming on
+EVERY `start_scanning()` call (switch_time changes, Continue to Live Test,
+Live Session's own Start - none of which need it) made every one of those
+calls noticeably slower for no benefit, confirmed on real hardware -
+the bug was never "every Start is slow to arm", only the very first one
+after Calibration. `switched_to_stream_panel`'s own cleanup (the one place
+both Calibration's and ROI Select's per-stream capture code route through)
+sets the flag back to `False` on exit, since that's the actual de-priming
+action (their `all_leds_on()`/`all_leds_off()` calls inside the `with`
+block); `start_scanning()` sets it `True` after a successful double-arm.
+Resets to `False` on a fresh process by default - the safe choice, since a
+fresh process has no evidence either panel is primed.
+
+**A second layer on top of that: once primed, a call with the SAME
+`switch_time_ms`/`scan_direction` as last time skips reconfiguring the
+panels entirely and just re-triggers the relay.** `_dual_panel_primed`
+also tracks the last-armed settings. `configure_one_panel()`'s own
+`LEDPanel.reset()` only ever resets LED POSITION, never mode/trigger
+config - a panel already sitting in mode 1/trigger mode 2/camera-trigger-
+enabled from the last arm is still fully configured, so the only thing
+that actually needs to happen for a plain repeat-Start is re-triggering
+the relay (a direct serial connection, not the Acroname hub - no
+hub-switch settle time at all). What actually dominates `start_scanning()`'s
+wall-clock cost is the per-panel HUB SWITCH, not the handful of
+near-instant LEDPanel CLI commands sent during it - so skipping the hub
+switch entirely, not just trimming which commands get sent during it, is
+what makes this fast. Trade-off: the LEDs resume stepping from wherever
+they last stopped rather than restarting at position 0, since the reset()
+that normally does that is skipped too - acceptable since nothing in this
+app depends on a scan always starting from LED 0. A genuine settings
+CHANGE (or the first arm since Calibration) still needs the full
+reconfigure.
+
+Any GENUINE panel config change (switch time actually different from last
+time) needs the full provisioning re-run - see `gui/pages/threshold_tuning_page.py`'s
+`_on_confirm_switch_time_clicked`, which branches on `dual_panel_config` to
+either call `LEDPanel.set_speed_ms()` directly and instantly (single-panel)
+or re-run `start_scanning()` (dual-panel - fast if the settings match what's
+already configured, a full reconfigure otherwise); since this re-runs
+`start_scanning()` without an intervening `stop_scanning()`, `_relay_on()`
+closes any stale still-open connection from a previous call before opening
+its own.
+
+**The switch-time spinbox applies on an explicit Confirm click, not on
+every `valueChanged` tick.** It used to call
+`start_scanning()`/`LEDPanel.set_speed_ms()` live on every tick - so
+clicking the spin arrows from 1 to 5 fired 4 separate hardware calls
+(one per intermediate value) instead of one for the value actually wanted.
+Worse: the handler calls `QApplication.processEvents()` mid-body so its
+own "Reconfiguring..." status-label update repaints before the blocking
+call - which also let a *second* queued tick re-enter the handler while
+the first was still mid-flight. `engine/dual_panel_control.py`'s
+`_relay_connection` (the one open `serial.Serial` handle to the relay's
+COM port) had no lock protecting it from concurrent access - two
+overlapping attempts to open/write the same COM port produced, on real
+hardware, `Failed to update LED switch time: WriteFile failed
+(PermissionError(13, 'Access is denied.', ...))`.
+
+`switch_time_spinbox.valueChanged` now only toggles a "Confirm" button's
+enabled state (comparing against `_last_applied_switch_time_ms`) - no
+hardware call. `confirm_switch_time_button.clicked` is what actually
+applies, collecting however many ticks happened since the last confirm
+into exactly one hardware call with the final settled value. The apply
+itself disables the spinbox, Confirm, and `start_button` for its own
+duration (restoring `start_button` to whatever it already was, not
+unconditionally enabling it, since a preview already running keeps it
+disabled independently) - since the whole call is synchronous on the GUI
+thread, this structurally prevents the reentrancy that caused the bug
+above: Confirm cannot be clicked again until the first call returns, even
+though `QApplication.processEvents()` still runs mid-call for the
+status-label repaint. A failed apply leaves `_last_applied_switch_time_ms`
+untouched, so Confirm stays enabled for an easy retry with no need to
+nudge the spinbox first.
+
+`engine/dual_panel_control.py` also gained a module-level `_dual_panel_lock`
+(a `threading.RLock` - re-entrant because `start_scanning`'s dual-panel
+branch already calls `stop_scanning()` internally) wrapping both
+functions' dual-panel bodies, as defense-in-depth for any future caller.
+
+**That lock alone was NOT enough - confirmed on real hardware.** The lock
+serializes two `start_scanning`/`stop_scanning` calls against each other,
+but doesn't make reconfiguring an ACTIVELY-STEPPING panel mid-scan itself
+safe: clicking Confirm while the preview thread was actively running still
+produced the same `WriteFile failed (PermissionError...)`, because that
+click's `start_scanning()` call (GUI thread) was racing the preview
+thread's OWN `start_scanning()`/`stop_scanning()` calls (thread start /
+thread-stop hardware cleanup) for the SAME relay connection - the lock
+makes them wait their turn, but reconfiguring mid-scan was never actually
+a supported operation to begin with. The real fix: `confirm_switch_time_button`
+is now disabled for the ENTIRE window a preview is running OR stopping -
+from `_on_start_clicked` through `_on_preview_thread_finished` (gated on
+the thread's own `finished` signal, same as `start_button`, not on the
+Stop click itself - `request_stop()` is non-blocking, so the thread's own
+hardware cleanup may not have run yet when `_on_stop_clicked` returns).
+`_update_confirm_switch_time_button_state()` checks `self.preview_thread is
+not None` alongside the pending-value comparison, so ticking the (still
+editable) spinbox while a preview runs can queue up a value but never
+enables Confirm until the operator actually stops first.
+
+**Scoped to dual-panel only.** Single-panel's `LEDPanel.set_speed_ms()` is
+a stateless, independent subprocess call - no persistent shared handle for
+the preview thread's own capture loop (camera-only once started, no
+ongoing LED-panel touches) to race against - so live switch-time changes
+while watching stay exactly as safe as they always were there. Disabling
+Confirm during a run was only ever needed because dual-panel's preview
+thread touches the SAME shared relay connection at its own start/stop;
+gating it on `dual_panel_config is not None` too (not just
+`preview_thread is not None`) avoids taking away a capability from the
+single-panel operator that was never actually unsafe.
+
+**`gui/pages/live_session_page.py` got the same Confirm button too, for UI
+parity - but it's purely cosmetic there.** That page's `switch_time_spinbox`
+never applied live at all (`start_session()` always reads its current value
+fresh, and locks it for the whole run) - there was never a hardware call
+for a Confirm button to gate. Its `_on_confirm_switch_time_clicked` only
+updates `_last_confirmed_switch_time_ms` and refreshes the button's own
+enabled state; it never touches `SessionEngineThread`/`LEDPanel`. Exists so
+both pages present the same "confirm before it locks in" affordance, not
+because this page had the same bug.
 
 **Calibration and ROI Select do NOT use `turn_all_leds_on`/`off`** for the
 dual-panel case - capturing both streams' on/off frame from one
