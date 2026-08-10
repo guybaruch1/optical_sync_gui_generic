@@ -507,6 +507,13 @@ class ThresholdTuningPage(QWidget):
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.frame_sample_interval_spinbox.setEnabled(False)
+        # See _update_confirm_switch_time_button_state's own comment - for
+        # dual-panel this disables Confirm through _on_preview_thread_finished
+        # below (the SAME running+stopping window Start stays disabled for);
+        # for single-panel it's a no-op here (stays exactly as it already
+        # was), since live switch-time changes while watching remain safe
+        # there.
+        self._update_confirm_switch_time_button_state()
         self._set_detection_controls_enabled(False)
 
     def _on_stop_clicked(self):
@@ -518,6 +525,10 @@ class ThresholdTuningPage(QWidget):
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         self.frame_sample_interval_spinbox.setEnabled(True)
+        # Not a blind setEnabled(True) - Confirm's availability still
+        # reflects whether the spinbox actually holds an unconfirmed value,
+        # same as right after set_context() or a successful apply.
+        self._update_confirm_switch_time_button_state()
         self._set_detection_controls_enabled(True)
 
     def _stop_preview_blocking(self):
@@ -562,7 +573,33 @@ class ThresholdTuningPage(QWidget):
 
     def _update_confirm_switch_time_button_state(self):
         unconfirmed = self.switch_time_spinbox.value() != self._last_applied_switch_time_ms
-        self.confirm_switch_time_button.setEnabled(unconfirmed)
+        # Only actually unsafe for DUAL-panel: the preview thread's own
+        # start_scanning()/stop_scanning() calls (thread start / thread-stop
+        # hardware cleanup) touch the SAME shared relay connection a
+        # Confirm click would also touch, mid-scan - confirmed on real
+        # hardware to still produce "WriteFile failed (PermissionError...)"
+        # even with engine/dual_panel_control.py's _dual_panel_lock in
+        # place (that lock only serializes the two calls against each
+        # other, it doesn't make reconfiguring an ACTIVELY-STEPPING panel
+        # mid-scan itself safe). Single-panel's LEDPanel.set_speed_ms() is
+        # a stateless, independent subprocess call with no persistent
+        # handle to race against the preview thread's own capture loop
+        # (camera-only once started, no ongoing LED-panel touches) - live
+        # switch-time changes while watching stay safe there, matching
+        # this control's original design intent, so this is a no-op for
+        # single-panel regardless of preview_thread.
+        #
+        # preview_thread is not None for the ENTIRE dual-panel running/
+        # stopping window (set in _on_start_clicked, only cleared in
+        # _on_preview_thread_finished once the thread's own hardware
+        # cleanup has actually completed) - this must stay disabled for
+        # that whole window regardless of what the spinbox holds, since
+        # _on_switch_time_spinbox_changed calls this on every tick and the
+        # spinbox stays editable (just not appliable) while a preview is
+        # active.
+        dual_panel_config = self._context["dual_panel_config"] if self._context is not None else None
+        unsafe_to_apply_now = self.preview_thread is not None and dual_panel_config is not None
+        self.confirm_switch_time_button.setEnabled(unconfirmed and not unsafe_to_apply_now)
 
     def _on_confirm_switch_time_clicked(self):
         # No thread restart needed - LEDPanel is a stateless static-method

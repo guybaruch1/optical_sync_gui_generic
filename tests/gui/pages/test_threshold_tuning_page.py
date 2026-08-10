@@ -227,6 +227,67 @@ def test_confirm_switch_time_click_does_not_re_enable_start_if_a_preview_is_runn
     assert not page.start_button.isEnabled()
 
 
+# --- Regression: confirming a switch-time change while the panel was
+# actively running raced the preview thread's OWN start_scanning()/
+# stop_scanning() calls against this GUI-thread click, and still produced
+# "WriteFile failed (PermissionError...)" on real hardware even with
+# engine/dual_panel_control.py's _dual_panel_lock in place. Confirm must be
+# entirely unclickable for the WHOLE running+stopping window - but ONLY
+# for dual-panel, where the preview thread's own start_scanning()/
+# stop_scanning() calls touch the SAME shared relay connection. Single-panel's
+# LEDPanel.set_speed_ms() has no such shared resource to race, so it keeps
+# its original "change live while watching" behavior. ---
+
+_DUAL_PANEL_CONFIG = {
+    "stream_a_panel_port": 1, "stream_b_panel_port": 0, "relay_port": 6,
+    "relay_com_port": "COM6", "hub_switch_settle_s": 3.0,
+}
+
+
+def test_confirm_switch_time_button_disabled_while_preview_running_dual_panel(qapp):
+    page = _started_page(switch_time_ms=1, dual_panel_config=_DUAL_PANEL_CONFIG)
+    page.switch_time_spinbox.setValue(5)  # would normally enable Confirm
+    assert not page.confirm_switch_time_button.isEnabled()
+
+
+def test_confirm_switch_time_button_stays_enabled_while_running_single_panel(qapp):
+    # No shared relay connection to race for single-panel - live switch-time
+    # changes while watching remain safe, matching this control's original
+    # design intent.
+    page = _started_page(switch_time_ms=1)  # dual_panel_config defaults to None
+    page.switch_time_spinbox.setValue(5)
+    assert page.confirm_switch_time_button.isEnabled()
+
+
+def test_confirm_switch_time_button_stays_disabled_after_stop_clicked_until_thread_finishes(qapp):
+    # request_stop() is non-blocking - the thread hasn't actually torn down
+    # its own LED-panel state yet by the time _on_stop_clicked returns, so
+    # Confirm must stay disabled through that gap too, not just while the
+    # thread was actively stepping.
+    page = _started_page(switch_time_ms=1, dual_panel_config=_DUAL_PANEL_CONFIG)
+    page.switch_time_spinbox.setValue(5)
+    thread = page.preview_thread
+
+    page._on_stop_clicked()
+    assert not page.confirm_switch_time_button.isEnabled()
+
+    thread.finished.emit()
+    # Now that the thread's own cleanup has actually completed, Confirm
+    # correctly reflects the still-pending value change.
+    assert page.confirm_switch_time_button.isEnabled()
+
+
+def test_confirm_switch_time_button_state_refreshed_on_finish_even_with_no_pending_change(qapp):
+    # If the spinbox happens to already match the last-applied value when
+    # the thread finishes, Confirm must NOT be blindly re-enabled.
+    page = _started_page(switch_time_ms=1, dual_panel_config=_DUAL_PANEL_CONFIG)
+    thread = page.preview_thread
+
+    thread.finished.emit()
+
+    assert not page.confirm_switch_time_button.isEnabled()
+
+
 def test_confirm_switch_time_click_failure_leaves_confirm_enabled_for_retry(qapp):
     page = _page_with_context(switch_time_ms=1)
     page.switch_time_spinbox.setValue(5)

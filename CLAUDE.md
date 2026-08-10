@@ -380,16 +380,44 @@ thread, this structurally prevents the reentrancy that caused the bug
 above: Confirm cannot be clicked again until the first call returns, even
 though `QApplication.processEvents()` still runs mid-call for the
 status-label repaint. A failed apply leaves `_last_applied_switch_time_ms`
-untouched, so
-Confirm stays enabled for an easy retry with no need to nudge the spinbox
-first.
+untouched, so Confirm stays enabled for an easy retry with no need to
+nudge the spinbox first.
 
 `engine/dual_panel_control.py` also gained a module-level `_dual_panel_lock`
 (a `threading.RLock` - re-entrant because `start_scanning`'s dual-panel
 branch already calls `stop_scanning()` internally) wrapping both
-functions' dual-panel bodies, as defense-in-depth: the GUI fix removes the
-one known way to trigger the reentrancy today, but the lock closes the
-underlying race for any future caller too.
+functions' dual-panel bodies, as defense-in-depth for any future caller.
+
+**That lock alone was NOT enough - confirmed on real hardware.** The lock
+serializes two `start_scanning`/`stop_scanning` calls against each other,
+but doesn't make reconfiguring an ACTIVELY-STEPPING panel mid-scan itself
+safe: clicking Confirm while the preview thread was actively running still
+produced the same `WriteFile failed (PermissionError...)`, because that
+click's `start_scanning()` call (GUI thread) was racing the preview
+thread's OWN `start_scanning()`/`stop_scanning()` calls (thread start /
+thread-stop hardware cleanup) for the SAME relay connection - the lock
+makes them wait their turn, but reconfiguring mid-scan was never actually
+a supported operation to begin with. The real fix: `confirm_switch_time_button`
+is now disabled for the ENTIRE window a preview is running OR stopping -
+from `_on_start_clicked` through `_on_preview_thread_finished` (gated on
+the thread's own `finished` signal, same as `start_button`, not on the
+Stop click itself - `request_stop()` is non-blocking, so the thread's own
+hardware cleanup may not have run yet when `_on_stop_clicked` returns).
+`_update_confirm_switch_time_button_state()` checks `self.preview_thread is
+not None` alongside the pending-value comparison, so ticking the (still
+editable) spinbox while a preview runs can queue up a value but never
+enables Confirm until the operator actually stops first.
+
+**Scoped to dual-panel only.** Single-panel's `LEDPanel.set_speed_ms()` is
+a stateless, independent subprocess call - no persistent shared handle for
+the preview thread's own capture loop (camera-only once started, no
+ongoing LED-panel touches) to race against - so live switch-time changes
+while watching stay exactly as safe as they always were there. Disabling
+Confirm during a run was only ever needed because dual-panel's preview
+thread touches the SAME shared relay connection at its own start/stop;
+gating it on `dual_panel_config is not None` too (not just
+`preview_thread is not None`) avoids taking away a capability from the
+single-panel operator that was never actually unsafe.
 
 **Calibration and ROI Select do NOT use `turn_all_leds_on`/`off`** for the
 dual-panel case - capturing both streams' on/off frame from one
