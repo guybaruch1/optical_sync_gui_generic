@@ -104,11 +104,6 @@ class ThresholdPreviewThread(QThread):
                 enable_depth_for_ir_sync=self.enable_depth_for_ir_sync,
             )
             self._capture.start()
-            if self.enable_depth_for_ir_sync and not self._capture.depth_sync_active:
-                self.error.emit(
-                    "WARNING: could not co-enable depth for IR/RGB sync (device couldn't "
-                    "resolve it alongside the requested profile) - falling back to no depth."
-                )
 
             frame_index = 0
             for stream_a_image, stream_b_image, _stream_a_ts_us, _stream_b_ts_us in self._capture.frames():

@@ -39,11 +39,6 @@ class StreamPreviewThread(QThread):
                 enable_depth_for_ir_sync=self.enable_depth_for_ir_sync,
             )
             self._capture.start()
-            if self.enable_depth_for_ir_sync and not self._capture.depth_sync_active:
-                self.error.emit(
-                    "WARNING: could not co-enable depth for IR/RGB sync (device couldn't "
-                    "resolve it alongside the requested profile) - falling back to no depth."
-                )
 
             bundle_index = 0
             for image_a, image_b, ts_a, ts_b, num_a, num_b in self._capture.frames_with_diagnostics():

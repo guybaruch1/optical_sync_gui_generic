@@ -491,11 +491,11 @@ class ContinuousCapture:
         self.pick_a = pick_a
         self.pick_b = pick_b
         # See _depth_sync_stream/_build_config - whether to co-enable the
-        # stereo module's depth stream to fix IR/RGB sync. Set to whatever
-        # actually got used (may fall back to False on start() if the device
-        # can't resolve depth alongside the requested IR profile) so callers
-        # can report what really happened.
+        # stereo module's depth stream to fix IR/RGB sync.
         self.enable_depth_for_ir_sync = enable_depth_for_ir_sync
+        # Set on start() to whether a depth stream was actually requested
+        # (self._depth_sync_stream() is not None) - not a resolve/success
+        # check, just what start() attempted, for callers to report.
         self.depth_sync_active = False
         self._pipeline = None
 
@@ -535,7 +535,7 @@ class ContinuousCapture:
                 return pick["width"], pick["height"], pick["fps"]
         return None
 
-    def _build_config(self, include_depth):
+    def _build_config(self):
         config = rs.config()
         # Bind the pipeline to the exact physical device chosen in Device
         # Select - without this, with more than one RealSense camera
@@ -546,34 +546,27 @@ class ContinuousCapture:
         config.enable_device(self.device_serial)
         for pick in (self.pick_a, self.pick_b):
             config.enable_stream(pick["stream_type"], pick["stream_index"], pick["width"], pick["height"], pick["format"], pick["fps"])
-        if include_depth:
-            depth_stream = self._depth_sync_stream()
-            if depth_stream is not None:
-                width, height, fps = depth_stream
-                config.enable_stream(rs.stream.depth, 0, width, height, rs.format.z16, fps)
+        depth_stream = self._depth_sync_stream()
+        if depth_stream is not None:
+            width, height, fps = depth_stream
+            config.enable_stream(rs.stream.depth, 0, width, height, rs.format.z16, fps)
         return config
 
     def start(self):
+        # Deliberately as simple as the real-hardware-verified version this
+        # matches: build one config (depth included whenever an infrared
+        # pick is present and the setting is on) and start it directly - NO
+        # can_resolve() pre-check/fallback. An earlier version added exactly
+        # that speculative probe-then-fallback, and it silently undid this
+        # fix: can_resolve() returning a false negative for a depth+IR+RGB
+        # combination that pipeline.start() itself handles fine falls back to
+        # the no-depth config with no error raised, which is indistinguishable
+        # from the fix simply not being applied. If a config genuinely can't
+        # start, let pipeline.start() raise - that reaches the operator as a
+        # real error instead of a silent, wrong fallback.
+        self.depth_sync_active = self._depth_sync_stream() is not None
+        config = self._build_config()
         self._pipeline = rs.pipeline()
-        depth_stream = self._depth_sync_stream()
-        self.depth_sync_active = False
-        if depth_stream is not None:
-            config = self._build_config(include_depth=True)
-            can_resolve = False
-            try:
-                can_resolve = config.can_resolve(rs.pipeline_wrapper(self._pipeline))
-            except Exception:
-                # Must never be what breaks startup - fall back to the plain
-                # config below exactly as if depth simply weren't requested.
-                can_resolve = False
-            if can_resolve:
-                self.depth_sync_active = True
-            else:
-                # Device can't do depth at this IR resolution/fps - fall back
-                # rather than letting pipeline.start() throw and kill the run.
-                config = self._build_config(include_depth=False)
-        else:
-            config = self._build_config(include_depth=False)
         self._pipeline.start(config)
 
     def _get_frame(self, frameset, pick):

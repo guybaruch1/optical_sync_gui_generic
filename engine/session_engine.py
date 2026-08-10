@@ -196,12 +196,6 @@ class SessionEngineThread(QThread):
                 enable_depth_for_ir_sync=self.enable_depth_for_ir_sync,
             )
             self._capture.start()
-            if self.enable_depth_for_ir_sync and not self._capture.depth_sync_active:
-                self.error.emit(
-                    "WARNING: could not co-enable depth for IR/RGB sync (device couldn't "
-                    "resolve it alongside the requested profile) - falling back to no depth. "
-                    "The inter-sensor timing offset this normally fixes may reappear."
-                )
             self._start_time = time.time()
 
             def on_frames(stream_a_image, stream_b_image, pair_index):
