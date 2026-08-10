@@ -55,6 +55,8 @@ whatever the current positions are (retuned or original, a safe no-op
 rewrite if untouched) to config.yaml via update_config_leds too, not just
 to Live Session in-memory - same as Calibration's own original write."""
 
+import os
+
 import numpy as np
 
 from PySide6.QtWidgets import (
@@ -72,6 +74,7 @@ from engine.streams import stream_slug
 from domain.calibration import compute_threshold, build_grid_positions, update_config_leds
 from domain.realsense_utils import (
     draw_led_state_overlay, crop_to_roi, detect_led_centroids, merge_close_centroids, draw_detected_centroids,
+    save_debug_detection_image,
 )
 
 
@@ -378,7 +381,7 @@ class ThresholdTuningPage(QWidget):
         image_on = ctx["{}_image_on".format(stream_name)]
         image_off = ctx["{}_image_off".format(stream_name)]
         try:
-            positions, _row_layout, _debug_centroids = build_grid_positions(
+            positions, _row_layout, debug_centroids = build_grid_positions(
                 centroids, roi, image_on, image_off, ctx["row_gap_px"], ctx["calibration_neighborhood_size"],
             )
         except RuntimeError:
@@ -389,6 +392,23 @@ class ThresholdTuningPage(QWidget):
         ctx["{}_xy".format(stream_name)] = np.array([positions[i][:2] for i in ids])
         ctx["{}_on".format(stream_name)] = np.array([positions[i][2] for i in ids])
         ctx["{}_off".format(stream_name)] = np.array([positions[i][3] for i in ids])
+
+        # Regenerates Calibration's OWN debug_{slug}_detection.png in place,
+        # using the SAME grid-ordered centroids (index i IS led_id i - see
+        # build_grid_positions' own docstring) that just got committed above.
+        # Without this, that file stays frozen at whatever Calibration
+        # originally detected the moment the operator touches a
+        # detection-threshold slider - silently stale, and misleading if
+        # used to visually verify anything (e.g. LED numbering) against
+        # what's actually saved to config.yaml/used at runtime. This also
+        # fires once automatically right after set_context() (Tier 1's own
+        # initial call starts this same debounce timer), so the debug image
+        # is kept correct even if the operator never touches the sliders at
+        # all - it just reproduces Calibration's own Otsu result byte-for-byte
+        # in that case (see _reset_to_auto_button's own comment).
+        pick = ctx["pick_a"] if stream_name == "stream_a" else ctx["pick_b"]
+        debug_path = os.path.join(ctx["output_dir"], "debug_{}_detection.png".format(stream_slug(pick)))
+        save_debug_detection_image(ctx["{}_cropped_on".format(stream_name)], debug_centroids, debug_path)
 
     def _reset_stream_to_auto(self, stream_name):
         # Reproduces Calibration's original Otsu result byte-for-byte -
@@ -410,7 +430,7 @@ class ThresholdTuningPage(QWidget):
                      config_path, image_a_on, image_a_off, image_b_on, image_b_off,
                      stream_a_otsu_threshold, stream_b_otsu_threshold,
                      min_blob_area, row_gap_px, calibration_neighborhood_size,
-                     stream_a_positions, stream_b_positions,
+                     output_dir, stream_a_positions, stream_b_positions,
                      dual_panel_config=None, enable_depth_for_ir_sync=True):
         self._context = dict(
             ctx=ctx, device_serial=device_serial, pick_a=pick_a, pick_b=pick_b, camera_controls=camera_controls,
@@ -435,6 +455,12 @@ class ThresholdTuningPage(QWidget):
             stream_a_otsu_threshold=stream_a_otsu_threshold, stream_b_otsu_threshold=stream_b_otsu_threshold,
             min_blob_area=min_blob_area, row_gap_px=row_gap_px,
             calibration_neighborhood_size=calibration_neighborhood_size,
+            # Calibration's own run folder - lets _commit_detection_threshold
+            # regenerate THIS SAME run's debug_{slug}_detection.png in place
+            # whenever a retune actually changes the positions, so that file
+            # never goes stale/misleading relative to what's actually saved
+            # to config.yaml and used at runtime.
+            output_dir=output_dir,
             stream_a_positions=stream_a_positions, stream_b_positions=stream_b_positions,
             # Cropped ONCE here, not per detection-threshold tick -
             # detect_led_centroids/draw_detected_centroids both operate on

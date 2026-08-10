@@ -260,6 +260,7 @@ def _window_after_config_chosen(qapp, monkeypatch, tmp_path, dual_panel=False):
         image_b_on=np.full((50, 50), 50, dtype=np.uint8), image_b_off=np.full((50, 50), 50, dtype=np.uint8),
         stream_a_otsu_threshold=127, stream_b_otsu_threshold=127,
         min_blob_area=5, row_gap_px=15, neighborhood_size=5,
+        output_dir=str(tmp_path),
     )
     return window
 

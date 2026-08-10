@@ -318,6 +318,7 @@ class MainWindow(QMainWindow):
             stream_b_otsu_threshold=calib_result["stream_b_otsu_threshold"],
             min_blob_area=calib_result["min_blob_area"], row_gap_px=calib_result["row_gap_px"],
             calibration_neighborhood_size=calib_result["neighborhood_size"],
+            output_dir=calib_result["output_dir"],
             stream_a_positions=stream_a_positions, stream_b_positions=stream_b_positions,
             dual_panel_config=self._dual_panel_config,
             enable_depth_for_ir_sync=camera_sync["enable_depth_for_ir_sync"],

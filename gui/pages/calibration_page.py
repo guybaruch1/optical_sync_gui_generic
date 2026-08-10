@@ -277,6 +277,13 @@ class CalibrationPage(QWidget):
             image_b_on=image_b_on, image_b_off=image_b_off,
             stream_a_otsu_threshold=int(round(otsu_a)), stream_b_otsu_threshold=int(round(otsu_b)),
             min_blob_area=min_blob_area, row_gap_px=row_gap_px, neighborhood_size=neighborhood_size,
+            # Lets ThresholdTuningPage regenerate THIS SAME run's
+            # debug_{slug}_detection.png in place whenever a retune actually
+            # changes the positions - without this, that file stays frozen
+            # at whatever Calibration originally detected, silently going
+            # stale (and misleading, if used to visually verify anything)
+            # the moment the operator touches a detection-threshold slider.
+            output_dir=output_dir,
         )
         self.calibration_done.emit()
 

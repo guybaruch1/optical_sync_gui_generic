@@ -1,8 +1,17 @@
+import tempfile
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pyrealsense2 as rs
 
 from gui.pages.threshold_tuning_page import ThresholdTuningPage
+
+# Shared across every _minimal_context() call in this file - real (if
+# ultimately unused by most tests) writable directory so
+# test_commit_detection_threshold_updates_context_on_success's
+# _commit_detection_threshold() call, which now regenerates
+# debug_{slug}_detection.png in place, has somewhere real to write to.
+_TEST_OUTPUT_DIR = tempfile.mkdtemp()
 
 
 class _FakeSignal:
@@ -52,8 +61,12 @@ def _minimal_context(**overrides):
     blank_image = np.full((20, 20), 50, dtype=np.uint8)
     ctx = dict(
         ctx=None, device_serial="123456",
-        pick_a={"stream_type": "infrared", "stream_index": 1, "width": 4, "height": 4, "fps": 30, "format": "y8"},
-        pick_b={"stream_type": "color", "stream_index": 0, "width": 4, "height": 4, "fps": 30, "format": "bgr8"},
+        # Real rs.stream enum members, not plain strings - _commit_detection_threshold's
+        # debug-image regeneration now runs stream_slug(pick) on these, which needs a
+        # real .name attribute (matches test_calibration_page.py's own "real hardware"
+        # context convention).
+        pick_a={"stream_type": rs.stream.infrared, "stream_index": 1, "width": 4, "height": 4, "fps": 30, "format": "y8"},
+        pick_b={"stream_type": rs.stream.color, "stream_index": 0, "width": 4, "height": 4, "fps": 30, "format": "bgr8"},
         camera_controls={},
         stream_a_xy=np.array([(1, 1), (2, 2)]), stream_b_xy=np.array([(1, 1), (2, 2)]),
         stream_a_on=np.full(2, 300.0), stream_a_off=np.full(2, 100.0),
@@ -67,6 +80,7 @@ def _minimal_context(**overrides):
         image_b_on=blank_image, image_b_off=blank_image,
         stream_a_otsu_threshold=127, stream_b_otsu_threshold=127,
         min_blob_area=5, row_gap_px=15, calibration_neighborhood_size=5,
+        output_dir=_TEST_OUTPUT_DIR,
         stream_a_positions={"0": [1.0, 1.0, 300.0, 100.0, 200.0], "1": [2.0, 2.0, 300.0, 100.0, 200.0]},
         stream_b_positions={"0": [1.0, 1.0, 600.0, 200.0, 400.0], "1": [2.0, 2.0, 600.0, 200.0, 400.0]},
     )
