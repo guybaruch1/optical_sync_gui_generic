@@ -214,6 +214,33 @@ def switched_to_stream_panel(dual_panel_config, stream_name):
         time.sleep(dual_panel_config["hub_switch_settle_s"])
         yield
     finally:
+        # Un-poison the panel before switching away, while it's still
+        # hub-exposed on my_port (no extra hub switch needed). Both
+        # Calibration's and ROI Select's own capture code (the only 2
+        # callers of this context manager) end their per-stream block with
+        # LEDPanel.all_leds_off() - which internally sends LEDPanel.stop()
+        # (--stop) as its own first step. --stop sets internal panel state
+        # that prevents the panel from actually stepping on its NEXT arm
+        # via start_scanning - see start_scanning's own comment for the
+        # full real-hardware-confirmed history of this exact failure mode.
+        # That fix only ever covered stop_scanning's own explicit
+        # LEDPanel.stop() call; it never covered THIS call site, which is
+        # why - on real hardware - the panel would fail to step on the very
+        # FIRST start_scanning() after Calibration specifically (whichever
+        # stream's block ran last), even though every later
+        # start_scanning/stop_scanning cycle within Threshold Tuning/Live
+        # Session worked fine, and manually pressing Stop then Start again
+        # (stop_scanning's own LEDPanel.reset()) always cleared it.
+        # LEDPanel.reset() ("--reset": reset to starting position WITHOUT
+        # stopping it) mirrors stop_scanning's own cure exactly. Best-effort
+        # - swallows its own failure rather than masking whatever the
+        # `with` block's body may have raised (a finally-block exception
+        # always replaces one from the try in Python), same reasoning as
+        # the callers' own all_leds_off() cleanup calls.
+        try:
+            LEDPanel.reset()
+        except Exception:
+            pass
         hub.disconnect()
 
 

@@ -205,6 +205,27 @@ back into the dual-panel `stop_scanning` path without re-confirming on
 real hardware first (`tools/dual_panel_diag/diag_panel_query_state.py`, checking
 `isRunning` after the NEXT arm).
 
+**The same poisoning, from a second call site the original fix never
+covered: the panel would fail to step on its very FIRST arm after
+Calibration/ROI Select specifically.** `LEDPanel.all_leds_off()`
+(`engine/led_panel.py`) internally calls `LEDPanel.stop()` - i.e. sends the
+exact same `--stop` identified above as the root cause - as its own first
+step. Calibration's and ROI Select's per-stream capture code (the only two
+callers of `switched_to_stream_panel`) both end their block by calling
+`all_leds_off()` as cleanup, right before the hub switches away from that
+panel. So every calibration run left both panels freshly poisoned, and the
+very next `start_scanning()` (Threshold Tuning's first Start, right after
+Calibration) would fail to step - while every LATER `start_scanning`/
+`stop_scanning` cycle within that same Threshold Tuning/Live Session
+session worked fine, since `stop_scanning`'s own `reset()` kept curing it
+each time. Manually pressing Stop then Start again "fixed" it for the same
+reason. `switched_to_stream_panel` now calls `LEDPanel.reset()` itself
+right before disconnecting from the hub (while still switched to that
+panel - no extra hub switch needed), un-poisoning both panels as part of
+Calibration/ROI Select's own cleanup instead of leaving it to accidentally
+depend on the operator's next `start_scanning()` call being preceded by an
+explicit `stop_scanning()`.
+
 Any panel config change (e.g. switch time)
 needs this whole provisioning re-run - see `gui/pages/threshold_tuning_page.py`'s
 `_on_switch_time_changed`, which branches on `dual_panel_config` to either

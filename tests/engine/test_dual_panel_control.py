@@ -2,6 +2,8 @@ import threading
 import time
 from unittest.mock import patch, call
 
+import pytest
+
 import engine.dual_panel_control as dual_panel_control
 from engine.dual_panel_control import (
     turn_all_leds_on, turn_all_leds_off, start_scanning, stop_scanning, switched_to_stream_panel,
@@ -258,6 +260,7 @@ def test_switched_to_stream_panel_switches_to_stream_as_own_port():
         return type("module", (), {"AcronameHub": lambda: fake_hub})
 
     with patch.dict("sys.modules", {"engine.acroname_hub": fake_acroname_hub_module()}), \
+         patch("engine.dual_panel_control.LEDPanel") as mock_led_panel, \
          patch("time.sleep") as mock_sleep:
         with switched_to_stream_panel(DUAL_PANEL_CONFIG, "stream_a"):
             pass
@@ -271,6 +274,7 @@ def test_switched_to_stream_panel_switches_to_stream_as_own_port():
         "disconnect",
     ]
     mock_sleep.assert_called_once_with(3.0)
+    mock_led_panel.reset.assert_called_once()
 
 
 def test_switched_to_stream_panel_switches_to_stream_bs_own_port():
@@ -280,6 +284,7 @@ def test_switched_to_stream_panel_switches_to_stream_bs_own_port():
         return type("module", (), {"AcronameHub": lambda: fake_hub})
 
     with patch.dict("sys.modules", {"engine.acroname_hub": fake_acroname_hub_module()}), \
+         patch("engine.dual_panel_control.LEDPanel"), \
          patch("time.sleep"):
         with switched_to_stream_panel(DUAL_PANEL_CONFIG, "stream_b"):
             pass
@@ -298,6 +303,7 @@ def test_switched_to_stream_panel_only_switches_once_for_multiple_actions_inside
         return type("module", (), {"AcronameHub": lambda: fake_hub})
 
     with patch.dict("sys.modules", {"engine.acroname_hub": fake_acroname_hub_module()}), \
+         patch("engine.dual_panel_control.LEDPanel"), \
          patch("time.sleep") as mock_sleep:
         with switched_to_stream_panel(DUAL_PANEL_CONFIG, "stream_a"):
             pass  # caller would issue several plain LEDPanel calls here in real use
@@ -315,12 +321,74 @@ def test_switched_to_stream_panel_disconnects_even_if_block_raises():
         return type("module", (), {"AcronameHub": lambda: fake_hub})
 
     with patch.dict("sys.modules", {"engine.acroname_hub": fake_acroname_hub_module()}), \
+         patch("engine.dual_panel_control.LEDPanel"), \
          patch("time.sleep"):
         try:
             with switched_to_stream_panel(DUAL_PANEL_CONFIG, "stream_a"):
                 raise ValueError("boom")
         except ValueError:
             pass
+
+    assert fake_hub.calls[-1] == "disconnect"  # cleanup still ran despite the raise
+
+
+# --- Regression: the panel would fail to step on the very FIRST
+# start_scanning() after Calibration/ROI Select specifically - both end
+# their per-stream capture with LEDPanel.all_leds_off(), which internally
+# sends LEDPanel.stop() (--stop), the exact command already identified as
+# poisoning the panel's next arm (see start_scanning's own comment). Manually
+# pressing Stop then Start again always cleared it, because stop_scanning's
+# own LEDPanel.reset() call undoes that poisoning - switched_to_stream_panel
+# now does the same reset() automatically before switching away, so
+# Calibration/ROI Select's own LED panel cleanup can no longer poison the
+# panel for whatever start_scanning() call comes after them. ---
+
+def test_switched_to_stream_panel_resets_panel_before_disconnecting():
+    fake_hub = _FakeHubForSwitch()
+
+    def fake_acroname_hub_module():
+        return type("module", (), {"AcronameHub": lambda: fake_hub})
+
+    with patch.dict("sys.modules", {"engine.acroname_hub": fake_acroname_hub_module()}), \
+         patch("engine.dual_panel_control.LEDPanel") as mock_led_panel, \
+         patch("time.sleep"):
+        with switched_to_stream_panel(DUAL_PANEL_CONFIG, "stream_a"):
+            mock_led_panel.all_leds_off()  # what Calibration/ROI Select's own cleanup does
+
+    mock_led_panel.reset.assert_called_once()
+    # Reset happens while STILL hub-exposed on my_port - no extra hub
+    # switch beyond the single enable/disable pair already asserted
+    # elsewhere; disconnect is still the very last hub call.
+    assert fake_hub.calls[-1] == "disconnect"
+
+
+def test_switched_to_stream_panel_is_a_noop_when_config_is_none_does_not_reset():
+    # The single-panel case never routes through here at all (no hub, no
+    # panel of its own to un-poison) - start_scanning's own unconditional
+    # LEDPanel.stop() at the top of its single-panel branch already handles
+    # this case regardless of precondition.
+    with patch("engine.dual_panel_control.LEDPanel") as mock_led_panel:
+        with switched_to_stream_panel(None, "stream_a"):
+            pass
+    mock_led_panel.reset.assert_not_called()
+
+
+def test_switched_to_stream_panel_reset_failure_does_not_mask_block_exception():
+    fake_hub = _FakeHubForSwitch()
+
+    def fake_acroname_hub_module():
+        return type("module", (), {"AcronameHub": lambda: fake_hub})
+
+    with patch.dict("sys.modules", {"engine.acroname_hub": fake_acroname_hub_module()}), \
+         patch("engine.dual_panel_control.LEDPanel") as mock_led_panel, \
+         patch("time.sleep"):
+        mock_led_panel.reset.side_effect = RuntimeError("panel command failed")
+        with pytest.raises(ValueError, match="boom"):
+            with switched_to_stream_panel(DUAL_PANEL_CONFIG, "stream_a"):
+                raise ValueError("boom")
+
+    # Cleanup still completed despite reset() itself failing.
+    assert fake_hub.calls[-1] == "disconnect"
 
     assert "disconnect" in fake_hub.calls
 
