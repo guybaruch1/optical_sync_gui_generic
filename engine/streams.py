@@ -441,15 +441,34 @@ def enable_auto_exposure(sensor):
     auto-exposure left however it was.
 
     Also restores exposure/gain to the sensor's OWN factory defaults
-    (get_option_range().default) before re-enabling auto - set_manual_exposure
-    writes THREE options (enable_auto_exposure=0, exposure, gain), so flipping
-    only the auto flag back on used to leave the manually-set exposure and
-    especially gain still written into the camera. That's a real, observed
-    failure: a manual->auto round trip in Stream Config left the sensor
-    auto-exposing with the UI's default gain of 16 still stuck in it, dark
-    enough that Calibration's Otsu blob detection stopped finding the LEDs at
-    all - and because the value lives in the CAMERA, not the app, it survived
-    app restarts and only a power-cycle/hardware_reset cleared it.
+    (get_option_range().default) before re-enabling auto, but ONLY when the
+    sensor is actually coming FROM manual mode (enable_auto_exposure reads
+    back as 0 right now) - set_manual_exposure writes THREE options
+    (enable_auto_exposure=0, exposure, gain), so flipping only the auto flag
+    back on used to leave the manually-set exposure and especially gain
+    still written into the camera. That's a real, observed failure: a
+    manual->auto round trip in Stream Config left the sensor auto-exposing
+    with the UI's default gain of 16 still stuck in it, dark enough that
+    Calibration's Otsu blob detection stopped finding the LEDs at all - and
+    because the value lives in the CAMERA, not the app, it survived app
+    restarts and only a power-cycle/hardware_reset cleared it.
+
+    The was-manual GATE matters just as much as the restore itself. This
+    function is called unconditionally on every apply point (ROI Select,
+    Calibration, Threshold Tuning, Live Session) whenever the operator has
+    "Auto exposure" selected - not just on an actual Manual->Auto
+    transition. An earlier version restored the defaults unconditionally
+    every time, which is a real regression on a sensor that's ALREADY
+    auto-exposing correctly: forcibly resetting exposure/gain back to a
+    cold default and letting auto-exposure re-converge from scratch, on
+    every single run, can leave it under-converged within
+    calibration.settle_frames' short settle window even though it would
+    have stayed correctly exposed if left alone - producing an
+    intermittently underexposed image (LEDs near the detection threshold
+    dropping out) rather than the original bug's total blackout. Restoring
+    only on an actual mode transition leaves an already-auto sensor
+    completely undisturbed, matching every apply point that doesn't
+    actually need to fix anything.
 
     Restoring the SDK-reported factory default (rather than snapshotting
     whatever the value was before this app first touched it) keeps this
@@ -459,12 +478,15 @@ def enable_auto_exposure(sensor):
     ever a starting point, never the value a run actually uses."""
     if not sensor.supports(rs.option.enable_auto_exposure):
         return False
-    # Written BEFORE re-enabling auto, deliberately: on some sensors writing
-    # exposure while auto-exposure is on implicitly turns auto back off, so
-    # doing it in this order can't leave auto disabled behind our back.
-    for option in (rs.option.exposure, rs.option.gain):
-        if sensor.supports(option):
-            sensor.set_option(option, sensor.get_option_range(option).default)
+    was_manual = sensor.get_option(rs.option.enable_auto_exposure) == 0
+    if was_manual:
+        # Written BEFORE re-enabling auto, deliberately: on some sensors
+        # writing exposure while auto-exposure is on implicitly turns auto
+        # back off, so doing it in this order can't leave auto disabled
+        # behind our back.
+        for option in (rs.option.exposure, rs.option.gain):
+            if sensor.supports(option):
+                sensor.set_option(option, sensor.get_option_range(option).default)
     sensor.set_option(rs.option.enable_auto_exposure, 1)
     return True
 

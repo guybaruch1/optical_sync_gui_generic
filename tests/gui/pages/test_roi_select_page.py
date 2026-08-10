@@ -3,12 +3,20 @@ import pyrealsense2 as rs
 from gui.pages.roi_select_page import _apply_camera_controls, stream_label
 
 
+class FakeOptionRange:
+    def __init__(self, default):
+        self.default = default
+
+
 class FakeSensor:
     """Same fake-sensor shape as tests/engine/test_streams.py's
     FakeOptionSensor - real pyrealsense2 sensors aren't constructible
     without hardware, and _apply_camera_controls calls the real
     engine.streams.set_emitter_enabled/enable_auto_exposure/
-    set_manual_exposure, which only need .supports()/.set_option()."""
+    set_manual_exposure, which need .supports()/.set_option()/.get_option()/
+    .get_option_range(). get_option() defaults to 1 ("already auto") since
+    none of this file's tests exercise enable_auto_exposure's was-manual
+    restore gate - see test_streams.py's FakeOptionSensor for that."""
 
     def __init__(self, supported_options):
         self._supported = set(supported_options)
@@ -19,6 +27,12 @@ class FakeSensor:
 
     def set_option(self, option, value):
         self.set_options[option] = value
+
+    def get_option(self, option):
+        return self.set_options.get(option, 1)
+
+    def get_option_range(self, option):
+        return FakeOptionRange(0)
 
 
 class FakeProfile:
