@@ -23,12 +23,13 @@ DUAL_PANEL_CONFIG = {
 @pytest.fixture(autouse=True)
 def _reset_dual_panel_primed_flag():
     # _dual_panel_primed is module-level state that persists across tests
-    # in the same process - reset to its real fresh-process default
-    # (False) before EVERY test in this file, so no test's outcome depends
-    # on what some earlier test happened to leave it as.
-    dual_panel_control._dual_panel_primed["primed"] = False
+    # in the same process - reset to its real fresh-process defaults
+    # before EVERY test in this file, so no test's outcome depends on what
+    # some earlier test happened to leave it as.
+    fresh = {"primed": False, "switch_time_ms": None, "scan_direction": None}
+    dual_panel_control._dual_panel_primed.update(fresh)
     yield
-    dual_panel_control._dual_panel_primed["primed"] = False
+    dual_panel_control._dual_panel_primed.update(fresh)
 
 
 # --- dual_panel_config=None must take the EXACT same code path as before
@@ -170,13 +171,15 @@ def test_start_scanning_with_dual_panel_config_arms_twice_when_not_yet_primed():
     assert dual_panel_control._dual_panel_primed["primed"] is True
 
 
-def test_start_scanning_with_dual_panel_config_arms_once_when_already_primed():
-    # The whole point of the primed flag: don't pay the extra hub-switch/
-    # relay round-trip on EVERY Start press - only the first one after
-    # Calibration/ROI Select actually needs it. Real-hardware testing
-    # confirmed the unconditional double-arm made every subsequent Start
-    # noticeably slower for no benefit.
+def test_start_scanning_with_dual_panel_config_reconfigures_once_when_primed_but_settings_changed():
+    # Primed, but with DIFFERENT switch_time_ms/scan_direction than last
+    # time (e.g. the operator tweaked the switch-time spinbox) - a real
+    # settings change needs one reconfigure+relay cycle; this isn't the
+    # priming bug at all, just a normal re-provision, same as this function
+    # always did for every call before any of this investigation started.
     dual_panel_control._dual_panel_primed["primed"] = True
+    dual_panel_control._dual_panel_primed["switch_time_ms"] = 99
+    dual_panel_control._dual_panel_primed["scan_direction"] = 1
     call_order = []
     with patch("engine.dual_panel_control.LEDPanel"), \
          patch.object(dual_panel_control, "stop_scanning",
@@ -185,15 +188,59 @@ def test_start_scanning_with_dual_panel_config_arms_once_when_already_primed():
                       side_effect=lambda cfg, action: call_order.append("_run_on_both_panels")) as mock_run_on_both, \
          patch.object(dual_panel_control, "_relay_on",
                       side_effect=lambda cfg: call_order.append("_relay_on")) as mock_relay_on:
-        start_scanning(5, 1, DUAL_PANEL_CONFIG)
+        start_scanning(5, 1, DUAL_PANEL_CONFIG)  # switch_time_ms=5, different from the 99 tracked above
 
         mock_stop_scanning.assert_not_called()
         assert mock_run_on_both.call_count == 1
         assert mock_relay_on.call_count == 1
         assert call_order == ["_run_on_both_panels", "_relay_on"]
 
-    # Still primed afterward - an already-primed pair stays primed.
+    # Still primed afterward, and now tracking the NEW settings.
     assert dual_panel_control._dual_panel_primed["primed"] is True
+    assert dual_panel_control._dual_panel_primed["switch_time_ms"] == 5
+    assert dual_panel_control._dual_panel_primed["scan_direction"] == 1
+
+
+def test_start_scanning_with_dual_panel_config_only_retriggers_relay_when_settings_unchanged():
+    # The actual "we only need to trigger both panels" fast path: already
+    # primed AND the exact same switch_time_ms/scan_direction as last
+    # time - configure_one_panel()'s own reset() only ever touched LED
+    # POSITION, never mode/trigger config, so a panel already sitting in
+    # mode 1/trigger mode 2/camera-trigger-enabled from the last arm is
+    # still fully configured. Skips the per-panel hub-switch entirely -
+    # that's what dominates wall-clock cost, not the LEDPanel CLI commands
+    # sent during it - and re-triggers only the relay (a direct serial
+    # connection, no hub involved at all).
+    dual_panel_control._dual_panel_primed["primed"] = True
+    dual_panel_control._dual_panel_primed["switch_time_ms"] = 5
+    dual_panel_control._dual_panel_primed["scan_direction"] = 1
+    with patch("engine.dual_panel_control.LEDPanel"), \
+         patch.object(dual_panel_control, "stop_scanning") as mock_stop_scanning, \
+         patch.object(dual_panel_control, "_run_on_both_panels") as mock_run_on_both, \
+         patch.object(dual_panel_control, "_relay_on") as mock_relay_on:
+        start_scanning(5, 1, DUAL_PANEL_CONFIG)  # identical switch_time_ms/scan_direction
+
+        mock_stop_scanning.assert_not_called()
+        mock_run_on_both.assert_not_called()
+        mock_relay_on.assert_called_once_with(DUAL_PANEL_CONFIG)
+
+    assert dual_panel_control._dual_panel_primed["primed"] is True
+    assert dual_panel_control._dual_panel_primed["switch_time_ms"] == 5
+    assert dual_panel_control._dual_panel_primed["scan_direction"] == 1
+
+
+def test_start_scanning_with_dual_panel_config_tracks_settings_after_first_double_arm():
+    # After the FIRST (double-arm) call, the settings it was armed with
+    # must be recorded too - otherwise the very next call (even with
+    # identical settings) couldn't recognize them as unchanged.
+    with patch("engine.dual_panel_control.LEDPanel"), \
+         patch.object(dual_panel_control, "_run_on_both_panels"), \
+         patch.object(dual_panel_control, "_relay_on"):
+        start_scanning(7, -1, DUAL_PANEL_CONFIG)
+
+    assert dual_panel_control._dual_panel_primed["primed"] is True
+    assert dual_panel_control._dual_panel_primed["switch_time_ms"] == 7
+    assert dual_panel_control._dual_panel_primed["scan_direction"] == -1
 
 
 def test_start_scanning_with_none_config_does_not_call_stop_scanning_again():

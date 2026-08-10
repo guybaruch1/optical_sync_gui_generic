@@ -322,13 +322,34 @@ block); `start_scanning()` sets it `True` after a successful double-arm.
 Resets to `False` on a fresh process by default - the safe choice, since a
 fresh process has no evidence either panel is primed.
 
-Any panel config change (e.g. switch time)
-needs this whole provisioning re-run - see `gui/pages/threshold_tuning_page.py`'s
+**A second layer on top of that: once primed, a call with the SAME
+`switch_time_ms`/`scan_direction` as last time skips reconfiguring the
+panels entirely and just re-triggers the relay.** `_dual_panel_primed`
+also tracks the last-armed settings. `configure_one_panel()`'s own
+`LEDPanel.reset()` only ever resets LED POSITION, never mode/trigger
+config - a panel already sitting in mode 1/trigger mode 2/camera-trigger-
+enabled from the last arm is still fully configured, so the only thing
+that actually needs to happen for a plain repeat-Start is re-triggering
+the relay (a direct serial connection, not the Acroname hub - no
+hub-switch settle time at all). What actually dominates `start_scanning()`'s
+wall-clock cost is the per-panel HUB SWITCH, not the handful of
+near-instant LEDPanel CLI commands sent during it - so skipping the hub
+switch entirely, not just trimming which commands get sent during it, is
+what makes this fast. Trade-off: the LEDs resume stepping from wherever
+they last stopped rather than restarting at position 0, since the reset()
+that normally does that is skipped too - acceptable since nothing in this
+app depends on a scan always starting from LED 0. A genuine settings
+CHANGE (or the first arm since Calibration) still needs the full
+reconfigure.
+
+Any GENUINE panel config change (switch time actually different from last
+time) needs the full provisioning re-run - see `gui/pages/threshold_tuning_page.py`'s
 `_on_switch_time_changed`, which branches on `dual_panel_config` to either
 call `LEDPanel.set_speed_ms()` directly and instantly (single-panel) or
-re-run `start_scanning()` in full (dual-panel, visibly slower - no way
-around the hardware constraint); since this re-runs `start_scanning()`
-without an intervening `stop_scanning()`, `_relay_on()` closes any stale
+re-run `start_scanning()` (dual-panel - fast if the settings match what's
+already configured, a full reconfigure otherwise); since this re-runs
+`start_scanning()` without an intervening `stop_scanning()`, `_relay_on()`
+closes any stale
 still-open connection from a previous call before opening its own.
 
 **Calibration and ROI Select do NOT use `turn_all_leds_on`/`off`** for the

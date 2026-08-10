@@ -52,17 +52,24 @@ from engine.led_panel import LEDPanel
 # successful "priming" arm cycle since the last time switched_to_stream_panel
 # touched them (Calibration/ROI Select's own all_leds_on()/all_leds_off()
 # cycle - see switched_to_stream_panel's own comment for why THAT
-# specifically de-primes them). start_scanning()'s double-arm sequence is
-# only actually needed on the FIRST arm after that - every later
-# start_scanning() call in the same session (switch_time changes, Continue
-# to Live Test, Live Session's own Start) already steps fine with a single
-# arm, since the "priming" persists in the panel's own firmware across
-# stop_scanning()/start_scanning() cycles as long as Calibration/ROI Select
-# doesn't run again in between. Module-level, matching this file's own
-# _relay_connection pattern - resets to False on a fresh process (safe
-# default: always do the slow, confirmed-working double-arm the first time
-# this app has no prior evidence either panel is primed).
-_dual_panel_primed = {"primed": False}
+# specifically de-primes them), plus which switch_time_ms/scan_direction
+# they were last successfully configured with. start_scanning()'s
+# double-arm sequence is only actually needed on the FIRST arm after that;
+# once primed, a LATER call with the SAME switch_time_ms/scan_direction
+# doesn't even need to reconfigure - configure_one_panel()'s own
+# LEDPanel.reset() only resets LED POSITION, never mode/trigger config, so
+# a panel already sitting in mode 1/trigger mode 2/camera-trigger-enabled
+# from the last arm is still fully configured; the only thing that
+# actually needs to happen is re-triggering the relay (a direct serial
+# connection, not the Acroname hub - genuinely fast, no hub-switch settle
+# time at all). Only a genuine switch_time/scan_direction CHANGE (or the
+# first arm since Calibration) needs the hub-switching reconfigure step,
+# which is what actually dominates start_scanning()'s wall-clock cost.
+# Module-level, matching this file's own _relay_connection pattern - resets
+# to False/None on a fresh process (safe default: always do the slow,
+# confirmed-working double-arm+reconfigure the first time this app has no
+# prior evidence either panel is primed or configured).
+_dual_panel_primed = {"primed": False, "switch_time_ms": None, "scan_direction": None}
 
 
 def turn_all_leds_on(dual_panel_config):
@@ -171,13 +178,34 @@ def start_scanning(switch_time_ms, scan_direction, dual_panel_config):
         # which re-runs start_scanning() without an intervening
         # stop_scanning() today - correct by construction now instead of
         # only working via _relay_on()'s own stale-connection guard.
-        if _dual_panel_primed["primed"]:
+        #
+        # Further optimization on top of that: once primed, a call with the
+        # SAME switch_time_ms/scan_direction as last time doesn't even need
+        # to reconfigure - only the relay actually needs re-triggering (see
+        # _dual_panel_primed's own comment for why config persists). This is
+        # the common repeat-Start case (clicking Start again with the same
+        # settings) - skips BOTH panels' hub-switch entirely, which is what
+        # actually dominates the wall-clock cost, not the handful of
+        # near-instant LEDPanel CLI commands sent during it. Trade-off:
+        # since configure_one_panel()'s own reset() is skipped too, the
+        # LEDs resume stepping from wherever they last stopped rather than
+        # restarting at position 0 - acceptable since nothing in this app
+        # depends on a scan always starting from LED 0.
+        settings_unchanged = (
+            _dual_panel_primed["switch_time_ms"] == switch_time_ms
+            and _dual_panel_primed["scan_direction"] == scan_direction
+        )
+        if _dual_panel_primed["primed"] and settings_unchanged:
+            _relay_on(dual_panel_config)
+        elif _dual_panel_primed["primed"]:
             _arm_once()
         else:
             _arm_once()
             stop_scanning(dual_panel_config)
             _arm_once()
             _dual_panel_primed["primed"] = True
+        _dual_panel_primed["switch_time_ms"] = switch_time_ms
+        _dual_panel_primed["scan_direction"] = scan_direction
 
 
 def stop_scanning(dual_panel_config):
@@ -311,7 +339,13 @@ def switched_to_stream_panel(dual_panel_config, stream_name):
         # above) - even if LEDPanel.reset() itself failed, the panel still
         # went through all_leds_on()/all_leds_off() inside this block, so
         # the next start_scanning() should still take the slow, safe path.
+        # Clearing the tracked switch_time_ms/scan_direction too is not
+        # strictly needed for correctness (primed=False alone already
+        # forces the full path regardless), just avoids leaving stale
+        # values sitting around.
         _dual_panel_primed["primed"] = False
+        _dual_panel_primed["switch_time_ms"] = None
+        _dual_panel_primed["scan_direction"] = None
         hub.disconnect()
 
 
