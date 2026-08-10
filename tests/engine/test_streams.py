@@ -12,20 +12,37 @@ from engine.streams import (
 )
 
 
-class FakeOptionSensor:
-    """Fake sensor exposing just enough of the .supports()/.set_option() API
-    for enable_auto_exposure/set_emitter_enabled/set_manual_exposure - real
-    pyrealsense2 sensors aren't constructible without hardware."""
+class FakeOptionRange:
+    """Stand-in for pyrealsense2's option_range - only .default is read."""
 
-    def __init__(self, supported_options):
+    def __init__(self, default):
+        self.default = default
+
+
+class FakeOptionSensor:
+    """Fake sensor exposing just enough of the .supports()/.set_option()/
+    .get_option_range() API for enable_auto_exposure/set_emitter_enabled/
+    set_manual_exposure - real pyrealsense2 sensors aren't constructible
+    without hardware."""
+
+    def __init__(self, supported_options, option_defaults=None):
         self._supported_options = set(supported_options)
+        self._option_defaults = option_defaults or {}
         self.set_options = {}
+        # Ordered log of every write, so a test can assert on ORDER (e.g. that
+        # exposure/gain are restored BEFORE auto-exposure is switched on),
+        # which set_options alone can't show.
+        self.writes = []
 
     def supports(self, option):
         return option in self._supported_options
 
     def set_option(self, option, value):
         self.set_options[option] = value
+        self.writes.append((option, value))
+
+    def get_option_range(self, option):
+        return FakeOptionRange(self._option_defaults.get(option, 0))
 
 
 def test_enable_auto_exposure_sets_option_on_when_supported():
@@ -40,6 +57,53 @@ def test_enable_auto_exposure_returns_false_when_unsupported():
     sensor = FakeOptionSensor(supported_options=set())
     assert enable_auto_exposure(sensor) is False
     assert sensor.set_options == {}
+
+
+# --- Regression: switching Stream Config back to "Auto exposure" must undo
+# what set_manual_exposure wrote, not just flip the auto flag. Leaving the
+# manual gain behind (the UI defaults it to 16) left the camera dark enough
+# that Calibration's Otsu blob detection stopped finding LEDs at all - and
+# since the value lives in the CAMERA it survived app restarts. ---
+
+def _full_exposure_sensor():
+    return FakeOptionSensor(
+        supported_options={rs.option.enable_auto_exposure, rs.option.exposure, rs.option.gain},
+        option_defaults={rs.option.exposure: 7500, rs.option.gain: 64},
+    )
+
+
+def test_enable_auto_exposure_restores_exposure_and_gain_defaults():
+    sensor = _full_exposure_sensor()
+    set_manual_exposure(sensor, exposure=8500, gain=16)  # what the UI defaults to
+
+    assert enable_auto_exposure(sensor) is True
+
+    assert sensor.set_options[rs.option.exposure] == 7500  # factory default, not 8500
+    assert sensor.set_options[rs.option.gain] == 64        # factory default, not 16
+    assert sensor.set_options[rs.option.enable_auto_exposure] == 1
+
+
+def test_enable_auto_exposure_restores_defaults_before_switching_auto_on():
+    # Order is load-bearing: on some sensors writing exposure while auto is
+    # ON implicitly turns auto back off, which would leave auto disabled.
+    sensor = _full_exposure_sensor()
+
+    enable_auto_exposure(sensor)
+
+    written_options = [option for option, _ in sensor.writes]
+    assert written_options[-1] == rs.option.enable_auto_exposure
+    assert rs.option.exposure in written_options[:-1]
+    assert rs.option.gain in written_options[:-1]
+
+
+def test_enable_auto_exposure_skips_unsupported_exposure_gain_options():
+    # A sensor supporting auto-exposure but not manual exposure/gain must
+    # still get auto enabled, with no attempt to restore what it can't set.
+    sensor = FakeOptionSensor(supported_options={rs.option.enable_auto_exposure})
+
+    assert enable_auto_exposure(sensor) is True
+
+    assert sensor.set_options == {rs.option.enable_auto_exposure: 1}
 
 
 def test_list_devices_lists_any_device_regardless_of_sensor_names():

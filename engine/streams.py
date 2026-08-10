@@ -438,11 +438,35 @@ def capture_synced_frame_pair(groups, on_both_streaming=None, settle_frames=15, 
 def enable_auto_exposure(sensor):
     """Returns True/False so callers can warn the operator when the sensor
     doesn't support the option instead of silently proceeding with
-    auto-exposure left however it was."""
-    if sensor.supports(rs.option.enable_auto_exposure):
-        sensor.set_option(rs.option.enable_auto_exposure, 1)
-        return True
-    return False
+    auto-exposure left however it was.
+
+    Also restores exposure/gain to the sensor's OWN factory defaults
+    (get_option_range().default) before re-enabling auto - set_manual_exposure
+    writes THREE options (enable_auto_exposure=0, exposure, gain), so flipping
+    only the auto flag back on used to leave the manually-set exposure and
+    especially gain still written into the camera. That's a real, observed
+    failure: a manual->auto round trip in Stream Config left the sensor
+    auto-exposing with the UI's default gain of 16 still stuck in it, dark
+    enough that Calibration's Otsu blob detection stopped finding the LEDs at
+    all - and because the value lives in the CAMERA, not the app, it survived
+    app restarts and only a power-cycle/hardware_reset cleared it.
+
+    Restoring the SDK-reported factory default (rather than snapshotting
+    whatever the value was before this app first touched it) keeps this
+    function stateless, and matches what the power-cycle that people reach
+    for as a workaround actually gives you. Auto-exposure re-derives its own
+    working value immediately afterwards, so the restored default is only
+    ever a starting point, never the value a run actually uses."""
+    if not sensor.supports(rs.option.enable_auto_exposure):
+        return False
+    # Written BEFORE re-enabling auto, deliberately: on some sensors writing
+    # exposure while auto-exposure is on implicitly turns auto back off, so
+    # doing it in this order can't leave auto disabled behind our back.
+    for option in (rs.option.exposure, rs.option.gain):
+        if sensor.supports(option):
+            sensor.set_option(option, sensor.get_option_range(option).default)
+    sensor.set_option(rs.option.enable_auto_exposure, 1)
+    return True
 
 
 def set_emitter_enabled(sensor, enabled):
