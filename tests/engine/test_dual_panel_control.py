@@ -20,6 +20,17 @@ DUAL_PANEL_CONFIG = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _reset_dual_panel_primed_flag():
+    # _dual_panel_primed is module-level state that persists across tests
+    # in the same process - reset to its real fresh-process default
+    # (False) before EVERY test in this file, so no test's outcome depends
+    # on what some earlier test happened to leave it as.
+    dual_panel_control._dual_panel_primed["primed"] = False
+    yield
+    dual_panel_control._dual_panel_primed["primed"] = False
+
+
 # --- dual_panel_config=None must take the EXACT same code path as before
 # this feature existed - regression safety for every normal single-panel
 # test, which never sets the Device Select checkbox. ---
@@ -92,7 +103,7 @@ def test_turn_all_leds_off_with_dual_panel_config_routes_through_run_on_both_pan
         mock_run_on_both.assert_called_once_with(DUAL_PANEL_CONFIG, dual_panel_control.LEDPanel.all_leds_off)
 
 
-def test_start_scanning_with_dual_panel_config_arms_twice_with_a_real_stop_between():
+def test_start_scanning_with_dual_panel_config_arms_twice_when_not_yet_primed():
     # Confirmed on real hardware (tools/dual_panel_diag/
     # diag_double_arm_hypothesis.py): a SINGLE arm cycle - even one
     # immediately preceded by stop_scanning() - never gets the panel
@@ -100,7 +111,10 @@ def test_start_scanning_with_dual_panel_config_arms_twice_with_a_real_stop_betwe
     # despite getCameraTriggerState correctly flipping to 1 - the panel
     # sees the trigger edge but doesn't trust it yet). A SECOND, IDENTICAL
     # arm cycle - after a real stop_scanning() - steps every time. See
-    # start_scanning's own comment for the full reasoning.
+    # start_scanning's own comment for the full reasoning. This only fires
+    # when _dual_panel_primed isn't set yet - see the fixture at the top of
+    # this file resetting it before every test, and the "already primed"
+    # test right below for the fast path.
     call_order = []
     with patch("engine.dual_panel_control.LEDPanel") as mock_led_panel, \
          patch.object(dual_panel_control, "stop_scanning",
@@ -149,6 +163,37 @@ def test_start_scanning_with_dual_panel_config_arms_twice_with_a_real_stop_betwe
         mock_led_panel.set_speed_ms.assert_called_once_with(5)
         mock_led_panel.set_trigger_mode.assert_called_once_with(2)
         mock_led_panel.set_camera_trigger.assert_called_once_with(True)
+
+    # After a successful double-arm, the pair is marked primed - so the
+    # NEXT start_scanning() call (switch_time change, Continue to Live
+    # Test, Live Session's own Start) can take the fast, single-arm path.
+    assert dual_panel_control._dual_panel_primed["primed"] is True
+
+
+def test_start_scanning_with_dual_panel_config_arms_once_when_already_primed():
+    # The whole point of the primed flag: don't pay the extra hub-switch/
+    # relay round-trip on EVERY Start press - only the first one after
+    # Calibration/ROI Select actually needs it. Real-hardware testing
+    # confirmed the unconditional double-arm made every subsequent Start
+    # noticeably slower for no benefit.
+    dual_panel_control._dual_panel_primed["primed"] = True
+    call_order = []
+    with patch("engine.dual_panel_control.LEDPanel"), \
+         patch.object(dual_panel_control, "stop_scanning",
+                      side_effect=lambda cfg: call_order.append("stop_scanning")) as mock_stop_scanning, \
+         patch.object(dual_panel_control, "_run_on_both_panels",
+                      side_effect=lambda cfg, action: call_order.append("_run_on_both_panels")) as mock_run_on_both, \
+         patch.object(dual_panel_control, "_relay_on",
+                      side_effect=lambda cfg: call_order.append("_relay_on")) as mock_relay_on:
+        start_scanning(5, 1, DUAL_PANEL_CONFIG)
+
+        mock_stop_scanning.assert_not_called()
+        assert mock_run_on_both.call_count == 1
+        assert mock_relay_on.call_count == 1
+        assert call_order == ["_run_on_both_panels", "_relay_on"]
+
+    # Still primed afterward - an already-primed pair stays primed.
+    assert dual_panel_control._dual_panel_primed["primed"] is True
 
 
 def test_start_scanning_with_none_config_does_not_call_stop_scanning_again():
@@ -395,6 +440,27 @@ def test_switched_to_stream_panel_resets_panel_before_disconnecting():
     # switch beyond the single enable/disable pair already asserted
     # elsewhere; disconnect is still the very last hub call.
     assert fake_hub.calls[-1] == "disconnect"
+
+
+def test_switched_to_stream_panel_marks_the_pair_as_no_longer_primed():
+    # This IS the de-priming action start_scanning's own primed-flag check
+    # is designed around: Calibration/ROI Select's all_leds_on()/
+    # all_leds_off() (the caller's own code inside the `with` block) is
+    # what actually necessitates a fresh double-arm next time - marked
+    # here since this is the one place both callers route through.
+    dual_panel_control._dual_panel_primed["primed"] = True
+    fake_hub = _FakeHubForSwitch()
+
+    def fake_acroname_hub_module():
+        return type("module", (), {"AcronameHub": lambda: fake_hub})
+
+    with patch.dict("sys.modules", {"engine.acroname_hub": fake_acroname_hub_module()}), \
+         patch("engine.dual_panel_control.LEDPanel"), \
+         patch("time.sleep"):
+        with switched_to_stream_panel(DUAL_PANEL_CONFIG, "stream_a"):
+            pass
+
+    assert dual_panel_control._dual_panel_primed["primed"] is False
 
 
 def test_switched_to_stream_panel_is_a_noop_when_config_is_none_does_not_reset():

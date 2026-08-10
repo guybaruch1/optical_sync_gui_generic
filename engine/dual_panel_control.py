@@ -48,6 +48,22 @@ from contextlib import contextmanager
 
 from engine.led_panel import LEDPanel
 
+# Tracks whether the dual-panel pair has already been through one
+# successful "priming" arm cycle since the last time switched_to_stream_panel
+# touched them (Calibration/ROI Select's own all_leds_on()/all_leds_off()
+# cycle - see switched_to_stream_panel's own comment for why THAT
+# specifically de-primes them). start_scanning()'s double-arm sequence is
+# only actually needed on the FIRST arm after that - every later
+# start_scanning() call in the same session (switch_time changes, Continue
+# to Live Test, Live Session's own Start) already steps fine with a single
+# arm, since the "priming" persists in the panel's own firmware across
+# stop_scanning()/start_scanning() cycles as long as Calibration/ROI Select
+# doesn't run again in between. Module-level, matching this file's own
+# _relay_connection pattern - resets to False on a fresh process (safe
+# default: always do the slow, confirmed-working double-arm the first time
+# this app has no prior evidence either panel is primed).
+_dual_panel_primed = {"primed": False}
+
 
 def turn_all_leds_on(dual_panel_config):
     if dual_panel_config is None:
@@ -142,17 +158,26 @@ def start_scanning(switch_time_ms, scan_direction, dual_panel_config):
         # the panel's own trigger-detection logic needs to see one full
         # relay close->open "priming" cycle before it trusts the next one.
         #
-        # Costs one extra full hub-switch/relay round-trip on every Start -
-        # the operator already tolerates this exact cost via the manual
-        # Stop-then-Start workaround this directly automates. Also
-        # simplifies gui/pages/threshold_tuning_page.py's
-        # _on_switch_time_changed, which re-runs start_scanning() without an
-        # intervening stop_scanning() today - correct by construction now
-        # instead of only working via _relay_on()'s own stale-connection
-        # guard.
-        _arm_once()
-        stop_scanning(dual_panel_config)
-        _arm_once()
+        # Only actually needed on the FIRST arm since Calibration/ROI
+        # Select last touched the panels (see _dual_panel_primed's own
+        # comment) - every LATER start_scanning() call in the same session
+        # (switch_time changes, Continue to Live Test, Live Session's own
+        # Start) already steps fine with a single arm, so this only pays
+        # the extra hub-switch/relay round-trip once per Calibration run,
+        # not on every single Start press - real-hardware testing confirmed
+        # doing the double-arm unconditionally on every call made the
+        # common case noticeably slower for no benefit. Also simplifies
+        # gui/pages/threshold_tuning_page.py's _on_switch_time_changed,
+        # which re-runs start_scanning() without an intervening
+        # stop_scanning() today - correct by construction now instead of
+        # only working via _relay_on()'s own stale-connection guard.
+        if _dual_panel_primed["primed"]:
+            _arm_once()
+        else:
+            _arm_once()
+            stop_scanning(dual_panel_config)
+            _arm_once()
+            _dual_panel_primed["primed"] = True
 
 
 def stop_scanning(dual_panel_config):
@@ -276,6 +301,17 @@ def switched_to_stream_panel(dual_panel_config, stream_name):
             LEDPanel.reset()
         except Exception:
             pass
+        # This IS the de-priming action start_scanning's own comment refers
+        # to - all_leds_on()/all_leds_off() (the caller's own capture code,
+        # inside this `with` block) is what actually leaves the panel
+        # needing a fresh double-arm next time; this is just the one
+        # central place both callers (Calibration, ROI Select) route
+        # through, so marking it here covers both without touching either
+        # page. Deliberately unconditional (not wrapped in the try/except
+        # above) - even if LEDPanel.reset() itself failed, the panel still
+        # went through all_leds_on()/all_leds_off() inside this block, so
+        # the next start_scanning() should still take the slow, safe path.
+        _dual_panel_primed["primed"] = False
         hub.disconnect()
 
 

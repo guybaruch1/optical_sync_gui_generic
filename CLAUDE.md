@@ -305,15 +305,22 @@ was never the variable that mattered across all 20 single-shot variants
 tried in this investigation; the panel's own trigger-detection logic
 needs to see one full "priming" cycle before it trusts the next one.
 
-`start_scanning()`'s dual-panel branch now arms TWICE unconditionally -
-`_arm_once()` (configure both panels + close relay), a real
-`stop_scanning()`, then `_arm_once()` again - directly encoding this
-confirmed sequence. Costs one extra full hub-switch/relay round-trip on
-every Start, which the operator already tolerates today via the manual
-Stop-then-Start workaround this now automates in full (the two earlier
-fixes only ever automated PART of it - a plain `reset()`, then a single
-arm cycle preceded by one `stop_scanning()` - neither actually performed a
-second arm attempt at all).
+`start_scanning()`'s dual-panel branch arms TWICE - `_arm_once()` (configure
+both panels + close relay), a real `stop_scanning()`, then `_arm_once()`
+again - directly encoding this confirmed sequence, but **only on the FIRST
+arm since Calibration/ROI Select last touched the panels**, tracked via a
+module-level `_dual_panel_primed` flag. Unconditionally double-arming on
+EVERY `start_scanning()` call (switch_time changes, Continue to Live Test,
+Live Session's own Start - none of which need it) made every one of those
+calls noticeably slower for no benefit, confirmed on real hardware -
+the bug was never "every Start is slow to arm", only the very first one
+after Calibration. `switched_to_stream_panel`'s own cleanup (the one place
+both Calibration's and ROI Select's per-stream capture code route through)
+sets the flag back to `False` on exit, since that's the actual de-priming
+action (their `all_leds_on()`/`all_leds_off()` calls inside the `with`
+block); `start_scanning()` sets it `True` after a successful double-arm.
+Resets to `False` on a fresh process by default - the safe choice, since a
+fresh process has no evidence either panel is primed.
 
 Any panel config change (e.g. switch time)
 needs this whole provisioning re-run - see `gui/pages/threshold_tuning_page.py`'s
