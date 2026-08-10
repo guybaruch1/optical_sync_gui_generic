@@ -8,6 +8,7 @@ from domain.realsense_utils import (
     merge_close_centroids,
     detect_led_centroids,
     save_debug_detection_image,
+    _DEBUG_IMAGE_SCALE,
     draw_detected_centroids,
     draw_bundle_overlay,
     draw_led_state_overlay,
@@ -221,6 +222,10 @@ def test_detect_led_centroids_separates_multiple_blurred_blobs_on_a_cropped_imag
 
 
 def test_save_debug_detection_image_writes_file_and_marks_centroids(tmp_path):
+    # Regression: the whole image (and every drawn coordinate/radius) is
+    # upscaled by _DEBUG_IMAGE_SCALE (4x) before anything is drawn - a
+    # dense LED grid's native cropped-ROI size is only a few pixels per
+    # LED, nowhere near enough to render a 1-3 digit led_id legibly.
     image = np.zeros((50, 50), dtype=np.uint8)
     path = str(tmp_path / "debug.png")
 
@@ -230,28 +235,69 @@ def test_save_debug_detection_image_writes_file_and_marks_centroids(tmp_path):
     assert (tmp_path / "debug.png").exists()
     saved = cv2.imread(path)
     assert saved is not None
-    assert saved.shape == (50, 50, 3)  # grayscale input converted to BGR for drawing
-    # A green circle outline was drawn around (25, 25); its ring should be
-    # visible a few pixels off-center even though the exact center pixel
-    # isn't guaranteed to be on the 1px-wide circle outline itself.
-    ring_pixel = saved[25, 25 + 8]
+    assert saved.shape == (200, 200, 3)  # 50x50 grayscale, upscaled 4x, converted to BGR
+    # A green circle outline was drawn around the SCALED centroid
+    # (25*4, 25*4) = (100, 100); its ring should be visible a few pixels
+    # off-center (radius 8 * scale 4 = 32) even though the exact center
+    # pixel isn't guaranteed to be on the 1px-wide circle outline itself.
+    ring_pixel = saved[100, 100 + 32]
     assert ring_pixel.tolist() == [0, 255, 0]
 
 
 def test_save_debug_detection_image_shrinks_circles_for_tight_spacing(tmp_path):
     image = np.zeros((50, 50), dtype=np.uint8)
     path = str(tmp_path / "debug.png")
-    centroids = [(20, 25), (30, 25)]  # 10px apart -> radius should shrink to 3
+    centroids = [(20, 25), (30, 25)]  # 10px apart -> pre-scale radius shrinks to 3
 
     save_debug_detection_image(image, centroids, path)
 
     import cv2
     saved = cv2.imread(path)
-    # With the old fixed 8px radius these two circles (16px wide each, 10px
-    # apart) would fully overlap. With the shrunk radius they must not - the
-    # midpoint between the two centers should be untouched background.
-    midpoint_pixel = saved[25, 25]
+    # With the old fixed 8px (pre-scale) radius these two circles would
+    # fully overlap. With the shrunk radius they must not - the midpoint
+    # between the two SCALED centers, ((20+30)/2*4, 25*4) = (100, 100),
+    # should be untouched background.
+    midpoint_pixel = saved[100, 100]
     assert midpoint_pixel.tolist() != [0, 255, 0]
+
+
+def test_save_debug_detection_image_scales_output_by_the_documented_factor(tmp_path):
+    # Locks in the actual scale factor against the module constant, so a
+    # future change to _DEBUG_IMAGE_SCALE doesn't silently desync from
+    # what this file's other tests hardcode.
+    image = np.zeros((30, 40), dtype=np.uint8)
+    path = str(tmp_path / "debug.png")
+
+    save_debug_detection_image(image, [(10, 10)], path)
+
+    import cv2
+    saved = cv2.imread(path)
+    assert saved.shape == (30 * _DEBUG_IMAGE_SCALE, 40 * _DEBUG_IMAGE_SCALE, 3)
+
+
+def test_save_debug_detection_image_led_id_text_is_actually_legible(tmp_path):
+    # The actual bug being fixed: a multi-digit led_id must occupy enough
+    # real pixels to be readable, not just be present as a few-pixel smudge
+    # that only looked "drawn" in a pixel-exists sense. A real
+    # cv2.FONT_HERSHEY_SIMPLEX "9" at the scaled font size should light up
+    # a meaningfully wide swath of red pixels, not just 1-2.
+    image = np.zeros((100, 100), dtype=np.uint8)
+    path = str(tmp_path / "debug.png")
+    centroid = (50, 50)  # comfortably away from every edge, pre-scale
+
+    save_debug_detection_image(image, [centroid], path)  # single centroid -> led_id "0"
+
+    import cv2
+    saved = cv2.imread(path)
+    scale = _DEBUG_IMAGE_SCALE
+    label_x, label_y = centroid[0] * scale + 10 * scale, centroid[1] * scale
+    window = saved[max(0, label_y - 20 * scale):label_y + 20 * scale,
+                    max(0, label_x - 5 * scale):label_x + 30 * scale]
+    red_pixel_count = int(np.sum((window[:, :, 2] > 200) & (window[:, :, 1] < 50) & (window[:, :, 0] < 50)))
+    # A single illegible digit at the OLD unscaled size would light up only
+    # a handful of pixels - require enough that the digit is a real,
+    # recognizable shape at this resolution.
+    assert red_pixel_count > 20
 
 
 def test_draw_detected_centroids_marks_circles_without_numbering():

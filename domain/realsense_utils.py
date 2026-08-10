@@ -185,13 +185,40 @@ def decode_frame(raw_bytes, fmt, width, height):
     return DECODERS[fmt](raw_bytes, width, height)
 
 
+# How much save_debug_detection_image upscales the base image before drawing
+# anything - the native cropped-ROI frame is only a few pixels per LED for
+# a dense grid (e.g. 100 LEDs), nowhere near enough to render a 1-3 digit
+# led_id legibly at any font scale, and naive zooming in an image viewer
+# just blurs/pixelates a PNG that never had the resolution to begin with.
+# Confirmed on real hardware: an operator trying to visually compare
+# led_id numbering direction between two streams' debug images (checking
+# whether Calibration's row-major numbering assumption actually matches
+# between them) could not read the printed numbers at all, even zoomed in.
+_DEBUG_IMAGE_SCALE = 4
+
+
 def save_debug_detection_image(image, centroids, path):
     debug_img = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR) if len(image.shape) == 2 else image.copy()
-    radius = _debug_circle_radius(centroids)
+    # Radius is derived from the PRE-scale spacing between points (the
+    # existing spacing-based sizing logic is unchanged) - only the final
+    # drawn radius/coordinates/font get scaled up, so a tightly-packed grid
+    # still gets small-but-now-legible circles, not disproportionately
+    # huge ones relative to LED spacing.
+    radius = _debug_circle_radius(centroids) * _DEBUG_IMAGE_SCALE
+    # INTER_NEAREST, not a smoothing interpolation - this is a verification
+    # image, not a presentation one; nearest-neighbor keeps the original
+    # LED-blob edges crisp instead of blurring them across the upscale.
+    debug_img = cv2.resize(debug_img, None, fx=_DEBUG_IMAGE_SCALE, fy=_DEBUG_IMAGE_SCALE,
+                            interpolation=cv2.INTER_NEAREST)
+    # Text thickness also scaled - the original fixed 1px stroke would look
+    # spindly/thin next to a font this much bigger, hurting the very
+    # legibility this scale-up exists for.
+    text_thickness = max(1, _DEBUG_IMAGE_SCALE // 2)
     for i, (x, y) in enumerate(centroids):
-        cv2.circle(debug_img, (int(x), int(y)), radius, (0, 255, 0), 1)
-        cv2.putText(debug_img, str(i), (int(x) + 10, int(y)), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.4, (0, 0, 255), 1)
+        scaled_x, scaled_y = int(x) * _DEBUG_IMAGE_SCALE, int(y) * _DEBUG_IMAGE_SCALE
+        cv2.circle(debug_img, (scaled_x, scaled_y), radius, (0, 255, 0), 1)
+        cv2.putText(debug_img, str(i), (scaled_x + 10 * _DEBUG_IMAGE_SCALE, scaled_y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4 * _DEBUG_IMAGE_SCALE, (0, 0, 255), text_thickness)
     cv2.imwrite(path, debug_img)
 
 
