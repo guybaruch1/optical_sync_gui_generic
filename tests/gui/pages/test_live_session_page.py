@@ -55,6 +55,7 @@ def _minimal_context(tmp_path, **overrides):
         num_leds=2, neighborhood_size=5, frame_drop_threshold_factor=1.5,
         warmup_pairs_to_skip=0, pairing_gap_outlier_threshold_us=100000,
         output_root=str(tmp_path), kept_csv_filename="kept.csv", dropped_csv_filename="dropped.csv",
+        clean_csv_filename="clean.csv", other_csv_filename="other.csv",
         snapshot_every_n_pairs=20, max_snapshots=2,
         stream_a_roi=(0, 0, 4, 4), stream_b_roi=(0, 0, 4, 4), camera_name="Intel RealSense D455",
         stream_a_label="Infrared 1", stream_b_label="Color",
@@ -367,6 +368,8 @@ def test_begin_new_run_output_creates_a_fresh_folder_under_output_root(qapp, tmp
     assert os.path.dirname(output_dir) == str(tmp_path)
     assert page._context["kept_csv_path"] == os.path.join(output_dir, "kept.csv")
     assert page._context["dropped_csv_path"] == os.path.join(output_dir, "dropped.csv")
+    assert page._context["clean_csv_path"] == os.path.join(output_dir, "clean.csv")
+    assert page._context["other_csv_path"] == os.path.join(output_dir, "other.csv")
 
 
 def test_two_start_session_calls_use_two_different_run_folders(qapp, tmp_path):
@@ -400,3 +403,63 @@ def test_save_chart_images_writes_three_named_png_files(qapp, tmp_path):
         path = os.path.join(str(tmp_path), filename)
         assert os.path.exists(path)
         assert os.path.getsize(path) > 0
+# --- clean/other CSV split: a second, additive partition of the same rows
+# alongside the existing kept/dropped pair - see domain.csv_export.
+# export_clean_and_other_csvs and its module docstring for why "kept" is
+# not "clean". ---
+
+def _rows_with_one_clean_and_one_excluded():
+    return [
+        {
+            "pair_index": 0, "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+            "pairing_gap_us": 0.0, "pairing_gap_us_excluded": False, "pairing_gap_us_exclude_reason": None,
+            "position_gap_ms": 1.0, "position_gap_ms_excluded": False, "position_gap_ms_exclude_reason": None,
+        },
+        {
+            "pair_index": 1, "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+            "pairing_gap_us": 0.0, "pairing_gap_us_excluded": False, "pairing_gap_us_exclude_reason": None,
+            "position_gap_ms": None, "position_gap_ms_excluded": True, "position_gap_ms_exclude_reason": "warmup",
+        },
+    ]
+
+
+def test_on_session_finished_writes_clean_and_other_csvs_alongside_kept_and_dropped(qapp, tmp_path):
+    import csv
+
+    page = LiveSessionPage()
+    page.set_context(**_minimal_context(tmp_path))
+    # Tests that call page internals directly (not through start_session())
+    # still need a run folder minted, same as a real Start click would do.
+    output_dir = page._begin_new_run_output()
+
+    page._on_session_finished(_rows_with_one_clean_and_one_excluded())
+
+    clean_path = os.path.join(output_dir, "clean.csv")
+    other_path = os.path.join(output_dir, "other.csv")
+    assert os.path.exists(clean_path)
+    assert os.path.exists(other_path)
+    with open(clean_path, newline="") as f:
+        clean_rows = list(csv.DictReader(f))
+    with open(other_path, newline="") as f:
+        other_rows = list(csv.DictReader(f))
+    assert [r["pair_index"] for r in clean_rows] == ["0"]
+    assert [r["pair_index"] for r in other_rows] == ["1"]
+
+    # The pre-existing kept/dropped pair must still be written too - this is
+    # additive, not a replacement.
+    assert os.path.exists(os.path.join(output_dir, "kept.csv"))
+    assert os.path.exists(os.path.join(output_dir, "dropped.csv"))
+
+
+def test_reexport_last_session_csvs_rewrites_clean_and_other_too(qapp, tmp_path):
+    page = LiveSessionPage()
+    page.set_context(**_minimal_context(tmp_path))
+    output_dir = page._begin_new_run_output()
+    page._last_session_rows = _rows_with_one_clean_and_one_excluded()
+
+    page._reexport_last_session_csvs()
+
+    assert os.path.exists(os.path.join(output_dir, "clean.csv"))
+    assert os.path.exists(os.path.join(output_dir, "other.csv"))
+    assert "clean.csv" in page.status_label.text()
+    assert "other.csv" in page.status_label.text()

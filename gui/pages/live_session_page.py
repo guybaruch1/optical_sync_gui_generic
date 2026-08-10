@@ -18,12 +18,17 @@ pair - both streams' overlays side by side (domain.realsense_utils.
 combine_side_by_side), not two separate stream_a/stream_b files, so they're
 cross-checkable in a single glance/file. Filename includes the pair_index
 so it can be cross-checked against what was on screen and against the
-CSV's pair_index column. At Stop, writes the CSVs
-(domain.csv_export.export_session_csvs), a static end-of-run plot image
-(domain.plot_export.export_session_plot), PNG snapshots of the 3 live
-charts themselves (_save_chart_images), and one final LED on/off debug
-snapshot for each stream - the same final snapshot can also be saved on
-demand mid-session via the "Save Debug Snapshot" button.
+CSV's pair_index column. At Stop, writes the CSVs -
+domain.csv_export.export_session_csvs' kept/dropped pair (routed by the
+frame-drop boolean alone - "kept" still contains flagged-but-not-dropped
+rows like warmup/miss/outlier) AND, additively, export_clean_and_other_csvs'
+clean/other pair (routed by whether ANY metric's own exclusion flag is set
+at all, so "clean" really is nothing-wrong-on-any-metric) - a static
+end-of-run plot image (domain.plot_export.export_session_plot), PNG
+snapshots of the 3 live charts themselves (_save_chart_images), and one
+final LED on/off debug snapshot for each stream - the same final snapshot
+can also be saved on demand mid-session via the "Save Debug Snapshot"
+button.
 
 Every Start click mints its OWN fresh timestamped
 output/live_session_<timestamp>/ folder (domain.run_output.create_run_dir,
@@ -31,11 +36,12 @@ via _begin_new_run_output(), called first thing in start_session()) - a new
 run never overwrites a previous run's CSVs/graphs/snapshots the way one
 flat, fixed-filename output directory used to. The toolbar's "Export CSV"
 button and the periodic-snapshot/debug-image helpers below all read
-self._context["output_dir"]/["kept_csv_path"]/["dropped_csv_path"], which
-_begin_new_run_output() sets once per Start and which then stay pointed at
-that same run's folder until the next Start - so re-exporting mid-session
-or right after Stop still targets the run that's actually in progress or
-just finished, not a new folder.
+self._context["output_dir"]/["kept_csv_path"]/["dropped_csv_path"]/
+["clean_csv_path"]/["other_csv_path"], which _begin_new_run_output() sets
+once per Start and which then stay pointed at that same run's folder until
+the next Start - so re-exporting mid-session or right after Stop still
+targets the run that's actually in progress or just finished, not a new
+folder.
 
 "HW TS Latency" and "Optical Sync" are the user-facing names for the
 underlying pairing_gap_us/position_gap_ms metrics (engine.metrics) - the
@@ -95,7 +101,7 @@ from gui.widgets.stats_panel import StatsPanel
 from engine.session_engine import SessionEngineThread
 from engine.test_session import TestSession, TestSessionConfig
 from engine.metrics import PairingGapMetric, PositionGapMetric
-from domain.csv_export import export_session_csvs, export_series_csv
+from domain.csv_export import export_session_csvs, export_clean_and_other_csvs, export_series_csv
 from domain.plot_export import export_session_plot
 from domain.realsense_utils import draw_led_state_overlay, crop_to_roi, combine_side_by_side
 from domain.running_stats import RunningStats
@@ -445,8 +451,14 @@ class LiveSessionPage(QWidget):
         export_session_csvs(
             self._last_session_rows, self._context["kept_csv_path"], self._context["dropped_csv_path"]
         )
+        export_clean_and_other_csvs(
+            self._last_session_rows, self._context["clean_csv_path"], self._context["other_csv_path"]
+        )
         self.status_label.setText(
-            "Re-exported CSVs: {}, {}".format(self._context["kept_csv_path"], self._context["dropped_csv_path"])
+            "Re-exported CSVs: {}, {}, {}, {}".format(
+                self._context["kept_csv_path"], self._context["dropped_csv_path"],
+                self._context["clean_csv_path"], self._context["other_csv_path"],
+            )
         )
 
     def _set_frame_drops_visible(self, checked):
@@ -468,7 +480,8 @@ class LiveSessionPage(QWidget):
                      stream_a_threshold, stream_b_threshold,
                      stream_a_xy, stream_b_xy, num_leds, neighborhood_size,
                      frame_drop_threshold_factor, warmup_pairs_to_skip, pairing_gap_outlier_threshold_us,
-                     output_root, kept_csv_filename, dropped_csv_filename, snapshot_every_n_pairs, max_snapshots,
+                     output_root, kept_csv_filename, dropped_csv_filename,
+                     clean_csv_filename, other_csv_filename, snapshot_every_n_pairs, max_snapshots,
                      stream_a_roi, stream_b_roi, camera_name, stream_a_label, stream_b_label,
                      dual_panel_config=None, enable_depth_for_ir_sync=True,
                      hardware_reset_before_start=False, hardware_reset_settle_s=8.0):
@@ -485,12 +498,16 @@ class LiveSessionPage(QWidget):
             frame_drop_threshold_factor=frame_drop_threshold_factor,
             warmup_pairs_to_skip=warmup_pairs_to_skip,
             pairing_gap_outlier_threshold_us=pairing_gap_outlier_threshold_us,
-            # Raw root + filename templates, not a pre-joined output_dir/
-            # kept_csv_path/dropped_csv_path - start_session() mints a fresh
-            # run folder (_begin_new_run_output) and joins these on every
-            # Start, so a new run never overwrites a previous one's files.
+            # Raw root + filename templates, not pre-joined paths -
+            # start_session() mints a fresh run folder (_begin_new_run_output)
+            # and joins these onto it on every Start, so a new run never
+            # overwrites a previous one's files. clean/other are a second,
+            # additive split of the same rows - see domain.csv_export.
+            # export_clean_and_other_csvs's docstring for why kept isn't
+            # the same thing as clean.
             output_root=output_root, kept_csv_filename=kept_csv_filename,
             dropped_csv_filename=dropped_csv_filename,
+            clean_csv_filename=clean_csv_filename, other_csv_filename=other_csv_filename,
             snapshot_every_n_pairs=snapshot_every_n_pairs, max_snapshots=max_snapshots,
             stream_a_roi=stream_a_roi, stream_b_roi=stream_b_roi,
             stream_a_label=stream_a_label, stream_b_label=stream_b_label,
@@ -537,6 +554,8 @@ class LiveSessionPage(QWidget):
         ctx["output_dir"] = output_dir
         ctx["kept_csv_path"] = os.path.join(output_dir, ctx["kept_csv_filename"])
         ctx["dropped_csv_path"] = os.path.join(output_dir, ctx["dropped_csv_filename"])
+        ctx["clean_csv_path"] = os.path.join(output_dir, ctx["clean_csv_filename"])
+        ctx["other_csv_path"] = os.path.join(output_dir, ctx["other_csv_filename"])
         return output_dir
 
     def start_session(self):
@@ -832,6 +851,7 @@ class LiveSessionPage(QWidget):
     def _on_session_finished(self, rows):
         self._last_session_rows = rows
         export_session_csvs(rows, self._context["kept_csv_path"], self._context["dropped_csv_path"])
+        export_clean_and_other_csvs(rows, self._context["clean_csv_path"], self._context["other_csv_path"])
         export_session_plot(rows, os.path.join(self._context["output_dir"], "pipeline_sync_plot.png"))
         self._save_chart_images(self._context["output_dir"])
         self._save_led_state_debug_images()

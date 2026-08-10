@@ -217,6 +217,7 @@ def _full_settings(stream_options):
     settings["calibration"] = {"settle_frames": 15}
     settings["paths"] = {
         "config_path": "config.yaml", "raw_csv_path": "raw.csv", "frame_drop_csv_path": "drops.csv",
+        "clean_csv_path": "clean.csv", "other_csv_path": "other.csv",
     }
     settings["test"] = {
         "num_leds": 1, "scan_direction": 1, "switch_time_ms": 1, "neighborhood_size": 5,

@@ -210,5 +210,13 @@ paths:
   config_path: config.yaml
   raw_csv_path: pipeline_sync_raw.csv
   frame_drop_csv_path: pipeline_sync_frame_drops.csv
+  # A second, additive split of the same rows (written alongside, not
+  # instead of, raw_csv_path/frame_drop_csv_path above) - "kept" in
+  # raw_csv_path is not "clean": a warmup/miss/outlier row stays there
+  # today, just flagged. clean_csv_path is every row with NO metric's own
+  # exclusion flag set at all; other_csv_path is everything else (frame
+  # drops included), in one place - see domain.csv_export.export_clean_and_other_csvs.
+  clean_csv_path: pipeline_sync_clean.csv
+  other_csv_path: pipeline_sync_other.csv
   # Debug images/CSV/plots all get written under this directory.
   output_dir: output

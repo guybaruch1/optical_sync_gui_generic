@@ -1,8 +1,9 @@
 import csv
-from domain.csv_export import export_session_csvs, export_series_csv
+from domain.csv_export import export_clean_and_other_csvs, export_session_csvs, export_series_csv
 
 
-def _row(pair_index, exclude_reason=None, stream_a_frame_drop=False, stream_b_frame_drop=False):
+def _row(pair_index, exclude_reason=None, stream_a_frame_drop=False, stream_b_frame_drop=False,
+         pairing_gap_us_excluded=False, pairing_gap_us_exclude_reason=None):
     return {
         "pair_index": pair_index,
         "ir_ts_us": 1000.0 + pair_index,
@@ -10,8 +11,8 @@ def _row(pair_index, exclude_reason=None, stream_a_frame_drop=False, stream_b_fr
         "stream_a_frame_drop": stream_a_frame_drop,
         "stream_b_frame_drop": stream_b_frame_drop,
         "pairing_gap_us": -0.5,
-        "pairing_gap_us_excluded": False,
-        "pairing_gap_us_exclude_reason": None,
+        "pairing_gap_us_excluded": pairing_gap_us_excluded,
+        "pairing_gap_us_exclude_reason": pairing_gap_us_exclude_reason,
         "position_gap_ms_excluded": exclude_reason is not None,
         "position_gap_ms_exclude_reason": exclude_reason,
     }
@@ -65,6 +66,58 @@ def test_export_session_csvs_empty_rows(tmp_path):
     assert (n_kept, n_dropped) == (0, 0)
     assert kept_path.exists()
     assert dropped_path.exists()
+
+
+def test_export_clean_and_other_csvs_splits_by_any_excluded_flag(tmp_path):
+    # Different split from export_session_csvs' kept/dropped: this one
+    # routes on whether ANY "*_excluded" column is True, not just the
+    # frame-drop boolean - miss/warmup/outlier rows go to "other" too, not
+    # just frame_drop ones.
+    rows = [
+        _row(0),  # nothing excluded on either metric - clean
+        _row(1, exclude_reason="frame_drop", stream_a_frame_drop=True,
+             pairing_gap_us_excluded=True, pairing_gap_us_exclude_reason="frame_drop"),
+        _row(2, exclude_reason="warmup"),
+        _row(3, exclude_reason="miss"),
+        _row(4, pairing_gap_us_excluded=True, pairing_gap_us_exclude_reason="syncer_outlier"),
+    ]
+    clean_path = tmp_path / "clean.csv"
+    other_path = tmp_path / "other.csv"
+
+    n_clean, n_other = export_clean_and_other_csvs(rows, str(clean_path), str(other_path))
+
+    assert n_clean == 1
+    assert n_other == 4
+
+    with open(clean_path, newline="") as f:
+        clean_rows = list(csv.DictReader(f))
+    with open(other_path, newline="") as f:
+        other_rows = list(csv.DictReader(f))
+
+    assert [r["pair_index"] for r in clean_rows] == ["0"]
+    assert [r["pair_index"] for r in other_rows] == ["1", "2", "3", "4"]
+
+
+def test_export_clean_and_other_csvs_is_generic_over_any_excluded_column():
+    # Not hardcoded to pairing_gap_us/position_gap_ms specifically - any
+    # future metric's own "<name>_excluded" column must route a row to
+    # "other" too, since TestSession.process_pair writes one such column
+    # per registered Metric, not just the two built-in ones.
+    from domain.csv_export import _is_clean_row
+
+    clean_row = {"pair_index": 0, "some_metric_excluded": False}
+    dirty_row = {"pair_index": 1, "some_metric_excluded": True}
+    assert _is_clean_row(clean_row) is True
+    assert _is_clean_row(dirty_row) is False
+
+
+def test_export_clean_and_other_csvs_empty_rows(tmp_path):
+    clean_path = tmp_path / "clean.csv"
+    other_path = tmp_path / "other.csv"
+    n_clean, n_other = export_clean_and_other_csvs([], str(clean_path), str(other_path))
+    assert (n_clean, n_other) == (0, 0)
+    assert clean_path.exists()
+    assert other_path.exists()
 
 
 def test_export_series_csv_writes_one_column_per_series(tmp_path):
