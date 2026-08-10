@@ -258,15 +258,31 @@ stale-connection guard. Keep the `switched_to_stream_panel` fix too - it's
 still correct on its own terms and cheap, genuine defense-in-depth alongside
 this one, not a replacement for it.
 
-If THIS still doesn't fully resolve it on real hardware: build a new sweep
-script adapting `diag_arm_sequence_sweep.py`'s proven harness (same
+**This `stop_scanning()`-inside-`start_scanning()` fix ALSO did not resolve
+it on real hardware** - confirmed by the operator, still fails to step on
+the first arm after Calibration. Two informed guesses in a row, both
+pattern-matched from the ORIGINAL bug's fix, have now both failed against
+this specific untested transition. Per this project's own established
+lesson from the original investigation ("Rather than keep hand-editing
+`start_scanning()` and asking for one more real-hardware round trip per
+idea, this sweeps a whole list of VARIANTS in one unattended run") -
+guessing a third sequence by hand is not the right next move.
+
+`tools/dual_panel_diag/diag_first_arm_after_calibration.py` is the actual
+fallback: adapts `diag_arm_sequence_sweep.py`'s proven harness (same
 `getCurrentLED`-based objective stepping detection) with the precondition
-step corrected to the ACTUAL real one - `LEDPanel.stop(); LEDPanel.all_leds_on();
-LEDPanel.all_leds_off()` per panel (mirroring Calibration's own
-`_capture_on_off_for_stream`), not `stop_scanning()` - before re-testing
-arm-sequence variants. Do not keep guessing new sequences by hand against
-real hardware one round-trip at a time; that already failed once on this
-exact bug and is what the original sweep script was built to replace.
+step corrected to the REAL one this time - `switched_to_stream_panel()` +
+`LEDPanel.stop(); LEDPanel.all_leds_on(); LEDPanel.all_leds_off()` per
+stream, byte-for-byte matching `_capture_on_off_for_stream()` - instead of
+`stop_scanning()`. It also queries `getMode()`/`isRunning()` right after
+that precondition (new data - the old investigation's "getMode always
+read 1" observation doesn't apply to a panel that was never in mode 1 at
+all), and includes the CURRENT shipped `start_scanning()` as its own
+negative control, to confirm the script's own precondition/detection
+actually reproduces the reported failure before trusting any other
+result. This needs to actually run on real hardware and have its Summary
+table reported back before the real fix can be written - do not encode a
+"fix" from this bug's own history a third time without that evidence.
 
 Any panel config change (e.g. switch time)
 needs this whole provisioning re-run - see `gui/pages/threshold_tuning_page.py`'s
