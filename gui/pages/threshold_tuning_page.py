@@ -82,6 +82,11 @@ class ThresholdTuningPage(QWidget):
         super().__init__(parent)
         self._context = None
         self.preview_thread = None
+        # The switch-time value actually applied to hardware, as of the
+        # last successful confirm (or the last set_context() prefill) - see
+        # _on_switch_time_spinbox_changed/_on_confirm_switch_time_clicked.
+        # None until set_context() runs once.
+        self._last_applied_switch_time_ms = None
 
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
@@ -193,8 +198,31 @@ class ThresholdTuningPage(QWidget):
         self.switch_time_spinbox.setDecimals(1)
         self.switch_time_spinbox.setSingleStep(0.5)
         self.switch_time_spinbox.setValue(1.0)
-        self.switch_time_spinbox.valueChanged.connect(self._on_switch_time_changed)
+        # Deliberately NOT wired to apply on every tick - each apply is a
+        # real, multi-second hardware call (worse in dual-panel mode, a
+        # full per-panel hub-switch+reconfigure), so clicking the spin
+        # arrows from e.g. 1 to 5 used to fire it 4 times (once per
+        # intermediate value) instead of once for the value actually
+        # wanted. Worse than just being slow: the handler calls
+        # QApplication.processEvents() mid-body so its own status-label
+        # update repaints before the blocking call - which also let a
+        # SECOND queued tick re-enter the handler while the first was
+        # still mid-flight, two overlapping attempts to open the same
+        # relay COM port, observed on real hardware as "Failed to update
+        # LED switch time: WriteFile failed (PermissionError(13, 'Access
+        # is denied.', ...))". This handler only compares against the
+        # last-APPLIED value and toggles the Confirm button - no hardware
+        # call - so it's safe to fire on every tick.
+        self.switch_time_spinbox.valueChanged.connect(self._on_switch_time_spinbox_changed)
         control_row.addWidget(self.switch_time_spinbox)
+        self.confirm_switch_time_button = QPushButton("Confirm")
+        self.confirm_switch_time_button.setEnabled(False)  # nothing to confirm until the value actually changes
+        self.confirm_switch_time_button.setToolTip(
+            "Apply the LED Switch Time above to the panel(s) - collects however many spin-box "
+            "ticks happened since the last confirm into one hardware call."
+        )
+        self.confirm_switch_time_button.clicked.connect(self._on_confirm_switch_time_clicked)
+        control_row.addWidget(self.confirm_switch_time_button)
 
         control_row.addWidget(QLabel("Frame Sample Interval:"))
         self.frame_sample_interval_spinbox = QSpinBox()
@@ -419,7 +447,17 @@ class ThresholdTuningPage(QWidget):
         # float(), not int(round(...)) - settings.yaml's switch_time_ms can
         # already be fractional, and truncating it here would silently
         # throw that precision away before the operator even sees it.
+        #
+        # Set BEFORE setValue() below, not after - this IS the prefilled
+        # value (settings.yaml's own default, nothing to confirm yet), and
+        # setValue() won't even fire valueChanged if the spinbox already
+        # happens to hold this same value (e.g. revisiting this page with
+        # an unchanged camera) - the explicit refresh call right after
+        # covers exactly that case, same reasoning as the detection-slider
+        # comment a few lines below.
+        self._last_applied_switch_time_ms = float(switch_time_ms)
         self.switch_time_spinbox.setValue(float(switch_time_ms))
+        self._update_confirm_switch_time_button_state()
         short_name = _short_camera_name(camera_name)
         self.stream_a_title_label.setText("{} - {}".format(short_name, stream_a_label))
         self.stream_b_title_label.setText("{} - {}".format(short_name, stream_b_label))
@@ -513,13 +551,45 @@ class ThresholdTuningPage(QWidget):
     def _on_error(self, message):
         self.status_label.setText(message)
 
-    def _on_switch_time_changed(self, value):
+    def _on_switch_time_spinbox_changed(self, value):
+        # Pure UI state - no hardware call. Enables Confirm the moment the
+        # spinbox no longer matches what's actually applied, disables it
+        # once it does (e.g. the operator ticks it back to the current
+        # value, or right after a successful confirm sets
+        # _last_applied_switch_time_ms to match). Safe to fire on every
+        # single spin-arrow tick.
+        self._update_confirm_switch_time_button_state()
+
+    def _update_confirm_switch_time_button_state(self):
+        unconfirmed = self.switch_time_spinbox.value() != self._last_applied_switch_time_ms
+        self.confirm_switch_time_button.setEnabled(unconfirmed)
+
+    def _on_confirm_switch_time_clicked(self):
         # No thread restart needed - LEDPanel is a stateless static-method
         # CLI wrapper (engine/led_panel.py), safe to call from the GUI
         # thread while the preview thread's own capture loop keeps running,
         # since it only talks to the LED panel hardware, never the camera.
-        dual_panel_config = self._context["dual_panel_config"] if self._context is not None else None
+        #
+        # Disabling the spinbox/Confirm/Start for the duration of this call
+        # is what actually prevents the reentrancy that used to cause
+        # "WriteFile failed (PermissionError...)" - this whole method runs
+        # synchronously on the GUI thread, so a disabled Confirm button
+        # structurally cannot be clicked again until this returns (Qt never
+        # delivers clicks to a disabled widget), even though
+        # QApplication.processEvents() below still pumps the event loop for
+        # the status-label repaint.
+        value = self.switch_time_spinbox.value()
+        # Restore Start to whatever it already was afterward, not
+        # unconditionally True - if a preview is currently running, Start
+        # is already disabled by the normal Start/Stop state machine
+        # (_on_start_clicked/_on_preview_thread_finished) and must STAY
+        # disabled once this returns, not get force-re-enabled underneath it.
+        was_start_enabled = self.start_button.isEnabled()
+        self.switch_time_spinbox.setEnabled(False)
+        self.confirm_switch_time_button.setEnabled(False)
+        self.start_button.setEnabled(False)
         try:
+            dual_panel_config = self._context["dual_panel_config"] if self._context is not None else None
             if dual_panel_config is not None:
                 # Unlike the single-panel case, a simple set_speed_ms() call
                 # only ever reaches whichever of the 2 panels is currently
@@ -534,8 +604,16 @@ class ThresholdTuningPage(QWidget):
                 self.status_label.setText("")
             else:
                 LEDPanel.set_speed_ms(value)
+            # Only recorded on SUCCESS - a failed apply leaves this stale,
+            # so Confirm stays enabled below for an easy retry with no need
+            # to nudge the spinbox first.
+            self._last_applied_switch_time_ms = value
         except Exception as exc:
             self.status_label.setText("Failed to update LED switch time: {}".format(exc))
+        finally:
+            self.switch_time_spinbox.setEnabled(True)
+            self.start_button.setEnabled(was_start_enabled)
+            self._update_confirm_switch_time_button_state()
 
     def _on_frame_ready(self, stream_name, image, frame_index, brightness):
         if self._context is None:

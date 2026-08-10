@@ -603,3 +603,64 @@ def test_relay_keepalive_loop_stops_silently_on_write_error():
     # print a traceback and die silently anyway; this does the same without
     # the noise.
     _relay_keepalive_loop(_FailingRelayConnection(), stop_event, interval_s=0.01)
+
+
+# --- _dual_panel_lock: defense-in-depth against two overlapping start_
+# scanning()/stop_scanning() calls both touching the relay's serial
+# connection at once (observed on real hardware via
+# gui/pages/threshold_tuning_page.py's switch-time control, before it was
+# fixed to only apply on an explicit Confirm click, as
+# "WriteFile failed (PermissionError(13, 'Access is denied.', ...))"). ---
+
+def test_dual_panel_lock_is_reentrant():
+    # Must be an RLock, not a plain Lock - start_scanning's dual-panel
+    # branch calls stop_scanning() internally (the double-arm fix), so a
+    # non-reentrant lock would deadlock the exact code path this is meant
+    # to protect. Acquiring it twice on the SAME thread must not block.
+    acquired_twice = dual_panel_control._dual_panel_lock.acquire(timeout=1)
+    try:
+        assert acquired_twice
+        acquired_again = dual_panel_control._dual_panel_lock.acquire(timeout=1)
+        assert acquired_again
+        dual_panel_control._dual_panel_lock.release()
+    finally:
+        dual_panel_control._dual_panel_lock.release()
+
+
+def test_dual_panel_lock_blocks_a_second_thread_until_released():
+    lock = dual_panel_control._dual_panel_lock
+    lock.acquire()
+    second_thread_acquired = threading.Event()
+
+    def try_acquire_from_another_thread():
+        if lock.acquire(timeout=0.3):
+            second_thread_acquired.set()
+            lock.release()
+
+    thread = threading.Thread(target=try_acquire_from_another_thread)
+    try:
+        thread.start()
+        thread.join(timeout=1)
+        # Held by the main thread the whole time this test's own thread
+        # tried and failed to acquire it within its short timeout.
+        assert not second_thread_acquired.is_set()
+    finally:
+        lock.release()
+
+    # Once released, a fresh attempt from another thread succeeds.
+    second_thread_acquired.clear()
+    thread2 = threading.Thread(target=try_acquire_from_another_thread)
+    thread2.start()
+    thread2.join(timeout=1)
+    assert second_thread_acquired.is_set()
+
+
+def test_start_scanning_and_stop_scanning_still_work_together_under_the_lock():
+    # Regression guard for the RLock choice: start_scanning's dual-panel
+    # branch calling stop_scanning() internally (the double-arm fix) must
+    # not deadlock now that both are wrapped in _dual_panel_lock.
+    with patch("engine.dual_panel_control.LEDPanel"), \
+         patch.object(dual_panel_control, "_run_on_both_panels"), \
+         patch.object(dual_panel_control, "_relay_on"), \
+         patch.object(dual_panel_control, "_relay_off"):
+        start_scanning(5, 1, DUAL_PANEL_CONFIG)  # not yet primed -> calls stop_scanning() internally

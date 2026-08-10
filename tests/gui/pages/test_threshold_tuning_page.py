@@ -108,7 +108,140 @@ def test_set_context_prefills_switch_time_spinbox_with_a_fractional_value(qapp):
     assert page.switch_time_spinbox.value() == 0.5
 
 
-def test_set_context_does_not_auto_start_preview(qapp):
+def test_set_context_leaves_confirm_switch_time_disabled(qapp):
+    # Nothing to confirm yet - the spinbox holds exactly the value that was
+    # just prefilled (and, per set_context's own comment, is "applied" as
+    # far as this page knows - nothing has touched hardware yet either way).
+    page = _page_with_context(switch_time_ms=7)
+    assert not page.confirm_switch_time_button.isEnabled()
+
+
+# --- Regression: switch_time_spinbox used to apply to hardware on EVERY
+# valueChanged tick, so clicking the spin arrows from 1 to 5 fired 4
+# separate hardware calls (one per intermediate value) instead of one for
+# the value actually wanted - and worse, could re-enter the handler while a
+# previous call was still mid-flight (observed on real hardware as
+# "WriteFile failed (PermissionError...)" opening the relay's COM port
+# twice at once). Ticking the spinbox must now be pure UI state - only a
+# Confirm click may touch hardware. ---
+
+def test_ticking_switch_time_spinbox_does_not_touch_hardware(qapp):
+    page = _page_with_context(switch_time_ms=1)
+    with patch("gui.pages.threshold_tuning_page.LEDPanel") as mock_led_panel, \
+         patch("gui.pages.threshold_tuning_page.start_scanning") as mock_start_scanning:
+        page.switch_time_spinbox.setValue(5)
+
+        mock_led_panel.set_speed_ms.assert_not_called()
+        mock_start_scanning.assert_not_called()
+
+
+def test_ticking_switch_time_spinbox_enables_confirm_then_disables_if_reverted(qapp):
+    page = _page_with_context(switch_time_ms=1)
+    assert not page.confirm_switch_time_button.isEnabled()
+
+    page.switch_time_spinbox.setValue(5)
+    assert page.confirm_switch_time_button.isEnabled()
+
+    page.switch_time_spinbox.setValue(1)  # back to the last-applied value
+    assert not page.confirm_switch_time_button.isEnabled()
+
+
+def test_confirm_switch_time_click_applies_single_panel(qapp):
+    page = _page_with_context(switch_time_ms=1)
+    page.switch_time_spinbox.setValue(5)
+
+    with patch("gui.pages.threshold_tuning_page.LEDPanel") as mock_led_panel:
+        page._on_confirm_switch_time_clicked()
+
+    mock_led_panel.set_speed_ms.assert_called_once_with(5)
+    # Applied - Confirm goes back to disabled with nothing left to confirm.
+    assert not page.confirm_switch_time_button.isEnabled()
+    assert page.switch_time_spinbox.isEnabled()
+
+
+def test_confirm_switch_time_click_applies_dual_panel(qapp):
+    dual_panel_config = {"stream_a_panel_port": 1, "stream_b_panel_port": 0}
+    page = _page_with_context(switch_time_ms=1, dual_panel_config=dual_panel_config, scan_direction=-1)
+    page.switch_time_spinbox.setValue(5)
+
+    with patch("gui.pages.threshold_tuning_page.start_scanning") as mock_start_scanning:
+        page._on_confirm_switch_time_clicked()
+
+    mock_start_scanning.assert_called_once_with(5, -1, dual_panel_config)
+    assert not page.confirm_switch_time_button.isEnabled()
+
+
+def test_confirm_switch_time_click_collapses_multiple_ticks_into_one_call(qapp):
+    # The actual regression this whole feature exists for: several spin-box
+    # ticks (simulating rapid arrow-clicking from 1 to 5) must still result
+    # in exactly ONE hardware call, with the FINAL settled value - not one
+    # call per intermediate tick.
+    page = _page_with_context(switch_time_ms=1)
+    for value in (2, 3, 4, 5):
+        page.switch_time_spinbox.setValue(value)
+
+    with patch("gui.pages.threshold_tuning_page.LEDPanel") as mock_led_panel:
+        page._on_confirm_switch_time_clicked()
+
+    mock_led_panel.set_speed_ms.assert_called_once_with(5)
+
+
+def test_confirm_switch_time_click_disables_start_spinbox_and_itself_while_applying(qapp):
+    # This IS what actually prevents the reentrancy bug - Confirm structurally
+    # cannot be clicked again while a previous call is still in flight, since
+    # Qt never delivers clicks to a disabled widget, even though the real
+    # handler pumps QApplication.processEvents() mid-call for its own
+    # status-label repaint.
+    page = _page_with_context(switch_time_ms=1)
+    page.switch_time_spinbox.setValue(5)
+    assert page.start_button.isEnabled()  # sanity: enabled beforehand
+
+    observed = {}
+
+    def _check_disabled_mid_call(value):
+        observed["start_enabled"] = page.start_button.isEnabled()
+        observed["spinbox_enabled"] = page.switch_time_spinbox.isEnabled()
+        observed["confirm_enabled"] = page.confirm_switch_time_button.isEnabled()
+
+    with patch("gui.pages.threshold_tuning_page.LEDPanel") as mock_led_panel:
+        mock_led_panel.set_speed_ms.side_effect = _check_disabled_mid_call
+        page._on_confirm_switch_time_clicked()
+
+    assert observed == {"start_enabled": False, "spinbox_enabled": False, "confirm_enabled": False}
+    # ...and restored once the call actually finishes.
+    assert page.start_button.isEnabled()
+    assert page.switch_time_spinbox.isEnabled()
+
+
+def test_confirm_switch_time_click_does_not_re_enable_start_if_a_preview_is_running(qapp):
+    # Start is already disabled by the normal Start/Stop state machine while
+    # a preview is running - confirming a switch-time change mid-run must
+    # restore that, not force Start back on underneath it.
+    page = _started_page(switch_time_ms=1)
+    assert not page.start_button.isEnabled()
+    page.switch_time_spinbox.setValue(5)
+
+    with patch("gui.pages.threshold_tuning_page.LEDPanel"):
+        page._on_confirm_switch_time_clicked()
+
+    assert not page.start_button.isEnabled()
+
+
+def test_confirm_switch_time_click_failure_leaves_confirm_enabled_for_retry(qapp):
+    page = _page_with_context(switch_time_ms=1)
+    page.switch_time_spinbox.setValue(5)
+
+    with patch("gui.pages.threshold_tuning_page.LEDPanel") as mock_led_panel:
+        mock_led_panel.set_speed_ms.side_effect = RuntimeError("WriteFile failed")
+        page._on_confirm_switch_time_clicked()
+
+    assert "Failed to update LED switch time" in page.status_label.text()
+    # Confirm stays enabled - the value was NEVER actually applied, so the
+    # operator can just click Confirm again without touching the spinbox.
+    assert page.confirm_switch_time_button.isEnabled()
+    # Everything else still gets re-enabled despite the failure.
+    assert page.switch_time_spinbox.isEnabled()
+    assert page.start_button.isEnabled()
     page = _page_with_context()
     assert page.preview_thread is None
     assert page.start_button.isEnabled()

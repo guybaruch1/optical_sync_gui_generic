@@ -48,6 +48,21 @@ from contextlib import contextmanager
 
 from engine.led_panel import LEDPanel
 
+# Defense-in-depth against two overlapping start_scanning()/stop_scanning()
+# calls both touching the relay's serial connection at once - observed on
+# real hardware (via gui/pages/threshold_tuning_page.py's switch-time
+# control, before it was fixed to only apply on an explicit Confirm click)
+# as "WriteFile failed (PermissionError(13, 'Access is denied.', ...))":
+# two calls' bodies interleaving via QApplication.processEvents() could
+# both attempt to open the same COM port. The GUI-level fix (Confirm
+# button, disabled for the duration of the call) removes the one known way
+# to trigger this today, but this lock closes the underlying race for any
+# FUTURE caller too, not just that one button. RLock, not a plain Lock -
+# start_scanning's dual-panel branch calls stop_scanning() internally (the
+# double-arm fix), so a non-reentrant lock would deadlock the exact code
+# path this is meant to protect.
+_dual_panel_lock = threading.RLock()
+
 # Tracks whether the dual-panel pair has already been through one
 # successful "priming" arm cycle since the last time switched_to_stream_panel
 # touched them (Calibration/ROI Select's own all_leds_on()/all_leds_off()
@@ -93,7 +108,7 @@ def start_scanning(switch_time_ms, scan_direction, dual_panel_config):
     reconfigured, relay re-closed - any time switch_time_ms/scan_direction
     change, since there's no way to update a single already-running panel
     live the way the single-panel case can (see
-    gui/pages/threshold_tuning_page.py's _on_switch_time_changed)."""
+    gui/pages/threshold_tuning_page.py's _on_confirm_switch_time_clicked)."""
     if dual_panel_config is None:
         LEDPanel.stop()
         LEDPanel.response_time_measurement_mode()
@@ -191,21 +206,22 @@ def start_scanning(switch_time_ms, scan_direction, dual_panel_config):
         # LEDs resume stepping from wherever they last stopped rather than
         # restarting at position 0 - acceptable since nothing in this app
         # depends on a scan always starting from LED 0.
-        settings_unchanged = (
-            _dual_panel_primed["switch_time_ms"] == switch_time_ms
-            and _dual_panel_primed["scan_direction"] == scan_direction
-        )
-        if _dual_panel_primed["primed"] and settings_unchanged:
-            _relay_on(dual_panel_config)
-        elif _dual_panel_primed["primed"]:
-            _arm_once()
-        else:
-            _arm_once()
-            stop_scanning(dual_panel_config)
-            _arm_once()
-            _dual_panel_primed["primed"] = True
-        _dual_panel_primed["switch_time_ms"] = switch_time_ms
-        _dual_panel_primed["scan_direction"] = scan_direction
+        with _dual_panel_lock:
+            settings_unchanged = (
+                _dual_panel_primed["switch_time_ms"] == switch_time_ms
+                and _dual_panel_primed["scan_direction"] == scan_direction
+            )
+            if _dual_panel_primed["primed"] and settings_unchanged:
+                _relay_on(dual_panel_config)
+            elif _dual_panel_primed["primed"]:
+                _arm_once()
+            else:
+                _arm_once()
+                stop_scanning(dual_panel_config)
+                _arm_once()
+                _dual_panel_primed["primed"] = True
+            _dual_panel_primed["switch_time_ms"] = switch_time_ms
+            _dual_panel_primed["scan_direction"] = scan_direction
 
 
 def stop_scanning(dual_panel_config):
@@ -234,8 +250,9 @@ def stop_scanning(dual_panel_config):
         # docstring history), so --stop's extra "stop" behavior was always
         # redundant here anyway. reset() still returns the LEDs to a clean
         # starting position for the next run, without poisoning it.
-        _relay_off()
-        _run_on_both_panels(dual_panel_config, LEDPanel.reset)
+        with _dual_panel_lock:
+            _relay_off()
+            _run_on_both_panels(dual_panel_config, LEDPanel.reset)
 
 
 def _run_on_both_panels(dual_panel_config, action):

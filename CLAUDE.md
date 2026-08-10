@@ -251,9 +251,9 @@ nothing has actually swept. Safe to call even when nothing was ever armed:
 `_relay_off()` no-ops when the relay was never on, and sending an extra
 `reset()` to an already-reset panel is harmless (confirmed safe by the
 sweep's own `reset_twice_then_baseline` variant). This also makes
-`gui/pages/threshold_tuning_page.py`'s `_on_switch_time_changed` - which
-re-runs `start_scanning()` without an intervening `stop_scanning()` - correct
-by construction instead of only working via `_relay_on()`'s own
+`gui/pages/threshold_tuning_page.py`'s `_on_confirm_switch_time_clicked` -
+which re-runs `start_scanning()` without an intervening `stop_scanning()` -
+correct by construction instead of only working via `_relay_on()`'s own
 stale-connection guard. Keep the `switched_to_stream_panel` fix too - it's
 still correct on its own terms and cheap, genuine defense-in-depth alongside
 this one, not a replacement for it.
@@ -344,13 +344,52 @@ reconfigure.
 
 Any GENUINE panel config change (switch time actually different from last
 time) needs the full provisioning re-run - see `gui/pages/threshold_tuning_page.py`'s
-`_on_switch_time_changed`, which branches on `dual_panel_config` to either
-call `LEDPanel.set_speed_ms()` directly and instantly (single-panel) or
-re-run `start_scanning()` (dual-panel - fast if the settings match what's
+`_on_confirm_switch_time_clicked`, which branches on `dual_panel_config` to
+either call `LEDPanel.set_speed_ms()` directly and instantly (single-panel)
+or re-run `start_scanning()` (dual-panel - fast if the settings match what's
 already configured, a full reconfigure otherwise); since this re-runs
 `start_scanning()` without an intervening `stop_scanning()`, `_relay_on()`
-closes any stale
-still-open connection from a previous call before opening its own.
+closes any stale still-open connection from a previous call before opening
+its own.
+
+**The switch-time spinbox applies on an explicit Confirm click, not on
+every `valueChanged` tick.** It used to call
+`start_scanning()`/`LEDPanel.set_speed_ms()` live on every tick - so
+clicking the spin arrows from 1 to 5 fired 4 separate hardware calls
+(one per intermediate value) instead of one for the value actually wanted.
+Worse: the handler calls `QApplication.processEvents()` mid-body so its
+own "Reconfiguring..." status-label update repaints before the blocking
+call - which also let a *second* queued tick re-enter the handler while
+the first was still mid-flight. `engine/dual_panel_control.py`'s
+`_relay_connection` (the one open `serial.Serial` handle to the relay's
+COM port) had no lock protecting it from concurrent access - two
+overlapping attempts to open/write the same COM port produced, on real
+hardware, `Failed to update LED switch time: WriteFile failed
+(PermissionError(13, 'Access is denied.', ...))`.
+
+`switch_time_spinbox.valueChanged` now only toggles a "Confirm" button's
+enabled state (comparing against `_last_applied_switch_time_ms`) - no
+hardware call. `confirm_switch_time_button.clicked` is what actually
+applies, collecting however many ticks happened since the last confirm
+into exactly one hardware call with the final settled value. The apply
+itself disables the spinbox, Confirm, and `start_button` for its own
+duration (restoring `start_button` to whatever it already was, not
+unconditionally enabling it, since a preview already running keeps it
+disabled independently) - since the whole call is synchronous on the GUI
+thread, this structurally prevents the reentrancy that caused the bug
+above: Confirm cannot be clicked again until the first call returns, even
+though `QApplication.processEvents()` still runs mid-call for the
+status-label repaint. A failed apply leaves `_last_applied_switch_time_ms`
+untouched, so
+Confirm stays enabled for an easy retry with no need to nudge the spinbox
+first.
+
+`engine/dual_panel_control.py` also gained a module-level `_dual_panel_lock`
+(a `threading.RLock` - re-entrant because `start_scanning`'s dual-panel
+branch already calls `stop_scanning()` internally) wrapping both
+functions' dual-panel bodies, as defense-in-depth: the GUI fix removes the
+one known way to trigger the reentrancy today, but the lock closes the
+underlying race for any future caller too.
 
 **Calibration and ROI Select do NOT use `turn_all_leds_on`/`off`** for the
 dual-panel case - capturing both streams' on/off frame from one
