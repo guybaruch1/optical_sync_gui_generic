@@ -139,6 +139,30 @@ def test_on_device_chosen_succeeds_when_test_matches(qapp, monkeypatch):
     assert window.stream_config_page.pick_b == COLOR0
 
 
+def test_on_device_chosen_passes_camera_sync_enable_depth_to_stream_config(qapp, monkeypatch):
+    # Read here (before calibration/tuning even exist yet) so Stream
+    # Select's own pairing-quality preview reflects the same IR/RGB sync fix
+    # the real run downstream will use.
+    settings = _minimal_settings({"Intel RealSense D455": [_ir_vs_rgb_test()]})
+    settings["camera_sync"] = {"enable_depth_for_ir_sync": False}
+    window = _make_window(qapp, settings)
+    monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [IR1, COLOR0])
+
+    window._on_device_chosen("SN123", "Intel RealSense D455")
+
+    assert window.stream_config_page._enable_depth_for_ir_sync is False
+
+
+def test_on_device_chosen_defaults_camera_sync_enable_depth_when_section_absent(qapp, monkeypatch):
+    settings = _minimal_settings({"Intel RealSense D455": [_ir_vs_rgb_test()]})
+    window = _make_window(qapp, settings)
+    monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [IR1, COLOR0])
+
+    window._on_device_chosen("SN123", "Intel RealSense D455")
+
+    assert window.stream_config_page._enable_depth_for_ir_sync is True
+
+
 def test_on_device_chosen_still_shows_no_entry_error_for_unconfigured_camera(qapp, monkeypatch):
     settings = _minimal_settings({})
     window = _make_window(qapp, settings)
@@ -289,6 +313,53 @@ def test_on_tuning_done_reads_stream_xy_live_from_threshold_tuning_page_not_a_st
         window._on_tuning_done()
 
     assert window.live_session_page._context["stream_a_xy"] is retuned_stream_a_xy
+
+
+# --- settings.yaml camera_sync: read-through. Deliberately tolerant of a
+# hand-maintained settings.yaml that predates the section entirely (note
+# _full_settings above has no camera_sync key at all). ---
+
+def test_camera_sync_falls_back_to_defaults_when_section_absent(qapp, monkeypatch, tmp_path):
+    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window._on_tuning_done()
+
+    ctx = window.live_session_page._context
+    assert ctx["enable_depth_for_ir_sync"] is True
+    assert ctx["hardware_reset_before_start"] is False
+    assert ctx["hardware_reset_settle_s"] == 8.0
+
+
+def test_camera_sync_settings_are_read_and_passed_to_live_session(qapp, monkeypatch, tmp_path):
+    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+    window.settings["camera_sync"] = {
+        "enable_depth_for_ir_sync": False,
+        "hardware_reset_before_start": True,
+        "hardware_reset_settle_s": 2.5,
+    }
+
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window._on_tuning_done()
+
+    ctx = window.live_session_page._context
+    assert ctx["enable_depth_for_ir_sync"] is False
+    assert ctx["hardware_reset_before_start"] is True
+    assert ctx["hardware_reset_settle_s"] == 2.5
+
+
+def test_camera_sync_enable_depth_for_ir_sync_also_reaches_threshold_tuning(qapp, monkeypatch, tmp_path):
+    # The preview must use the same sync fix the real run will, or it could
+    # show a different inter-sensor offset than the session it's previewing.
+    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+    window.settings["camera_sync"] = {"enable_depth_for_ir_sync": False}
+
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+
+    assert window.threshold_tuning_page._context["enable_depth_for_ir_sync"] is False
 
 
 def test_on_tuning_done_passes_tuned_per_stream_thresholds_to_live_session(qapp, monkeypatch, tmp_path):

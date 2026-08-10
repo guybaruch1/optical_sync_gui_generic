@@ -13,13 +13,19 @@ class StreamPreviewThread(QThread):
     frame_ready = Signal(object)
     error = Signal(str)
 
-    def __init__(self, ctx, device_serial, pick_a, pick_b, display_stride=10, parent=None):
+    def __init__(self, ctx, device_serial, pick_a, pick_b, display_stride=10,
+                 enable_depth_for_ir_sync=True, parent=None):
         super().__init__(parent)
         self.ctx = ctx
         self.device_serial = device_serial
         self.pick_a = pick_a
         self.pick_b = pick_b
         self.display_stride = display_stride
+        # Kept in step with SessionEngineThread's/ThresholdPreviewThread's own
+        # setting so this pairing-quality preview shows the same IR/RGB sync
+        # fix the real run downstream will use - see
+        # ContinuousCapture._depth_sync_stream.
+        self.enable_depth_for_ir_sync = enable_depth_for_ir_sync
         self._stop_requested = False
         self._capture = None
 
@@ -28,7 +34,10 @@ class StreamPreviewThread(QThread):
 
     def run(self):
         try:
-            self._capture = ContinuousCapture(self.device_serial, self.pick_a, self.pick_b)
+            self._capture = ContinuousCapture(
+                self.device_serial, self.pick_a, self.pick_b,
+                enable_depth_for_ir_sync=self.enable_depth_for_ir_sync,
+            )
             self._capture.start()
 
             bundle_index = 0

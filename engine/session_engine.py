@@ -7,6 +7,32 @@ processing, metric computation, session buffering) already lives in
 AcquisitionLoop/TestSession/Metric, which are unit-tested without Qt or
 hardware. This class exists only so that logic can run on a background
 thread and reach the UI safely.
+
+Two settings.yaml camera_sync: knobs land here because they change how the
+CAMERA is brought up, which shifts the very inter-sensor offset this app
+measures:
+
+- enable_depth_for_ir_sync (passed down to ContinuousCapture - see its
+  _depth_sync_stream/_build_config). This is the CONFIRMED root-cause fix:
+  on real hardware, rs.pipeline() gives no control over the order it
+  internally OPENS the two sensors, and that order decides whether IR and
+  RGB come out synchronized (RGB-before-IR produces a fixed ~11.3ms offset;
+  IR-before-RGB, or co-enabling depth alongside both regardless of order,
+  measures the true ~3.5ms). Co-enabling depth matches Intel's documented
+  firmware requirement that depth and IR be configured together - see
+  CLAUDE.md's "IR/RGB sync depends on stream open order" section for the
+  full story, including the earlier color_stream_first/enable-ORDER
+  experiment this replaced (proven ineffective: config.enable_stream()
+  order does not influence the pipeline's internal open order at all).
+  Costs USB bandwidth (confirmed on real hardware to increase frame drops),
+  so it stays a settings.yaml-driven toggle rather than an unconditional
+  default.
+- hardware_reset_before_start/hardware_reset_settle_s (applied in run()
+  before anything else touches the device) - kept as an independent manual
+  recovery knob (e.g. after a camera left in a bad state by a stuck
+  auto-exposure round trip - see engine/streams.py's enable_auto_exposure),
+  even though it was also A/B-tested against the ~11.3ms/~3.5ms discrepancy
+  above and, on its own, did not change the result.
 """
 
 import pyrealsense2 as rs
@@ -41,7 +67,9 @@ class SessionEngineThread(QThread):
     def __init__(self, ctx, device_serial, pick_a, pick_b, camera_controls,
                  test_session, stream_a_xy=None, stream_b_xy=None, neighborhood_size=5,
                  scan_direction=None, switch_time_ms=None,
-                 display_stride=10, position_gap_metric=None, dual_panel_config=None, parent=None):
+                 display_stride=10, position_gap_metric=None, dual_panel_config=None,
+                 enable_depth_for_ir_sync=True, hardware_reset_before_start=False,
+                 hardware_reset_settle_s=8.0, parent=None):
         super().__init__(parent)
         self.ctx = ctx
         self.device_serial = device_serial
@@ -50,6 +78,12 @@ class SessionEngineThread(QThread):
         self.camera_controls = camera_controls
         self.test_session = test_session
         self.dual_panel_config = dual_panel_config
+        # Two independent inter-sensor-sync knobs, both settings.yaml-driven
+        # (camera_sync:) - see ContinuousCapture._depth_sync_stream and
+        # run()'s reset block below for what each actually does and why.
+        self.enable_depth_for_ir_sync = enable_depth_for_ir_sync
+        self.hardware_reset_before_start = hardware_reset_before_start
+        self.hardware_reset_settle_s = hardware_reset_settle_s
         self.stream_a_xy = stream_a_xy
         self.stream_b_xy = stream_b_xy
         self.neighborhood_size = neighborhood_size
@@ -99,6 +133,20 @@ class SessionEngineThread(QThread):
         import time
 
         try:
+            if self.hardware_reset_before_start:
+                # A manual recovery knob, independent of enable_depth_for_ir_sync
+                # above - e.g. clears a camera left with a stuck manual
+                # exposure/gain from before engine/streams.py's
+                # enable_auto_exposure was fixed to restore both on switch-back.
+                # A reset invalidates the current device handle and drops the
+                # device off USB for several seconds, so the handle MUST be
+                # re-acquired afterwards rather than reused.
+                self.error.emit("Hardware-resetting the camera (settling for {:.0f}s)...".format(
+                    self.hardware_reset_settle_s
+                ))
+                find_device_by_serial(self.ctx, self.device_serial).hardware_reset()
+                time.sleep(self.hardware_reset_settle_s)
+
             device = find_device_by_serial(self.ctx, self.device_serial)
             groups = resolve_and_group(device, self.pick_a, self.pick_b)
             # Applies the ONE global self.camera_controls dict (from Stream Select)
@@ -143,7 +191,10 @@ class SessionEngineThread(QThread):
             if self.switch_time_ms is not None:
                 start_scanning(self.switch_time_ms, self.scan_direction, self.dual_panel_config)
 
-            self._capture = ContinuousCapture(self.device_serial, self.pick_a, self.pick_b)
+            self._capture = ContinuousCapture(
+                self.device_serial, self.pick_a, self.pick_b,
+                enable_depth_for_ir_sync=self.enable_depth_for_ir_sync,
+            )
             self._capture.start()
             self._start_time = time.time()
 

@@ -383,7 +383,7 @@ class ThresholdTuningPage(QWidget):
                      stream_a_otsu_threshold, stream_b_otsu_threshold,
                      min_blob_area, row_gap_px, calibration_neighborhood_size,
                      stream_a_positions, stream_b_positions,
-                     dual_panel_config=None):
+                     dual_panel_config=None, enable_depth_for_ir_sync=True):
         self._context = dict(
             ctx=ctx, device_serial=device_serial, pick_a=pick_a, pick_b=pick_b, camera_controls=camera_controls,
             stream_a_xy=stream_a_xy, stream_b_xy=stream_b_xy,
@@ -391,6 +391,7 @@ class ThresholdTuningPage(QWidget):
             stream_b_on=stream_b_on, stream_b_off=stream_b_off,
             num_leds=num_leds, neighborhood_size=neighborhood_size, scan_direction=scan_direction,
             stream_a_roi=stream_a_roi, stream_b_roi=stream_b_roi, dual_panel_config=dual_panel_config,
+            enable_depth_for_ir_sync=enable_depth_for_ir_sync,
             # LED Detection Threshold Tuning's own state - config_path/
             # stream_a_positions/stream_b_positions are what
             # _on_continue_clicked persists via update_config_leds;
@@ -451,6 +452,7 @@ class ThresholdTuningPage(QWidget):
             switch_time_ms=self.switch_time_spinbox.value(),
             display_stride=self.frame_sample_interval_spinbox.value(),
             dual_panel_config=ctx["dual_panel_config"],
+            enable_depth_for_ir_sync=ctx["enable_depth_for_ir_sync"],
         )
         self.preview_thread.frame_ready.connect(self._on_frame_ready)
         self.preview_thread.error.connect(self._on_error)

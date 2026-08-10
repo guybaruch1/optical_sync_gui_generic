@@ -438,11 +438,57 @@ def capture_synced_frame_pair(groups, on_both_streaming=None, settle_frames=15, 
 def enable_auto_exposure(sensor):
     """Returns True/False so callers can warn the operator when the sensor
     doesn't support the option instead of silently proceeding with
-    auto-exposure left however it was."""
-    if sensor.supports(rs.option.enable_auto_exposure):
-        sensor.set_option(rs.option.enable_auto_exposure, 1)
-        return True
-    return False
+    auto-exposure left however it was.
+
+    Also restores exposure/gain to the sensor's OWN factory defaults
+    (get_option_range().default) before re-enabling auto, but ONLY when the
+    sensor is actually coming FROM manual mode (enable_auto_exposure reads
+    back as 0 right now) - set_manual_exposure writes THREE options
+    (enable_auto_exposure=0, exposure, gain), so flipping only the auto flag
+    back on used to leave the manually-set exposure and especially gain
+    still written into the camera. That's a real, observed failure: a
+    manual->auto round trip in Stream Config left the sensor auto-exposing
+    with the UI's default gain of 16 still stuck in it, dark enough that
+    Calibration's Otsu blob detection stopped finding the LEDs at all - and
+    because the value lives in the CAMERA, not the app, it survived app
+    restarts and only a power-cycle/hardware_reset cleared it.
+
+    The was-manual GATE matters just as much as the restore itself. This
+    function is called unconditionally on every apply point (ROI Select,
+    Calibration, Threshold Tuning, Live Session) whenever the operator has
+    "Auto exposure" selected - not just on an actual Manual->Auto
+    transition. An earlier version restored the defaults unconditionally
+    every time, which is a real regression on a sensor that's ALREADY
+    auto-exposing correctly: forcibly resetting exposure/gain back to a
+    cold default and letting auto-exposure re-converge from scratch, on
+    every single run, can leave it under-converged within
+    calibration.settle_frames' short settle window even though it would
+    have stayed correctly exposed if left alone - producing an
+    intermittently underexposed image (LEDs near the detection threshold
+    dropping out) rather than the original bug's total blackout. Restoring
+    only on an actual mode transition leaves an already-auto sensor
+    completely undisturbed, matching every apply point that doesn't
+    actually need to fix anything.
+
+    Restoring the SDK-reported factory default (rather than snapshotting
+    whatever the value was before this app first touched it) keeps this
+    function stateless, and matches what the power-cycle that people reach
+    for as a workaround actually gives you. Auto-exposure re-derives its own
+    working value immediately afterwards, so the restored default is only
+    ever a starting point, never the value a run actually uses."""
+    if not sensor.supports(rs.option.enable_auto_exposure):
+        return False
+    was_manual = sensor.get_option(rs.option.enable_auto_exposure) == 0
+    if was_manual:
+        # Written BEFORE re-enabling auto, deliberately: on some sensors
+        # writing exposure while auto-exposure is on implicitly turns auto
+        # back off, so doing it in this order can't leave auto disabled
+        # behind our back.
+        for option in (rs.option.exposure, rs.option.gain):
+            if sensor.supports(option):
+                sensor.set_option(option, sensor.get_option_range(option).default)
+    sensor.set_option(rs.option.enable_auto_exposure, 1)
+    return True
 
 
 def set_emitter_enabled(sensor, enabled):
@@ -462,13 +508,56 @@ def set_manual_exposure(sensor, exposure, gain):
 
 
 class ContinuousCapture:
-    def __init__(self, device_serial, pick_a, pick_b):
+    def __init__(self, device_serial, pick_a, pick_b, enable_depth_for_ir_sync=True):
         self.device_serial = device_serial
         self.pick_a = pick_a
         self.pick_b = pick_b
+        # See _depth_sync_stream/_build_config - whether to co-enable the
+        # stereo module's depth stream to fix IR/RGB sync.
+        self.enable_depth_for_ir_sync = enable_depth_for_ir_sync
+        # Set on start() to whether a depth stream was actually requested
+        # (self._depth_sync_stream() is not None) - not a resolve/success
+        # check, just what start() attempted, for callers to report.
+        self.depth_sync_active = False
         self._pipeline = None
 
-    def start(self):
+    def _depth_sync_stream(self):
+        """Returns (width, height, fps) for the DEPTH stream to co-enable, or
+        None if there's nothing to fix.
+
+        Real-hardware finding (see CLAUDE.md's "IR/RGB sync depends on stream
+        OPEN order" section): rs.pipeline() gives no control over the order it
+        internally OPENS the two sensors, and that order decides whether IR
+        and RGB come out synchronized - RGB-before-IR produces a fixed
+        multi-ms offset (this app measured ~11.3ms) where IR-before-RGB (or a
+        standalone reference script that happened to enable color first, but
+        also always had depth+IR firmware-linked from an earlier prototype)
+        measured ~3.5ms. Co-enabling depth alongside IR+RGB fixes this
+        regardless of enable order, matching Intel's documented firmware
+        requirement that depth and IR be configured together - the pipeline
+        satisfies that requirement internally in an order we can't see when
+        only IR (not depth) is requested; enabling depth explicitly removes
+        the ambiguity.
+
+        None when the setting is off, or when NEITHER pick is infrared (a
+        color+color / Dual-RGB pairing has no stereo module in play at all -
+        there's nothing for a depth stream to sync against).
+
+        Only the FIRST infrared pick's own (width, height, fps) is ever
+        returned, even for an IR+IR pairing - one depth stream, not two.
+        Depth intentionally matches that pick's own resolution/fps rather
+        than something smaller to save bandwidth: depth and IR come off one
+        stereo readout and the firmware requires them configured together, so
+        a mismatched-resolution depth stream would likely fail to resolve at
+        all."""
+        if not self.enable_depth_for_ir_sync:
+            return None
+        for pick in (self.pick_a, self.pick_b):
+            if pick["stream_type"] == rs.stream.infrared:
+                return pick["width"], pick["height"], pick["fps"]
+        return None
+
+    def _build_config(self):
         config = rs.config()
         # Bind the pipeline to the exact physical device chosen in Device
         # Select - without this, with more than one RealSense camera
@@ -479,6 +568,26 @@ class ContinuousCapture:
         config.enable_device(self.device_serial)
         for pick in (self.pick_a, self.pick_b):
             config.enable_stream(pick["stream_type"], pick["stream_index"], pick["width"], pick["height"], pick["format"], pick["fps"])
+        depth_stream = self._depth_sync_stream()
+        if depth_stream is not None:
+            width, height, fps = depth_stream
+            config.enable_stream(rs.stream.depth, 0, width, height, rs.format.z16, fps)
+        return config
+
+    def start(self):
+        # Deliberately as simple as the real-hardware-verified version this
+        # matches: build one config (depth included whenever an infrared
+        # pick is present and the setting is on) and start it directly - NO
+        # can_resolve() pre-check/fallback. An earlier version added exactly
+        # that speculative probe-then-fallback, and it silently undid this
+        # fix: can_resolve() returning a false negative for a depth+IR+RGB
+        # combination that pipeline.start() itself handles fine falls back to
+        # the no-depth config with no error raised, which is indistinguishable
+        # from the fix simply not being applied. If a config genuinely can't
+        # start, let pipeline.start() raise - that reaches the operator as a
+        # real error instead of a silent, wrong fallback.
+        self.depth_sync_active = self._depth_sync_stream() is not None
+        config = self._build_config()
         self._pipeline = rs.pipeline()
         self._pipeline.start(config)
 

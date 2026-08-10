@@ -4,7 +4,7 @@ import time
 import pytest
 import pyrealsense2 as rs
 from engine.streams import (
-    list_devices, capture_synced_frame_pair,
+    list_devices, capture_synced_frame_pair, ContinuousCapture,
     enable_auto_exposure,
     list_video_stream_options_from_device, resolve_and_group, group_for_pick,
     set_emitter_enabled, set_manual_exposure, stream_slug,
@@ -12,20 +12,49 @@ from engine.streams import (
 )
 
 
-class FakeOptionSensor:
-    """Fake sensor exposing just enough of the .supports()/.set_option() API
-    for enable_auto_exposure/set_emitter_enabled/set_manual_exposure - real
-    pyrealsense2 sensors aren't constructible without hardware."""
+class FakeOptionRange:
+    """Stand-in for pyrealsense2's option_range - only .default is read."""
 
-    def __init__(self, supported_options):
+    def __init__(self, default):
+        self.default = default
+
+
+class FakeOptionSensor:
+    """Fake sensor exposing just enough of the .supports()/.set_option()/
+    .get_option()/.get_option_range() API for enable_auto_exposure/
+    set_emitter_enabled/set_manual_exposure - real pyrealsense2 sensors
+    aren't constructible without hardware.
+
+    initial_values seeds what get_option() reads back BEFORE anything is
+    ever set_option()'d on this fake - e.g. {enable_auto_exposure: 0} to
+    represent a sensor that starts out already in manual mode. Once an
+    option IS set_option()'d, get_option() reads that value back instead
+    (matching a real sensor). Falls back to 1 for anything neither seeded
+    nor written, since "already auto-exposing" is the common case most
+    tests don't care about."""
+
+    def __init__(self, supported_options, option_defaults=None, initial_values=None):
         self._supported_options = set(supported_options)
+        self._option_defaults = option_defaults or {}
+        self._initial_values = initial_values or {}
         self.set_options = {}
+        # Ordered log of every write, so a test can assert on ORDER (e.g. that
+        # exposure/gain are restored BEFORE auto-exposure is switched on),
+        # which set_options alone can't show.
+        self.writes = []
 
     def supports(self, option):
         return option in self._supported_options
 
     def set_option(self, option, value):
         self.set_options[option] = value
+        self.writes.append((option, value))
+
+    def get_option(self, option):
+        return self.set_options.get(option, self._initial_values.get(option, 1))
+
+    def get_option_range(self, option):
+        return FakeOptionRange(self._option_defaults.get(option, 0))
 
 
 def test_enable_auto_exposure_sets_option_on_when_supported():
@@ -40,6 +69,79 @@ def test_enable_auto_exposure_returns_false_when_unsupported():
     sensor = FakeOptionSensor(supported_options=set())
     assert enable_auto_exposure(sensor) is False
     assert sensor.set_options == {}
+
+
+# --- Regression: switching Stream Config back to "Auto exposure" must undo
+# what set_manual_exposure wrote, not just flip the auto flag. Leaving the
+# manual gain behind (the UI defaults it to 16) left the camera dark enough
+# that Calibration's Otsu blob detection stopped finding LEDs at all - and
+# since the value lives in the CAMERA it survived app restarts. ---
+
+def _full_exposure_sensor(currently_manual=False):
+    initial_values = {rs.option.enable_auto_exposure: 0} if currently_manual else None
+    return FakeOptionSensor(
+        supported_options={rs.option.enable_auto_exposure, rs.option.exposure, rs.option.gain},
+        option_defaults={rs.option.exposure: 7500, rs.option.gain: 64},
+        initial_values=initial_values,
+    )
+
+
+def test_enable_auto_exposure_restores_exposure_and_gain_defaults():
+    sensor = _full_exposure_sensor()
+    set_manual_exposure(sensor, exposure=8500, gain=16)  # what the UI defaults to - now genuinely manual
+
+    assert enable_auto_exposure(sensor) is True
+
+    assert sensor.set_options[rs.option.exposure] == 7500  # factory default, not 8500
+    assert sensor.set_options[rs.option.gain] == 64        # factory default, not 16
+    assert sensor.set_options[rs.option.enable_auto_exposure] == 1
+
+
+def test_enable_auto_exposure_restores_defaults_before_switching_auto_on():
+    # Order is load-bearing: on some sensors writing exposure while auto is
+    # ON implicitly turns auto back off, which would leave auto disabled.
+    sensor = _full_exposure_sensor(currently_manual=True)
+
+    enable_auto_exposure(sensor)
+
+    written_options = [option for option, _ in sensor.writes]
+    assert written_options[-1] == rs.option.enable_auto_exposure
+    assert rs.option.exposure in written_options[:-1]
+    assert rs.option.gain in written_options[:-1]
+
+
+def test_enable_auto_exposure_skips_unsupported_exposure_gain_options():
+    # A sensor supporting auto-exposure but not manual exposure/gain must
+    # still get auto enabled, with no attempt to restore what it can't set.
+    sensor = FakeOptionSensor(supported_options={rs.option.enable_auto_exposure},
+                              initial_values={rs.option.enable_auto_exposure: 0})
+
+    assert enable_auto_exposure(sensor) is True
+
+    assert sensor.set_options == {rs.option.enable_auto_exposure: 1}
+
+
+def test_enable_auto_exposure_does_not_disturb_exposure_gain_when_already_auto():
+    # Regression: an earlier version restored exposure/gain unconditionally
+    # on EVERY call, even when the sensor was already auto-exposing
+    # correctly. This function is called on EVERY apply point (ROI Select,
+    # Calibration, Threshold Tuning, Live Session) whenever "Auto exposure"
+    # is selected - not just on an actual Manual->Auto transition - so that
+    # forced every single Calibration/ROI Select run to reset exposure/gain
+    # to a cold default and let auto-exposure re-converge from scratch,
+    # which could leave it under-converged within calibration's short
+    # settle_frames window even though the sensor would have stayed
+    # correctly exposed if left alone. Symptom on real hardware: scattered,
+    # intermittent LED detection dropouts (not the original bug's total
+    # blackout) that came back on every run, not just after a Manual round
+    # trip.
+    sensor = _full_exposure_sensor()  # currently_manual=False - already auto
+
+    assert enable_auto_exposure(sensor) is True
+
+    assert rs.option.exposure not in sensor.set_options
+    assert rs.option.gain not in sensor.set_options
+    assert sensor.set_options[rs.option.enable_auto_exposure] == 1
 
 
 def test_list_devices_lists_any_device_regardless_of_sensor_names():
@@ -644,3 +746,70 @@ def test_resolve_camera_tests_preserves_config_order_for_tests_and_options():
     resolved = resolve_camera_tests(device_options, parsed_tests)
 
     assert [o["pick_a"]["fps"] for o in resolved[0]["options"]] == [60, 30]
+
+
+# --- ContinuousCapture._depth_sync_stream: which DEPTH geometry (if any) to
+# co-enable alongside the two picked streams. Pure/testable even though
+# ContinuousCapture's real rs.pipeline() internals are hardware-only by
+# design. Motivated by a real-hardware finding: rs.pipeline() gives no
+# control over the order it internally OPENS the two sensors, and that order
+# decides whether IR and RGB come out synchronized (RGB-before-IR produced a
+# fixed ~11.3ms offset; co-enabling depth fixed it regardless of open order,
+# matching Intel's documented firmware requirement that depth and IR be
+# configured together). This REPLACES an earlier color_stream_first/enable-
+# ORDER knob (see test_ordered_picks_* in this file's git history) that was
+# proven ineffective on real hardware - config.enable_stream() call order
+# does not influence the pipeline's internal open order at all. ---
+
+def _ir_pick(stream_index=1, width=1280, height=720, fps=30):
+    return {"stream_type": rs.stream.infrared, "stream_index": stream_index,
+            "width": width, "height": height, "fps": fps, "format": rs.format.y8}
+
+
+def _color_pick(stream_index=0, width=1280, height=720, fps=30):
+    return {"stream_type": rs.stream.color, "stream_index": stream_index,
+            "width": width, "height": height, "fps": fps, "format": rs.format.bgr8}
+
+
+def test_depth_sync_stream_returns_the_infrared_picks_own_geometry():
+    ir = _ir_pick(width=848, height=480, fps=60)
+    capture = ContinuousCapture("SN1", ir, _color_pick(), enable_depth_for_ir_sync=True)
+    assert capture._depth_sync_stream() == (848, 480, 60)
+
+
+def test_depth_sync_stream_is_order_independent():
+    ir = _ir_pick(width=848, height=480, fps=60)
+    capture = ContinuousCapture("SN1", _color_pick(), ir, enable_depth_for_ir_sync=True)
+    assert capture._depth_sync_stream() == (848, 480, 60)
+
+
+def test_depth_sync_stream_returns_only_one_geometry_for_two_infrared_streams():
+    # Duplicate-enable guard: a second identical config.enable_stream(depth)
+    # call risks a real-hardware error (see
+    # tools/panel_drift/panel_drift_measure.py's own comment about exactly
+    # this hazard for a duplicated pick) - one depth stream, not two.
+    pick_a, pick_b = _ir_pick(1), _ir_pick(2)
+    capture = ContinuousCapture("SN1", pick_a, pick_b, enable_depth_for_ir_sync=True)
+    assert capture._depth_sync_stream() == (pick_a["width"], pick_a["height"], pick_a["fps"])
+
+
+def test_depth_sync_stream_is_none_for_color_only_pairing():
+    # No stereo module in play at all (Dual RGB) - nothing for depth to sync.
+    capture = ContinuousCapture("SN1", _color_pick(0), _color_pick(1), enable_depth_for_ir_sync=True)
+    assert capture._depth_sync_stream() is None
+
+
+def test_depth_sync_stream_is_none_when_disabled():
+    capture = ContinuousCapture("SN1", _ir_pick(), _color_pick(), enable_depth_for_ir_sync=False)
+    assert capture._depth_sync_stream() is None
+
+
+def test_continuous_capture_never_changes_which_pick_is_stream_a():
+    # Load-bearing safety property carried over from the old enable-order
+    # knob: _get_frame still resolves stream_a/stream_b from pick_a/pick_b,
+    # so constructing/probing depth sync must never touch that mapping.
+    pick_a, pick_b = _ir_pick(), _color_pick()
+    capture = ContinuousCapture("SN1", pick_a, pick_b, enable_depth_for_ir_sync=True)
+    capture._depth_sync_stream()
+    assert capture.pick_a is pick_a
+    assert capture.pick_b is pick_b

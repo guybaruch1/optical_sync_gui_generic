@@ -131,6 +131,14 @@ class MainWindow(QMainWindow):
             self.ctx, serial, usable_tests,
             preferred_a=camera_settings["stream_a"], preferred_b=camera_settings["stream_b"],
             preferred_test_name=self.gui_state.last_test_name,
+            # settings.yaml camera_sync.enable_depth_for_ir_sync - read here
+            # (rather than only later in _on_calibration_done, where the rest
+            # of camera_sync is read) so Stream Select's own pairing-quality
+            # preview shows the same IR/RGB sync fix the real run downstream
+            # will use.
+            enable_depth_for_ir_sync=(self.settings.get("camera_sync") or {}).get(
+                "enable_depth_for_ir_sync", True
+            ),
         )
         self.stack.setCurrentWidget(self.stream_config_page)
 
@@ -220,6 +228,17 @@ class MainWindow(QMainWindow):
         stream_b_xy = np.array([stream_b_positions[i][:2] for i in stream_b_ids])
 
         num_leds = self.settings["test"]["num_leds"]
+        # .get() with defaults rather than a hard lookup - an existing
+        # hand-maintained settings.yaml predating this section shouldn't
+        # break, it just gets the same behavior as leaving both off (except
+        # enable_depth_for_ir_sync, which is safe enough to default on - see
+        # that section's own comment in settings.yaml).
+        camera_sync = self.settings.get("camera_sync") or {}
+        camera_sync = {
+            "enable_depth_for_ir_sync": camera_sync.get("enable_depth_for_ir_sync", True),
+            "hardware_reset_before_start": camera_sync.get("hardware_reset_before_start", False),
+            "hardware_reset_settle_s": camera_sync.get("hardware_reset_settle_s", 8.0),
+        }
         if len(stream_a_ids) != len(stream_b_ids) or len(stream_a_ids) != num_leds:
             QMessageBox.warning(
                 self,
@@ -267,6 +286,11 @@ class MainWindow(QMainWindow):
             camera_name=camera_name,
             stream_a_label=stream_label(pick_a), stream_b_label=stream_label(pick_b),
             dual_panel_config=self._dual_panel_config,
+            # settings.yaml camera_sync: - the two inter-sensor-sync knobs,
+            # stashed here so _on_tuning_done can hand them to Live Session.
+            enable_depth_for_ir_sync=camera_sync["enable_depth_for_ir_sync"],
+            hardware_reset_before_start=camera_sync["hardware_reset_before_start"],
+            hardware_reset_settle_s=camera_sync["hardware_reset_settle_s"],
         )
         # Already-captured on/off frames + each stream's Otsu-chosen
         # detection threshold, retained by CalibrationPage after its own
@@ -296,6 +320,7 @@ class MainWindow(QMainWindow):
             calibration_neighborhood_size=calib_result["neighborhood_size"],
             stream_a_positions=stream_a_positions, stream_b_positions=stream_b_positions,
             dual_panel_config=self._dual_panel_config,
+            enable_depth_for_ir_sync=camera_sync["enable_depth_for_ir_sync"],
         )
         self.stack.setCurrentWidget(self.threshold_tuning_page)
 
@@ -329,6 +354,9 @@ class MainWindow(QMainWindow):
             camera_name=pending["camera_name"],
             stream_a_label=pending["stream_a_label"], stream_b_label=pending["stream_b_label"],
             dual_panel_config=pending["dual_panel_config"],
+            enable_depth_for_ir_sync=pending["enable_depth_for_ir_sync"],
+            hardware_reset_before_start=pending["hardware_reset_before_start"],
+            hardware_reset_settle_s=pending["hardware_reset_settle_s"],
         )
         self.stack.setCurrentWidget(self.live_session_page)
 

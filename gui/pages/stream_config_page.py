@@ -80,6 +80,11 @@ class StreamConfigPage(QWidget):
         self._tests = []
         self._preferred_a = None
         self._preferred_b = None
+        # settings.yaml camera_sync.enable_depth_for_ir_sync, set via
+        # populate() - so this page's own pairing-quality preview shows the
+        # same IR/RGB sync fix (or lack of it) the real run downstream will
+        # actually use, rather than always defaulting to depth-on.
+        self._enable_depth_for_ir_sync = True
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -143,7 +148,8 @@ class StreamConfigPage(QWidget):
         downstream never need to know tests exist."""
         return self.combo_test.currentData()
 
-    def populate(self, ctx, device_serial, tests, preferred_a=None, preferred_b=None, preferred_test_name=None):
+    def populate(self, ctx, device_serial, tests, preferred_a=None, preferred_b=None,
+                 preferred_test_name=None, enable_depth_for_ir_sync=True):
         """`tests` is engine.streams.resolve_camera_tests's output, already
         filtered by gui/main_window.py to tests with at least one
         sensor_options entry matching this connected device - each entry is
@@ -159,12 +165,15 @@ class StreamConfigPage(QWidget):
         suit this rig/camera. preferred_b is accepted for interface
         symmetry with the old two-combo version but not currently used for
         preselection (only pick_a is matched, same as this project's other
-        preselection logic)."""
+        preselection logic). enable_depth_for_ir_sync is settings.yaml's
+        camera_sync.enable_depth_for_ir_sync, forwarded into the pairing-
+        quality preview's own ContinuousCapture - see _on_start_preview_clicked."""
         self.ctx = ctx
         self.device_serial = device_serial
         self._tests = list(tests)
         self._preferred_a = preferred_a
         self._preferred_b = preferred_b
+        self._enable_depth_for_ir_sync = enable_depth_for_ir_sync
 
         self.combo_test.blockSignals(True)
         self.combo_test.clear()
@@ -296,7 +305,10 @@ class StreamConfigPage(QWidget):
             return
 
         self.status_label.setText("")
-        self.preview_thread = StreamPreviewThread(self.ctx, self.device_serial, pick_a, pick_b)
+        self.preview_thread = StreamPreviewThread(
+            self.ctx, self.device_serial, pick_a, pick_b,
+            enable_depth_for_ir_sync=self._enable_depth_for_ir_sync,
+        )
         self.preview_thread.frame_ready.connect(self.preview_panel.set_frame)
         self.preview_thread.error.connect(self._on_preview_error)
         self.preview_thread.start()
