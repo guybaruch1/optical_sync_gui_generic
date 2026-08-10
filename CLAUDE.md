@@ -226,6 +226,48 @@ Calibration/ROI Select's own cleanup instead of leaving it to accidentally
 depend on the operator's next `start_scanning()` call being preceded by an
 explicit `stop_scanning()`.
 
+**That `switched_to_stream_panel` fix alone did not fully resolve it on real
+hardware - the panel still failed to step on its first arm.** The reason:
+`tools/dual_panel_diag/diag_arm_sequence_sweep.py`'s exhaustive 12-variant
+sweep - the investigation that found the `--stop`->`--reset` fix above -
+always forced its test precondition via `dual_panel_control.stop_scanning()`
+itself (see that script's own `run_variant`). Every variant it ever tested,
+including plain `reset()`, was validated ONLY against a panel that had
+PREVIOUSLY been armed into response-time-measurement mode (mode 1, trigger
+mode 2) and then stopped. It was never tested against the precondition that
+actually exists here: a panel that has NEVER been in mode 1 at all, coming
+straight from Calibration's `all_leds_on()`/`all_leds_off()` (modes 5 then
+3 - a different, unvalidated transition). The `switched_to_stream_panel`
+fix was the direct equivalent of the sweep's own `reset_then_baseline`
+variant, just applied to a precondition that variant was never actually
+tested against.
+
+The actual fix: `start_scanning()`'s dual-panel branch now calls
+`stop_scanning(dual_panel_config)` itself, unconditionally, before its own
+`configure_one_panel()`/`_relay_on()` - i.e. it automates "press Stop then
+press Start", the operator's own confirmed-100%-reliable manual recovery,
+rather than guessing a brand new arm sequence blind for a transition
+nothing has actually swept. Safe to call even when nothing was ever armed:
+`_relay_off()` no-ops when the relay was never on, and sending an extra
+`reset()` to an already-reset panel is harmless (confirmed safe by the
+sweep's own `reset_twice_then_baseline` variant). This also makes
+`gui/pages/threshold_tuning_page.py`'s `_on_switch_time_changed` - which
+re-runs `start_scanning()` without an intervening `stop_scanning()` - correct
+by construction instead of only working via `_relay_on()`'s own
+stale-connection guard. Keep the `switched_to_stream_panel` fix too - it's
+still correct on its own terms and cheap, genuine defense-in-depth alongside
+this one, not a replacement for it.
+
+If THIS still doesn't fully resolve it on real hardware: build a new sweep
+script adapting `diag_arm_sequence_sweep.py`'s proven harness (same
+`getCurrentLED`-based objective stepping detection) with the precondition
+step corrected to the ACTUAL real one - `LEDPanel.stop(); LEDPanel.all_leds_on();
+LEDPanel.all_leds_off()` per panel (mirroring Calibration's own
+`_capture_on_off_for_stream`), not `stop_scanning()` - before re-testing
+arm-sequence variants. Do not keep guessing new sequences by hand against
+real hardware one round-trip at a time; that already failed once on this
+exact bug and is what the original sweep script was built to replace.
+
 Any panel config change (e.g. switch time)
 needs this whole provisioning re-run - see `gui/pages/threshold_tuning_page.py`'s
 `_on_switch_time_changed`, which branches on `dual_panel_config` to either

@@ -93,10 +93,26 @@ def test_turn_all_leds_off_with_dual_panel_config_routes_through_run_on_both_pan
 
 
 def test_start_scanning_with_dual_panel_config_configures_both_panels_and_closes_relay():
+    call_order = []
     with patch("engine.dual_panel_control.LEDPanel") as mock_led_panel, \
-         patch.object(dual_panel_control, "_run_on_both_panels") as mock_run_on_both, \
-         patch.object(dual_panel_control, "_relay_on") as mock_relay_on:
+         patch.object(dual_panel_control, "stop_scanning",
+                      side_effect=lambda cfg: call_order.append("stop_scanning")) as mock_stop_scanning, \
+         patch.object(dual_panel_control, "_run_on_both_panels",
+                      side_effect=lambda cfg, action: call_order.append("_run_on_both_panels")) as mock_run_on_both, \
+         patch.object(dual_panel_control, "_relay_on",
+                      side_effect=lambda cfg: call_order.append("_relay_on")) as mock_relay_on:
         start_scanning(5, 1, DUAL_PANEL_CONFIG)
+
+        # stop_scanning() runs FIRST, unconditionally - automates "press
+        # Stop then press Start", the operator's own confirmed-working
+        # manual recovery for a panel that fails to step on its first arm
+        # (coming straight from Calibration/ROI Select, which has never put
+        # the panel into response-time-measurement mode at all - a
+        # precondition the original 12-variant arm-sequence sweep never
+        # actually tested against, since that sweep always forced its
+        # "broken" precondition via stop_scanning() itself). See
+        # start_scanning's own comment for the full reasoning.
+        mock_stop_scanning.assert_called_once_with(DUAL_PANEL_CONFIG)
 
         mock_run_on_both.assert_called_once()
         assert mock_run_on_both.call_args[0][0] == DUAL_PANEL_CONFIG
@@ -126,6 +142,22 @@ def test_start_scanning_with_dual_panel_config_configures_both_panels_and_closes
         mock_led_panel.set_camera_trigger.assert_called_once_with(True)
 
         mock_relay_on.assert_called_once_with(DUAL_PANEL_CONFIG)
+
+        # Order matters: the "press Stop" automation must complete before
+        # configuring/re-closing the relay ("press Start").
+        assert call_order == ["stop_scanning", "_run_on_both_panels", "_relay_on"]
+
+
+def test_start_scanning_with_none_config_does_not_call_stop_scanning_again():
+    # The single-panel case already calls LEDPanel.stop() unconditionally
+    # at the top of its own branch, regardless of precondition - it must
+    # NOT also route through the dual-panel stop_scanning() automation.
+    with patch("engine.dual_panel_control.LEDPanel"), \
+         patch.object(dual_panel_control, "stop_scanning") as mock_stop_scanning, \
+         patch.object(dual_panel_control, "_run_on_both_panels"), \
+         patch.object(dual_panel_control, "_relay_on"):
+        start_scanning(5, 1, None)
+        mock_stop_scanning.assert_not_called()
 
 
 def test_stop_scanning_with_dual_panel_config_releases_relay_before_touching_hub_again():

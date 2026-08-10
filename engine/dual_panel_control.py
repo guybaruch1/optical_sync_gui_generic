@@ -116,6 +116,34 @@ def start_scanning(switch_time_ms, scan_direction, dual_panel_config):
             LEDPanel.set_trigger_mode(2)
             LEDPanel.set_camera_trigger(True)
 
+        # Call stop_scanning() FIRST, unconditionally, before configuring -
+        # this automates "press Stop then press Start", which the operator
+        # confirmed on real hardware always cures a panel that fails to
+        # step on its first arm. That failure mode showed up specifically
+        # coming straight from Calibration/ROI Select (switched_to_stream_
+        # panel's own capture code, via all_leds_on()/all_leds_off() -
+        # engine/led_panel.py's all_leds_off() itself sends --stop
+        # internally as its own first step) - a panel that has NEVER been
+        # in response-time-measurement mode (mode 1) at all. The exhaustive
+        # 12-variant sweep that found the --stop->--reset fix above (see
+        # tools/dual_panel_diag/diag_arm_sequence_sweep.py) only ever tested
+        # variants against a panel that had PREVIOUSLY been armed into mode
+        # 1 and then stopped - never against this genuinely different,
+        # never-armed-before precondition. Rather than guess a brand new
+        # arm sequence blind for a transition nothing has actually swept,
+        # this reuses stop_scanning()'s own already-proven cure directly.
+        # Safe to call unconditionally even when nothing was ever armed:
+        # _relay_off() no-ops when the relay was never on, and
+        # _run_on_both_panels(dual_panel_config, LEDPanel.reset) sending an
+        # extra reset() to an already-reset panel is harmless (confirmed
+        # safe by the sweep's own reset_twice_then_baseline variant). Also
+        # simplifies gui/pages/threshold_tuning_page.py's
+        # _on_switch_time_changed, which re-runs start_scanning() without an
+        # intervening stop_scanning() today - that's now correct by
+        # construction instead of only working via _relay_on()'s own
+        # stale-connection guard.
+        stop_scanning(dual_panel_config)
+
         _run_on_both_panels(dual_panel_config, configure_one_panel)
         _relay_on(dual_panel_config)
 
