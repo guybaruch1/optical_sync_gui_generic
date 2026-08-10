@@ -197,6 +197,29 @@ def decode_frame(raw_bytes, fmt, width, height):
 _DEBUG_IMAGE_SCALE = 4
 
 
+def _fit_label_to_box(text, box_size, font, min_scale=0.15, max_scale=3.0, step=0.05):
+    """Largest cv2.putText font scale (and a stroke thickness that scales
+    with it) that still keeps `text` inside a box_size x box_size square.
+    Shrinks in `step` increments from `max_scale` down to `min_scale` -
+    for a dense grid, box_size is small enough that even a 2-digit id
+    needs a noticeably smaller scale than a 1-digit one to fit, which is
+    exactly the point: every label ends up sized to its OWN available
+    room instead of a single fixed scale that fits some ids and not
+    others. Returns (font_scale, thickness, (text_w, text_h)) - the size
+    is returned too so the caller doesn't have to call getTextSize again
+    to center it."""
+    scale = max_scale
+    while scale > min_scale:
+        thickness = max(1, int(round(scale)))
+        (tw, th), _ = cv2.getTextSize(text, font, scale, thickness)
+        if tw <= box_size and th <= box_size:
+            return scale, thickness, (tw, th)
+        scale -= step
+    thickness = max(1, int(round(min_scale)))
+    (tw, th), _ = cv2.getTextSize(text, font, min_scale, thickness)
+    return min_scale, thickness, (tw, th)
+
+
 def save_debug_detection_image(image, centroids, path):
     debug_img = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR) if len(image.shape) == 2 else image.copy()
     # Radius is derived from the PRE-scale spacing between points (the
@@ -210,15 +233,31 @@ def save_debug_detection_image(image, centroids, path):
     # LED-blob edges crisp instead of blurring them across the upscale.
     debug_img = cv2.resize(debug_img, None, fx=_DEBUG_IMAGE_SCALE, fy=_DEBUG_IMAGE_SCALE,
                             interpolation=cv2.INTER_NEAREST)
-    # Text thickness also scaled - the original fixed 1px stroke would look
-    # spindly/thin next to a font this much bigger, hurting the very
-    # legibility this scale-up exists for.
-    text_thickness = max(1, _DEBUG_IMAGE_SCALE // 2)
+    # Label box: how much room each id's text is allowed to occupy, from the
+    # REAL measured spacing between LEDs (not the decorative circle radius
+    # above, which is deliberately capped smaller for visual clarity, and
+    # not a fixed offset-to-the-right either). A dense 10x10 grid has ~48px
+    # between LEDs at this scale - a fixed "offset right, fixed font size"
+    # placement (the original design) draws a 2-3-digit label wide enough
+    # to bleed into the NEXT LED's own circle and label, drawn moments
+    # later, which visually erases/garbles both: confirmed on real
+    # hardware, an operator trying to compare led_id numbering direction
+    # between two 100-LED streams' debug images still could not reliably
+    # read individual ids even after the 4x upscale above, because whole
+    # runs of adjacent labels overlap into an unreadable smear. Centering
+    # each label INSIDE its own LED's footprint (sized to actually fit
+    # there) instead of the gap to its right structurally can't collide
+    # with a neighbor, regardless of grid density or how many digits `i` has.
+    spacing = _typical_spacing(centroids)
+    box_size = spacing * _DEBUG_IMAGE_SCALE * 0.8 if spacing is not None else radius * 2
+    font = cv2.FONT_HERSHEY_SIMPLEX
     for i, (x, y) in enumerate(centroids):
         scaled_x, scaled_y = int(x) * _DEBUG_IMAGE_SCALE, int(y) * _DEBUG_IMAGE_SCALE
         cv2.circle(debug_img, (scaled_x, scaled_y), radius, (0, 255, 0), 1)
-        cv2.putText(debug_img, str(i), (scaled_x + 10 * _DEBUG_IMAGE_SCALE, scaled_y),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4 * _DEBUG_IMAGE_SCALE, (0, 0, 255), text_thickness)
+        text = str(i)
+        font_scale, thickness, (text_w, text_h) = _fit_label_to_box(text, box_size, font)
+        origin = (scaled_x - text_w // 2, scaled_y + text_h // 2)
+        cv2.putText(debug_img, text, origin, font, font_scale, (0, 0, 255), thickness)
     cv2.imwrite(path, debug_img)
 
 

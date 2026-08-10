@@ -290,14 +290,54 @@ def test_save_debug_detection_image_led_id_text_is_actually_legible(tmp_path):
     import cv2
     saved = cv2.imread(path)
     scale = _DEBUG_IMAGE_SCALE
-    label_x, label_y = centroid[0] * scale + 10 * scale, centroid[1] * scale
+    # Label is now centered ON the (scaled) centroid itself, not offset to
+    # the right of it - see save_debug_detection_image's own comment on why
+    # (a fixed offset-right placement is exactly what made a dense grid's
+    # labels bleed into their neighbors and become unreadable).
+    label_x, label_y = centroid[0] * scale, centroid[1] * scale
     window = saved[max(0, label_y - 20 * scale):label_y + 20 * scale,
-                    max(0, label_x - 5 * scale):label_x + 30 * scale]
+                    max(0, label_x - 20 * scale):label_x + 20 * scale]
     red_pixel_count = int(np.sum((window[:, :, 2] > 200) & (window[:, :, 1] < 50) & (window[:, :, 0] < 50)))
     # A single illegible digit at the OLD unscaled size would light up only
     # a handful of pixels - require enough that the digit is a real,
     # recognizable shape at this resolution.
     assert red_pixel_count > 20
+
+
+def test_save_debug_detection_image_labels_never_collide_on_a_dense_grid(tmp_path):
+    # The actual bug this whole re-render fixes: save_debug_detection_image
+    # used to draw each label a fixed offset to the right of its own
+    # circle, at a fixed font scale - fine for a handful of sparse LEDs, but
+    # on a dense grid (e.g. the real 10x10/100-LED panel this app targets)
+    # a 2-3-digit label at that fixed size is WIDER than the gap to the next
+    # LED, so it visually bleeds into (and garbles) the next label drawn
+    # moments later. Confirmed on real hardware: even after the 4x upscale,
+    # an operator still could not reliably read individual led_ids off a
+    # dense grid's debug image. Centering each label inside its own LED's
+    # footprint (sized to fit there) must keep every label's pixels
+    # entirely within its own non-overlapping cell.
+    import cv2
+
+    spacing = 12  # tight enough that the OLD fixed-offset placement would collide
+    centroids = [(10 + col * spacing, 10 + row * spacing) for row in range(10) for col in range(10)]
+    path = str(tmp_path / "debug.png")
+
+    save_debug_detection_image(image=np.zeros((130, 130), dtype=np.uint8), centroids=centroids, path=path)
+
+    saved = cv2.imread(path)
+    scale = _DEBUG_IMAGE_SCALE
+    half_cell = int(spacing * scale / 2)
+    red_mask = (saved[:, :, 2] > 200) & (saved[:, :, 1] < 50) & (saved[:, :, 0] < 50)
+    for i, (x, y) in enumerate(centroids):
+        cx, cy = int(x) * scale, int(y) * scale
+        # Every red (label) pixel found near this centroid must belong to
+        # THIS id's own cell, i.e. be within half a cell-width of it - if a
+        # neighbor's label bled in, red pixels would show up past that
+        # boundary, right up against the edge of the search window itself.
+        window = red_mask[max(0, cy - half_cell):cy + half_cell, max(0, cx - half_cell):cx + half_cell]
+        edge_pixels = int(np.sum(window[0, :])) + int(np.sum(window[-1, :])) + \
+            int(np.sum(window[:, 0])) + int(np.sum(window[:, -1]))
+        assert edge_pixels == 0, "led_id {} label reaches to (or past) a neighboring LED's own cell".format(i)
 
 
 def test_draw_detected_centroids_marks_circles_without_numbering():
