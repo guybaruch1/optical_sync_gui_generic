@@ -268,21 +268,52 @@ lesson from the original investigation ("Rather than keep hand-editing
 idea, this sweeps a whole list of VARIANTS in one unattended run") -
 guessing a third sequence by hand is not the right next move.
 
-`tools/dual_panel_diag/diag_first_arm_after_calibration.py` is the actual
-fallback: adapts `diag_arm_sequence_sweep.py`'s proven harness (same
-`getCurrentLED`-based objective stepping detection) with the precondition
-step corrected to the REAL one this time - `switched_to_stream_panel()` +
+`tools/dual_panel_diag/diag_first_arm_after_calibration.py` adapted
+`diag_arm_sequence_sweep.py`'s proven harness with the precondition step
+corrected to the REAL one - `switched_to_stream_panel()` +
 `LEDPanel.stop(); LEDPanel.all_leds_on(); LEDPanel.all_leds_off()` per
-stream, byte-for-byte matching `_capture_on_off_for_stream()` - instead of
-`stop_scanning()`. It also queries `getMode()`/`isRunning()` right after
-that precondition (new data - the old investigation's "getMode always
-read 1" observation doesn't apply to a panel that was never in mode 1 at
-all), and includes the CURRENT shipped `start_scanning()` as its own
-negative control, to confirm the script's own precondition/detection
-actually reproduces the reported failure before trusting any other
-result. This needs to actually run on real hardware and have its Summary
-table reported back before the real fix can be written - do not encode a
-"fix" from this bug's own history a third time without that evidence.
+stream, byte-for-byte matching `_capture_on_off_for_stream()` - and swept 8
+candidate single-shot arm sequences from it, including the current shipped
+`start_scanning()` as a negative control. **Result on real hardware: ALL 8
+showed "no movement", including the negative control** (confirming the
+script's own precondition/detection was valid). Raw per-variant output
+showed something precise: `isRunning` read `'1'` on both panels right
+after the precondition (before any arm attempt), then `'0'` after EVERY
+single arm attempt - the exact signature already documented above for the
+original bug before its fix, now showing up via this different,
+never-swept route too.
+
+**The actual fix, confirmed via `tools/dual_panel_diag/diag_double_arm_hypothesis.py`:**
+across BOTH sweeps (12 old variants + 8 new = 20 single-shot sequences
+total), the one thing never tested was genuinely arming TWICE, with a real
+`stop_scanning()` in between, using the IDENTICAL command sequence both
+times - which is inherently what the operator's own 100%-reliable manual
+fix (Start, fails, Stop, Start again, works) does. That script forced the
+real precondition once, then called the current shipped `start_scanning()`
+(arm #1), then a real `stop_scanning()`, then `start_scanning()` again
+(arm #2 - the exact same call), capturing the full 8-field query
+(`isRunning`/`getCurrentLED`/`getMode`/`getTriggerMode`/`getCameraTrigger`/
+`getCameraTriggerState`/`getStopTrigger`/`getStopTriggerState`) at each
+checkpoint. **Arm #1: no movement, `isRunning='0'`, but
+`getCameraTriggerState='1'` - the panel DOES see the relay's trigger edge
+electrically, exactly matching this file's own earlier note ("this
+relay-edge guarantee is confirmed harmless/correct... but is NOT sufficient
+on its own"). Arm #2 (identical command sequence): STEPPED on both panels,
+`isRunning='1'`.** Two identical arm sequences, one difference - having
+already gone through one full relay close->open cycle. Sequence CONTENT
+was never the variable that mattered across all 20 single-shot variants
+tried in this investigation; the panel's own trigger-detection logic
+needs to see one full "priming" cycle before it trusts the next one.
+
+`start_scanning()`'s dual-panel branch now arms TWICE unconditionally -
+`_arm_once()` (configure both panels + close relay), a real
+`stop_scanning()`, then `_arm_once()` again - directly encoding this
+confirmed sequence. Costs one extra full hub-switch/relay round-trip on
+every Start, which the operator already tolerates today via the manual
+Stop-then-Start workaround this now automates in full (the two earlier
+fixes only ever automated PART of it - a plain `reset()`, then a single
+arm cycle preceded by one `stop_scanning()` - neither actually performed a
+second arm attempt at all).
 
 Any panel config change (e.g. switch time)
 needs this whole provisioning re-run - see `gui/pages/threshold_tuning_page.py`'s

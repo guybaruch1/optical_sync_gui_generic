@@ -116,36 +116,43 @@ def start_scanning(switch_time_ms, scan_direction, dual_panel_config):
             LEDPanel.set_trigger_mode(2)
             LEDPanel.set_camera_trigger(True)
 
-        # Call stop_scanning() FIRST, unconditionally, before configuring -
-        # this automates "press Stop then press Start", which the operator
-        # confirmed on real hardware always cures a panel that fails to
-        # step on its first arm. That failure mode showed up specifically
-        # coming straight from Calibration/ROI Select (switched_to_stream_
-        # panel's own capture code, via all_leds_on()/all_leds_off() -
-        # engine/led_panel.py's all_leds_off() itself sends --stop
-        # internally as its own first step) - a panel that has NEVER been
-        # in response-time-measurement mode (mode 1) at all. The exhaustive
-        # 12-variant sweep that found the --stop->--reset fix above (see
-        # tools/dual_panel_diag/diag_arm_sequence_sweep.py) only ever tested
-        # variants against a panel that had PREVIOUSLY been armed into mode
-        # 1 and then stopped - never against this genuinely different,
-        # never-armed-before precondition. Rather than guess a brand new
-        # arm sequence blind for a transition nothing has actually swept,
-        # this reuses stop_scanning()'s own already-proven cure directly.
-        # Safe to call unconditionally even when nothing was ever armed:
-        # _relay_off() no-ops when the relay was never on, and
-        # _run_on_both_panels(dual_panel_config, LEDPanel.reset) sending an
-        # extra reset() to an already-reset panel is harmless (confirmed
-        # safe by the sweep's own reset_twice_then_baseline variant). Also
+        def _arm_once():
+            _run_on_both_panels(dual_panel_config, configure_one_panel)
+            _relay_on(dual_panel_config)
+
+        # Arms TWICE, with a real stop_scanning() in between - confirmed on
+        # real hardware (tools/dual_panel_diag/diag_double_arm_hypothesis.py)
+        # to be what actually fixes the panel failing to step on its first
+        # arm after Calibration/ROI Select. Two earlier fixes on this exact
+        # bug both failed: a plain LEDPanel.reset() in switched_to_stream_panel,
+        # then this same stop_scanning()-once-before-arming approach with
+        # only a SINGLE arm cycle. The diagnostic script proved something
+        # neither guess anticipated: a single arm cycle - even one
+        # immediately preceded by stop_scanning() - NEVER gets the panel
+        # stepping on the very first arm in a session (isRunning stays '0',
+        # getCurrentLED never changes), even though getCameraTriggerState
+        # correctly flips to 1 (the panel DOES see the relay's trigger edge
+        # electrically - the earlier "only steps once" investigation found
+        # this exact same signature). A SECOND, IDENTICAL arm cycle - after
+        # a real stop_scanning() releases the relay and resets both panels -
+        # steps EVERY time, with zero difference in command CONTENT between
+        # the two attempts. So sequence content was never the variable that
+        # mattered across all 20 single-shot variants tried in this
+        # investigation (12 in the original sweep, 8 in the follow-up) -
+        # the panel's own trigger-detection logic needs to see one full
+        # relay close->open "priming" cycle before it trusts the next one.
+        #
+        # Costs one extra full hub-switch/relay round-trip on every Start -
+        # the operator already tolerates this exact cost via the manual
+        # Stop-then-Start workaround this directly automates. Also
         # simplifies gui/pages/threshold_tuning_page.py's
         # _on_switch_time_changed, which re-runs start_scanning() without an
-        # intervening stop_scanning() today - that's now correct by
-        # construction instead of only working via _relay_on()'s own
-        # stale-connection guard.
+        # intervening stop_scanning() today - correct by construction now
+        # instead of only working via _relay_on()'s own stale-connection
+        # guard.
+        _arm_once()
         stop_scanning(dual_panel_config)
-
-        _run_on_both_panels(dual_panel_config, configure_one_panel)
-        _relay_on(dual_panel_config)
+        _arm_once()
 
 
 def stop_scanning(dual_panel_config):
