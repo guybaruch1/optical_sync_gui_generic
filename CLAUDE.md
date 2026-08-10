@@ -419,6 +419,16 @@ gating it on `dual_panel_config is not None` too (not just
 `preview_thread is not None`) avoids taking away a capability from the
 single-panel operator that was never actually unsafe.
 
+**`gui/pages/live_session_page.py` got the same Confirm button too, for UI
+parity - but it's purely cosmetic there.** That page's `switch_time_spinbox`
+never applied live at all (`start_session()` always reads its current value
+fresh, and locks it for the whole run) - there was never a hardware call
+for a Confirm button to gate. Its `_on_confirm_switch_time_clicked` only
+updates `_last_confirmed_switch_time_ms` and refreshes the button's own
+enabled state; it never touches `SessionEngineThread`/`LEDPanel`. Exists so
+both pages present the same "confirm before it locks in" affordance, not
+because this page had the same bug.
+
 **Calibration and ROI Select do NOT use `turn_all_leds_on`/`off`** for the
 dual-panel case - capturing both streams' on/off frame from one
 simultaneous "both panels lit together" moment turned out unreliable (and

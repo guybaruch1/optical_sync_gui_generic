@@ -299,6 +299,7 @@ def test_start_session_locks_duration_switch_time_and_frame_sample_interval(qapp
 
     assert not page.duration_spinbox.isEnabled()
     assert not page.switch_time_spinbox.isEnabled()
+    assert not page.confirm_switch_time_button.isEnabled()
     assert not page.frame_sample_interval_spinbox.isEnabled()
 
     page._on_engine_thread_finished()
@@ -306,6 +307,50 @@ def test_start_session_locks_duration_switch_time_and_frame_sample_interval(qapp
     assert page.duration_spinbox.isEnabled()
     assert page.switch_time_spinbox.isEnabled()
     assert page.frame_sample_interval_spinbox.isEnabled()
+
+
+# --- Confirm button next to LED Switch Time - purely a UI-parity affordance
+# matching gui/pages/threshold_tuning_page.py's own Confirm button. Unlike
+# that page, this one never applies switch time live at all - start_session()
+# always reads the spinbox's current value fresh - so Confirm here never
+# touches hardware; it only tracks/displays whether the value has been
+# acknowledged. ---
+
+def test_set_context_leaves_confirm_switch_time_disabled(qapp, tmp_path):
+    page = LiveSessionPage()
+    page.set_context(**_minimal_context(tmp_path, switch_time_ms=7))
+    assert not page.confirm_switch_time_button.isEnabled()
+
+
+def test_ticking_switch_time_spinbox_enables_confirm_then_disables_if_reverted(qapp, tmp_path):
+    page = LiveSessionPage()
+    page.set_context(**_minimal_context(tmp_path, switch_time_ms=1))
+    assert not page.confirm_switch_time_button.isEnabled()
+
+    page.switch_time_spinbox.setValue(5)
+    assert page.confirm_switch_time_button.isEnabled()
+
+    page.switch_time_spinbox.setValue(1)
+    assert not page.confirm_switch_time_button.isEnabled()
+
+
+def test_confirm_switch_time_click_does_not_touch_hardware_or_change_start_session_value(qapp, tmp_path):
+    # No SessionEngineThread/LEDPanel call at all - purely a UI
+    # acknowledgment. start_session() reads the spinbox's value fresh
+    # regardless of whether Confirm was ever clicked.
+    page = LiveSessionPage()
+    page.set_context(**_minimal_context(tmp_path, switch_time_ms=1))
+    page.switch_time_spinbox.setValue(5)
+
+    with patch("gui.pages.live_session_page.SessionEngineThread") as mock_thread_cls:
+        page._on_confirm_switch_time_clicked()
+        mock_thread_cls.assert_not_called()
+
+    assert not page.confirm_switch_time_button.isEnabled()
+
+    with patch("gui.pages.live_session_page.SessionEngineThread", _FakeEngineThread):
+        page.start_session()
+    assert _FakeEngineThread.last_kwargs["switch_time_ms"] == 5
 
 
 # --- Per-run output folder: every Start click must mint its OWN
