@@ -290,7 +290,6 @@ def run_variant(name, configure_fn, dual_panel_config, switch_time_ms, scan_dire
 def main():
     settings = load_settings(os.path.join(REPO_ROOT, "settings.yaml"))
     dual_panel_config = settings["dual_panel"]
-    dual_panel_config_for_control[0] = dual_panel_config
     switch_time_ms = 1
     scan_direction = 1
 
