@@ -139,26 +139,45 @@ test:
 # measurement this app exists to make - change one at a time and re-measure
 # (Live Session's "HW TS Latency" is the number to watch).
 camera_sync:
-  # Enable the COLOR stream before the INFRARED one when configuring the
-  # pipeline, instead of always enabling stream_a first. Per Intel's docs the
-  # RGB sensor acts as sync MASTER (pulsing the stereo module at the start of
-  # each frame, while both run the same fps and exposure stays under the frame
-  # period) - so bringing the stereo module up first can leave it free-running
-  # with a fixed phase offset rather than actually locked. The reference
-  # script enables color first; this app used to always enable stream_a
-  # (typically IR) first. Free to leave on: it only reorders two
-  # enable_stream() calls, never which pick is stream_a vs stream_b, and it's
-  # a no-op for same-type pairings (IR+IR, color+color).
-  color_stream_first: true
+  # Co-enable the DEPTH stream whenever one of the two picks is infrared.
+  #
+  # CONFIRMED ROOT CAUSE (real-hardware finding): rs.pipeline() gives no
+  # control over the order it internally OPENS the two sensors -
+  # config.enable_stream() call order does NOT influence it - and that open
+  # order decides whether IR and RGB come out synchronized. RGB opened
+  # before IR produces a fixed multi-ms offset (this app measured ~11.3ms);
+  # IR opened before RGB measures the true ~3.5ms; and enabling DEPTH
+  # alongside both fixes it REGARDLESS of open order. This matches Intel's
+  # documented firmware requirement that depth and IR be configured
+  # together - enabling IR alone leaves the pipeline to satisfy that
+  # requirement internally, in an order we can't see; enabling depth
+  # explicitly removes the ambiguity. (An earlier color_stream_first knob
+  # tried to fix this by reordering enable_stream() calls and, on real
+  # hardware, did nothing - it was aimed at the wrong layer entirely; see
+  # CLAUDE.md's "IR/RGB sync depends on stream open order" section.)
+  #
+  # COSTS BANDWIDTH: z16 depth at 1280x720@30 is ~55 MB/s on top of IR
+  # (~28 MB/s) and bgr8 color (~83 MB/s), and on real hardware this
+  # measurably increased frame drops. Turn this off if drops matter more
+  # than inter-sensor sync for a given test. To claw bandwidth back while
+  # keeping the fix, try a yuyv color format instead of bgr8 in
+  # camera.stream_options (2 bytes/px instead of 3, ~28 MB/s saved -
+  # domain/realsense_utils.py's DECODERS already handles yuyv; costs a
+  # per-frame cv2 color conversion instead). No-op for a color+color
+  # (Dual RGB) pairing - there's no stereo module in play to sync against.
+  enable_depth_for_ir_sync: true
   # Hardware-reset the camera and wait for it to re-enumerate before each
-  # Live Session run - the reference script does this at startup and this app
-  # never did. Costs hardware_reset_settle_s of dead time on EVERY Start, so
-  # it defaults off; turn it on to test whether a clean device state is what
-  # actually closes the gap.
+  # Live Session run. Independent manual recovery knob, e.g. for a camera
+  # left with a stuck manual exposure/gain from before
+  # engine/streams.py's enable_auto_exposure was fixed to restore both on
+  # switch-back to auto. Also A/B-tested (independently of the above) against
+  # the ~11.3ms/~3.5ms discrepancy and, on its own, did not change the
+  # result. Costs hardware_reset_settle_s of dead time on EVERY Start, so it
+  # defaults off.
   hardware_reset_before_start: false
-  # Seconds to wait after hardware_reset() before re-acquiring the device -
-  # matches the reference script's own 8s. Too short and the device won't
-  # have re-enumerated yet and find_device_by_serial will fail.
+  # Seconds to wait after hardware_reset() before re-acquiring the device.
+  # Too short and the device won't have re-enumerated yet and
+  # find_device_by_serial will fail.
   hardware_reset_settle_s: 8.0
 
 # Only read when the operator checks Device Select's "Use dual LED panel"

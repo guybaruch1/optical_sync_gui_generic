@@ -710,63 +710,68 @@ def test_resolve_camera_tests_preserves_config_order_for_tests_and_options():
     assert [o["pick_a"]["fps"] for o in resolved[0]["options"]] == [60, 30]
 
 
-# --- ContinuousCapture._ordered_picks: which order the two streams are handed
-# to config.enable_stream(). Pure/testable even though ContinuousCapture's
-# real rs.pipeline() internals are hardware-only by design. Motivated by a
-# real measured discrepancy - a reference script enabling COLOR first saw a
-# ~3.5ms inter-sensor timestamp gap where this app, enabling stream_a (IR)
-# first, consistently saw ~11.3ms on the same rig. ---
+# --- ContinuousCapture._depth_sync_stream: which DEPTH geometry (if any) to
+# co-enable alongside the two picked streams. Pure/testable even though
+# ContinuousCapture's real rs.pipeline() internals are hardware-only by
+# design. Motivated by a real-hardware finding: rs.pipeline() gives no
+# control over the order it internally OPENS the two sensors, and that order
+# decides whether IR and RGB come out synchronized (RGB-before-IR produced a
+# fixed ~11.3ms offset; co-enabling depth fixed it regardless of open order,
+# matching Intel's documented firmware requirement that depth and IR be
+# configured together). This REPLACES an earlier color_stream_first/enable-
+# ORDER knob (see test_ordered_picks_* in this file's git history) that was
+# proven ineffective on real hardware - config.enable_stream() call order
+# does not influence the pipeline's internal open order at all. ---
 
-def _ir_pick(stream_index=1):
+def _ir_pick(stream_index=1, width=1280, height=720, fps=30):
     return {"stream_type": rs.stream.infrared, "stream_index": stream_index,
-            "width": 1280, "height": 720, "fps": 30, "format": rs.format.y8}
+            "width": width, "height": height, "fps": fps, "format": rs.format.y8}
 
 
-def _color_pick(stream_index=0):
+def _color_pick(stream_index=0, width=1280, height=720, fps=30):
     return {"stream_type": rs.stream.color, "stream_index": stream_index,
-            "width": 1280, "height": 720, "fps": 30, "format": rs.format.bgr8}
+            "width": width, "height": height, "fps": fps, "format": rs.format.bgr8}
 
 
-def test_ordered_picks_puts_color_before_infrared():
-    capture = ContinuousCapture("SN1", _ir_pick(), _color_pick(), color_stream_first=True)
-    ordered = capture._ordered_picks()
-    assert [p["stream_type"] for p in ordered] == [rs.stream.color, rs.stream.infrared]
+def test_depth_sync_stream_returns_the_infrared_picks_own_geometry():
+    ir = _ir_pick(width=848, height=480, fps=60)
+    capture = ContinuousCapture("SN1", ir, _color_pick(), enable_depth_for_ir_sync=True)
+    assert capture._depth_sync_stream() == (848, 480, 60)
 
 
-def test_ordered_picks_leaves_color_first_pairing_untouched():
-    capture = ContinuousCapture("SN1", _color_pick(), _ir_pick(), color_stream_first=True)
-    ordered = capture._ordered_picks()
-    assert [p["stream_type"] for p in ordered] == [rs.stream.color, rs.stream.infrared]
+def test_depth_sync_stream_is_order_independent():
+    ir = _ir_pick(width=848, height=480, fps=60)
+    capture = ContinuousCapture("SN1", _color_pick(), ir, enable_depth_for_ir_sync=True)
+    assert capture._depth_sync_stream() == (848, 480, 60)
 
 
-def test_ordered_picks_is_a_noop_for_two_infrared_streams():
-    # Stable sort - a same-type pairing must keep pick_a/pick_b's own order,
-    # since there's no color stream to promote.
+def test_depth_sync_stream_returns_only_one_geometry_for_two_infrared_streams():
+    # Duplicate-enable guard: a second identical config.enable_stream(depth)
+    # call risks a real-hardware error (see
+    # tools/panel_drift/panel_drift_measure.py's own comment about exactly
+    # this hazard for a duplicated pick) - one depth stream, not two.
     pick_a, pick_b = _ir_pick(1), _ir_pick(2)
-    capture = ContinuousCapture("SN1", pick_a, pick_b, color_stream_first=True)
-    assert capture._ordered_picks() == [pick_a, pick_b]
+    capture = ContinuousCapture("SN1", pick_a, pick_b, enable_depth_for_ir_sync=True)
+    assert capture._depth_sync_stream() == (pick_a["width"], pick_a["height"], pick_a["fps"])
 
 
-def test_ordered_picks_is_a_noop_for_two_color_streams():
-    pick_a, pick_b = _color_pick(0), _color_pick(1)
-    capture = ContinuousCapture("SN1", pick_a, pick_b, color_stream_first=True)
-    assert capture._ordered_picks() == [pick_a, pick_b]
+def test_depth_sync_stream_is_none_for_color_only_pairing():
+    # No stereo module in play at all (Dual RGB) - nothing for depth to sync.
+    capture = ContinuousCapture("SN1", _color_pick(0), _color_pick(1), enable_depth_for_ir_sync=True)
+    assert capture._depth_sync_stream() is None
 
 
-def test_ordered_picks_preserves_original_order_when_disabled():
-    # The A/B "off" arm of the experiment - reproduces the pre-change
-    # behavior exactly (stream_a enabled first, whatever type it is).
+def test_depth_sync_stream_is_none_when_disabled():
+    capture = ContinuousCapture("SN1", _ir_pick(), _color_pick(), enable_depth_for_ir_sync=False)
+    assert capture._depth_sync_stream() is None
+
+
+def test_continuous_capture_never_changes_which_pick_is_stream_a():
+    # Load-bearing safety property carried over from the old enable-order
+    # knob: _get_frame still resolves stream_a/stream_b from pick_a/pick_b,
+    # so constructing/probing depth sync must never touch that mapping.
     pick_a, pick_b = _ir_pick(), _color_pick()
-    capture = ContinuousCapture("SN1", pick_a, pick_b, color_stream_first=False)
-    assert capture._ordered_picks() == [pick_a, pick_b]
-
-
-def test_ordered_picks_never_changes_which_pick_is_stream_a():
-    # Load-bearing safety property: reordering is ONLY about enable order.
-    # _get_frame still resolves stream_a/stream_b from pick_a/pick_b, so the
-    # data mapping must be completely unaffected by this setting.
-    pick_a, pick_b = _ir_pick(), _color_pick()
-    capture = ContinuousCapture("SN1", pick_a, pick_b, color_stream_first=True)
-    capture._ordered_picks()
+    capture = ContinuousCapture("SN1", pick_a, pick_b, enable_depth_for_ir_sync=True)
+    capture._depth_sync_stream()
     assert capture.pick_a is pick_a
     assert capture.pick_b is pick_b

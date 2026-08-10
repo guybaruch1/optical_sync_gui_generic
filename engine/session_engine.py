@@ -10,15 +10,29 @@ thread and reach the UI safely.
 
 Two settings.yaml camera_sync: knobs land here because they change how the
 CAMERA is brought up, which shifts the very inter-sensor offset this app
-measures: color_stream_first (passed down to ContinuousCapture - see its
-_ordered_picks) and hardware_reset_before_start/hardware_reset_settle_s
-(applied in run() before anything else touches the device). Both exist to
-A/B a measured discrepancy - this app consistently reported a ~11.3ms
-inter-sensor HW-timestamp gap where a standalone reference script driving
-the identical rs.pipeline() on the same rig consistently reported ~3.5ms,
-and enable order + a startup hardware reset are the only two structural
-differences between them. Each is independently switchable so a run can
-isolate one at a time; see settings.yaml's camera_sync: section.
+measures:
+
+- enable_depth_for_ir_sync (passed down to ContinuousCapture - see its
+  _depth_sync_stream/_build_config). This is the CONFIRMED root-cause fix:
+  on real hardware, rs.pipeline() gives no control over the order it
+  internally OPENS the two sensors, and that order decides whether IR and
+  RGB come out synchronized (RGB-before-IR produces a fixed ~11.3ms offset;
+  IR-before-RGB, or co-enabling depth alongside both regardless of order,
+  measures the true ~3.5ms). Co-enabling depth matches Intel's documented
+  firmware requirement that depth and IR be configured together - see
+  CLAUDE.md's "IR/RGB sync depends on stream open order" section for the
+  full story, including the earlier color_stream_first/enable-ORDER
+  experiment this replaced (proven ineffective: config.enable_stream()
+  order does not influence the pipeline's internal open order at all).
+  Costs USB bandwidth (confirmed on real hardware to increase frame drops),
+  so it stays a settings.yaml-driven toggle rather than an unconditional
+  default.
+- hardware_reset_before_start/hardware_reset_settle_s (applied in run()
+  before anything else touches the device) - kept as an independent manual
+  recovery knob (e.g. after a camera left in a bad state by a stuck
+  auto-exposure round trip - see engine/streams.py's enable_auto_exposure),
+  even though it was also A/B-tested against the ~11.3ms/~3.5ms discrepancy
+  above and, on its own, did not change the result.
 """
 
 import pyrealsense2 as rs
@@ -54,7 +68,7 @@ class SessionEngineThread(QThread):
                  test_session, stream_a_xy=None, stream_b_xy=None, neighborhood_size=5,
                  scan_direction=None, switch_time_ms=None,
                  display_stride=10, position_gap_metric=None, dual_panel_config=None,
-                 color_stream_first=True, hardware_reset_before_start=False,
+                 enable_depth_for_ir_sync=True, hardware_reset_before_start=False,
                  hardware_reset_settle_s=8.0, parent=None):
         super().__init__(parent)
         self.ctx = ctx
@@ -65,10 +79,9 @@ class SessionEngineThread(QThread):
         self.test_session = test_session
         self.dual_panel_config = dual_panel_config
         # Two independent inter-sensor-sync knobs, both settings.yaml-driven
-        # (camera_sync:) so a run can A/B either one on its own - see
-        # ContinuousCapture._ordered_picks and run()'s reset block below for
-        # what each actually does and why.
-        self.color_stream_first = color_stream_first
+        # (camera_sync:) - see ContinuousCapture._depth_sync_stream and
+        # run()'s reset block below for what each actually does and why.
+        self.enable_depth_for_ir_sync = enable_depth_for_ir_sync
         self.hardware_reset_before_start = hardware_reset_before_start
         self.hardware_reset_settle_s = hardware_reset_settle_s
         self.stream_a_xy = stream_a_xy
@@ -121,13 +134,10 @@ class SessionEngineThread(QThread):
 
         try:
             if self.hardware_reset_before_start:
-                # Mirrors the standalone reference script's own opening step
-                # (hardware_reset() + a fixed settle, then re-acquire the
-                # device handle) - that script consistently measured a ~3.5ms
-                # inter-sensor timestamp gap on the same rig where this app
-                # consistently measured ~11.3ms, and the reset is one of only
-                # two structural differences between them (the other being
-                # stream enable order, see ContinuousCapture._ordered_picks).
+                # A manual recovery knob, independent of enable_depth_for_ir_sync
+                # above - e.g. clears a camera left with a stuck manual
+                # exposure/gain from before engine/streams.py's
+                # enable_auto_exposure was fixed to restore both on switch-back.
                 # A reset invalidates the current device handle and drops the
                 # device off USB for several seconds, so the handle MUST be
                 # re-acquired afterwards rather than reused.
@@ -183,9 +193,15 @@ class SessionEngineThread(QThread):
 
             self._capture = ContinuousCapture(
                 self.device_serial, self.pick_a, self.pick_b,
-                color_stream_first=self.color_stream_first,
+                enable_depth_for_ir_sync=self.enable_depth_for_ir_sync,
             )
             self._capture.start()
+            if self.enable_depth_for_ir_sync and not self._capture.depth_sync_active:
+                self.error.emit(
+                    "WARNING: could not co-enable depth for IR/RGB sync (device couldn't "
+                    "resolve it alongside the requested profile) - falling back to no depth. "
+                    "The inter-sensor timing offset this normally fixes may reappear."
+                )
             self._start_time = time.time()
 
             def on_frames(stream_a_image, stream_b_image, pair_index):

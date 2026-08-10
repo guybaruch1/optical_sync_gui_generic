@@ -225,28 +225,29 @@ def test_start_session_passes_toolbar_switch_time_and_frame_sample_interval(qapp
 def test_start_session_passes_camera_sync_settings_through_to_the_engine(qapp, tmp_path):
     page = LiveSessionPage()
     page.set_context(**_minimal_context(
-        tmp_path, color_stream_first=False,
+        tmp_path, enable_depth_for_ir_sync=False,
         hardware_reset_before_start=True, hardware_reset_settle_s=3.5,
     ))
 
     with patch("gui.pages.live_session_page.SessionEngineThread", _FakeEngineThread):
         page.start_session()
 
-    assert _FakeEngineThread.last_kwargs["color_stream_first"] is False
+    assert _FakeEngineThread.last_kwargs["enable_depth_for_ir_sync"] is False
     assert _FakeEngineThread.last_kwargs["hardware_reset_before_start"] is True
     assert _FakeEngineThread.last_kwargs["hardware_reset_settle_s"] == 3.5
 
 
-def test_start_session_camera_sync_defaults_are_color_first_and_no_reset(qapp, tmp_path):
-    # Defaults must preserve the safe/cheap combination: reorder streams
-    # (free), but never pay the multi-second hardware reset unless asked.
+def test_start_session_camera_sync_defaults_are_depth_sync_on_and_no_reset(qapp, tmp_path):
+    # Defaults must preserve the confirmed-working combination: co-enable
+    # depth to fix IR/RGB sync, but never pay the multi-second hardware
+    # reset unless asked.
     page = LiveSessionPage()
     page.set_context(**_minimal_context(tmp_path))
 
     with patch("gui.pages.live_session_page.SessionEngineThread", _FakeEngineThread):
         page.start_session()
 
-    assert _FakeEngineThread.last_kwargs["color_stream_first"] is True
+    assert _FakeEngineThread.last_kwargs["enable_depth_for_ir_sync"] is True
     assert _FakeEngineThread.last_kwargs["hardware_reset_before_start"] is False
 
 

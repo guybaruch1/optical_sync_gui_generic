@@ -486,40 +486,56 @@ def set_manual_exposure(sensor, exposure, gain):
 
 
 class ContinuousCapture:
-    def __init__(self, device_serial, pick_a, pick_b, color_stream_first=True):
+    def __init__(self, device_serial, pick_a, pick_b, enable_depth_for_ir_sync=True):
         self.device_serial = device_serial
         self.pick_a = pick_a
         self.pick_b = pick_b
-        # See _ordered_picks - purely an ENABLE-ORDER knob for the rs.config,
-        # never a change to which pick is stream_a vs stream_b.
-        self.color_stream_first = color_stream_first
+        # See _depth_sync_stream/_build_config - whether to co-enable the
+        # stereo module's depth stream to fix IR/RGB sync. Set to whatever
+        # actually got used (may fall back to False on start() if the device
+        # can't resolve depth alongside the requested IR profile) so callers
+        # can report what really happened.
+        self.enable_depth_for_ir_sync = enable_depth_for_ir_sync
+        self.depth_sync_active = False
         self._pipeline = None
 
-    def _ordered_picks(self):
-        """The order picks are handed to config.enable_stream() - deliberately
-        SEPARATE from the stream_a/stream_b identity, which _get_frame still
-        resolves from self.pick_a/self.pick_b regardless of what this returns.
+    def _depth_sync_stream(self):
+        """Returns (width, height, fps) for the DEPTH stream to co-enable, or
+        None if there's nothing to fix.
 
-        Why the order matters at all: on RealSense devices whose two sensors
-        are internally sync'd (per Intel's docs, the RGB sensor acts as MASTER
-        and pulses the stereo/depth sensor at the start of each frame, as long
-        as both run at the same fps and exposure stays under the frame period),
-        bringing the stereo module up BEFORE any master exists to lock onto can
-        leave the two sensors free-running with a fixed phase offset instead of
-        genuinely sync'd. A standalone reference script that enables color
-        first measured a ~3.5ms inter-sensor timestamp gap on the same rig
-        where this app - which used to always enable pick_a (typically the IR
-        stream) first - consistently measured ~11.3ms.
+        Real-hardware finding (see CLAUDE.md's "IR/RGB sync depends on stream
+        OPEN order" section): rs.pipeline() gives no control over the order it
+        internally OPENS the two sensors, and that order decides whether IR
+        and RGB come out synchronized - RGB-before-IR produces a fixed
+        multi-ms offset (this app measured ~11.3ms) where IR-before-RGB (or a
+        standalone reference script that happened to enable color first, but
+        also always had depth+IR firmware-linked from an earlier prototype)
+        measured ~3.5ms. Co-enabling depth alongside IR+RGB fixes this
+        regardless of enable order, matching Intel's documented firmware
+        requirement that depth and IR be configured together - the pipeline
+        satisfies that requirement internally in an order we can't see when
+        only IR (not depth) is requested; enabling depth explicitly removes
+        the ambiguity.
 
-        Stable sort: color picks move ahead of non-color ones, and two picks
-        of the same kind (color+color, or infrared+infrared) keep their
-        original relative order, so this is a no-op for those pairings."""
-        picks = (self.pick_a, self.pick_b)
-        if not self.color_stream_first:
-            return list(picks)
-        return sorted(picks, key=lambda pick: pick["stream_type"] != rs.stream.color)
+        None when the setting is off, or when NEITHER pick is infrared (a
+        color+color / Dual-RGB pairing has no stereo module in play at all -
+        there's nothing for a depth stream to sync against).
 
-    def start(self):
+        Only the FIRST infrared pick's own (width, height, fps) is ever
+        returned, even for an IR+IR pairing - one depth stream, not two.
+        Depth intentionally matches that pick's own resolution/fps rather
+        than something smaller to save bandwidth: depth and IR come off one
+        stereo readout and the firmware requires them configured together, so
+        a mismatched-resolution depth stream would likely fail to resolve at
+        all."""
+        if not self.enable_depth_for_ir_sync:
+            return None
+        for pick in (self.pick_a, self.pick_b):
+            if pick["stream_type"] == rs.stream.infrared:
+                return pick["width"], pick["height"], pick["fps"]
+        return None
+
+    def _build_config(self, include_depth):
         config = rs.config()
         # Bind the pipeline to the exact physical device chosen in Device
         # Select - without this, with more than one RealSense camera
@@ -528,9 +544,36 @@ class ContinuousCapture:
         # which resolves via find_device_by_serial, correctly uses for
         # ROI/calibration), producing a wrong-camera bug with no error.
         config.enable_device(self.device_serial)
-        for pick in self._ordered_picks():
+        for pick in (self.pick_a, self.pick_b):
             config.enable_stream(pick["stream_type"], pick["stream_index"], pick["width"], pick["height"], pick["format"], pick["fps"])
+        if include_depth:
+            depth_stream = self._depth_sync_stream()
+            if depth_stream is not None:
+                width, height, fps = depth_stream
+                config.enable_stream(rs.stream.depth, 0, width, height, rs.format.z16, fps)
+        return config
+
+    def start(self):
         self._pipeline = rs.pipeline()
+        depth_stream = self._depth_sync_stream()
+        self.depth_sync_active = False
+        if depth_stream is not None:
+            config = self._build_config(include_depth=True)
+            can_resolve = False
+            try:
+                can_resolve = config.can_resolve(rs.pipeline_wrapper(self._pipeline))
+            except Exception:
+                # Must never be what breaks startup - fall back to the plain
+                # config below exactly as if depth simply weren't requested.
+                can_resolve = False
+            if can_resolve:
+                self.depth_sync_active = True
+            else:
+                # Device can't do depth at this IR resolution/fps - fall back
+                # rather than letting pipeline.start() throw and kill the run.
+                config = self._build_config(include_depth=False)
+        else:
+            config = self._build_config(include_depth=False)
         self._pipeline.start(config)
 
     def _get_frame(self, frameset, pick):

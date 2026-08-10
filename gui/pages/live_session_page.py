@@ -445,7 +445,7 @@ class LiveSessionPage(QWidget):
                      frame_drop_threshold_factor, warmup_pairs_to_skip, pairing_gap_outlier_threshold_us,
                      output_root, kept_csv_filename, dropped_csv_filename, snapshot_every_n_pairs, max_snapshots,
                      stream_a_roi, stream_b_roi, camera_name, stream_a_label, stream_b_label,
-                     dual_panel_config=None, color_stream_first=True,
+                     dual_panel_config=None, enable_depth_for_ir_sync=True,
                      hardware_reset_before_start=False, hardware_reset_settle_s=8.0):
         self._context = dict(
             ctx=ctx, device_serial=device_serial, pick_a=pick_a, pick_b=pick_b, camera_controls=camera_controls,
@@ -472,7 +472,7 @@ class LiveSessionPage(QWidget):
             dual_panel_config=dual_panel_config,
             # settings.yaml camera_sync: - see that section's own comment for
             # what each does and why they exist.
-            color_stream_first=color_stream_first,
+            enable_depth_for_ir_sync=enable_depth_for_ir_sync,
             hardware_reset_before_start=hardware_reset_before_start,
             hardware_reset_settle_s=hardware_reset_settle_s,
         )
@@ -572,7 +572,7 @@ class LiveSessionPage(QWidget):
             scan_direction=ctx["scan_direction"], switch_time_ms=switch_time_ms,
             display_stride=display_stride, position_gap_metric=position_gap_metric,
             dual_panel_config=ctx["dual_panel_config"],
-            color_stream_first=ctx["color_stream_first"],
+            enable_depth_for_ir_sync=ctx["enable_depth_for_ir_sync"],
             hardware_reset_before_start=ctx["hardware_reset_before_start"],
             hardware_reset_settle_s=ctx["hardware_reset_settle_s"],
         )
