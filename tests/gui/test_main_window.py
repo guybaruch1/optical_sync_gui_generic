@@ -185,7 +185,7 @@ def test_on_config_chosen_persists_last_test_name(qapp, monkeypatch):
     window._on_device_chosen("SN123", "Intel RealSense D455")
 
     window._on_config_chosen((IR1, COLOR0, {
-        "emitter_enabled": False, "auto_exposure": True, "exposure": None, "gain": None,
+        "emitter_enabled": False, "auto_exposure": True, "exposure": None,
     }))
 
     assert window.gui_state.last_test_name == "IR vs RGB sync"
@@ -245,7 +245,7 @@ def _window_after_config_chosen(qapp, monkeypatch, tmp_path, dual_panel=False):
     window.device_page.dual_panel_checkbox.setChecked(dual_panel)
     window._on_device_chosen("SN123", "Intel RealSense D455")
     window._on_config_chosen((IR1, COLOR0, {
-        "emitter_enabled": False, "auto_exposure": True, "exposure": None, "gain": None,
+        "emitter_enabled": False, "auto_exposure": True, "exposure": None,
     }))
     # This test harness skips ROI Select and Calibration entirely (jumps
     # straight to _on_calibration_done), so neither gui_state's ROI fields

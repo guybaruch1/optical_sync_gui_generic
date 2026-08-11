@@ -440,53 +440,62 @@ def enable_auto_exposure(sensor):
     doesn't support the option instead of silently proceeding with
     auto-exposure left however it was.
 
-    Also restores exposure/gain to the sensor's OWN factory defaults
+    Also restores EXPOSURE ONLY to the sensor's OWN factory default
     (get_option_range().default) before re-enabling auto, but ONLY when the
     sensor is actually coming FROM manual mode (enable_auto_exposure reads
-    back as 0 right now) - set_manual_exposure writes THREE options
-    (enable_auto_exposure=0, exposure, gain), so flipping only the auto flag
-    back on used to leave the manually-set exposure and especially gain
-    still written into the camera. That's a real, observed failure: a
-    manual->auto round trip in Stream Config left the sensor auto-exposing
-    with the UI's default gain of 16 still stuck in it, dark enough that
-    Calibration's Otsu blob detection stopped finding the LEDs at all - and
-    because the value lives in the CAMERA, not the app, it survived app
-    restarts and only a power-cycle/hardware_reset cleared it.
+    back as 0 right now) - set_manual_exposure writes exposure, so flipping
+    only the auto flag back on would leave the manually-set exposure value
+    stuck in the camera otherwise.
 
-    The was-manual GATE matters just as much as the restore itself. This
-    function is called unconditionally on every apply point (ROI Select,
-    Calibration, Threshold Tuning, Live Session) whenever the operator has
-    "Auto exposure" selected - not just on an actual Manual->Auto
-    transition. An earlier version restored the defaults unconditionally
-    every time, which is a real regression on a sensor that's ALREADY
-    auto-exposing correctly: forcibly resetting exposure/gain back to a
-    cold default and letting auto-exposure re-converge from scratch, on
-    every single run, can leave it under-converged within
+    GAIN IS DELIBERATELY NEVER TOUCHED HERE. An earlier version restored
+    gain to its own factory default alongside exposure, added after a real
+    observed failure: a manual->auto round trip in Stream Config left the
+    sensor auto-exposing with the UI's default gain of 16 still stuck in
+    it, dark enough that Calibration's Otsu blob detection stopped finding
+    the LEDs at all - and because the value lives in the CAMERA, not the
+    app, it survived app restarts and only a power-cycle/hardware_reset
+    cleared it. That restore-gain-to-default fix was unit-tested and
+    provably correct against a fake sensor, but on the real "RealSense D585
+    Prototype" rig the SAME symptom came back anyway - gain still not
+    returning to its original value after Manual->Auto, still needing a
+    manual hardware reset. The SDK-reported "factory default" this function
+    would restore to is firmware metadata, not a snapshot of the sensor's
+    true pre-manual state - on this prototype board that reported value
+    apparently isn't what a genuine hardware reset actually produces, and/or
+    this sensor's own AE algorithm doesn't reliably re-take control of gain
+    once it's been externally written, even after enable_auto_exposure is
+    flipped back on. Software "restoring" gain to *a* value was fighting a
+    firmware behavior that's proven unreliable here. The actual fix:
+    set_manual_exposure no longer writes gain AT ALL (see below), so there
+    is nothing of ours to restore and nothing for this class of bug to get
+    stuck on - re-enabling auto here just hands gain back to the camera's
+    own continuous AE algorithm, the same as a real power-cycle would.
+
+    The was-manual GATE still matters for the exposure restore it does do.
+    This function is called unconditionally on every apply point (ROI
+    Select, Calibration, Threshold Tuning, Live Session) whenever the
+    operator has "Auto exposure" selected - not just on an actual
+    Manual->Auto transition. An earlier version restored the default
+    unconditionally every time, which is a real regression on a sensor
+    that's ALREADY auto-exposing correctly: forcibly resetting exposure
+    back to a cold default and letting auto-exposure re-converge from
+    scratch, on every single run, can leave it under-converged within
     calibration.settle_frames' short settle window even though it would
     have stayed correctly exposed if left alone - producing an
     intermittently underexposed image (LEDs near the detection threshold
     dropping out) rather than the original bug's total blackout. Restoring
     only on an actual mode transition leaves an already-auto sensor
     completely undisturbed, matching every apply point that doesn't
-    actually need to fix anything.
-
-    Restoring the SDK-reported factory default (rather than snapshotting
-    whatever the value was before this app first touched it) keeps this
-    function stateless, and matches what the power-cycle that people reach
-    for as a workaround actually gives you. Auto-exposure re-derives its own
-    working value immediately afterwards, so the restored default is only
-    ever a starting point, never the value a run actually uses."""
+    actually need to fix anything."""
     if not sensor.supports(rs.option.enable_auto_exposure):
         return False
     was_manual = sensor.get_option(rs.option.enable_auto_exposure) == 0
-    if was_manual:
+    if was_manual and sensor.supports(rs.option.exposure):
         # Written BEFORE re-enabling auto, deliberately: on some sensors
         # writing exposure while auto-exposure is on implicitly turns auto
         # back off, so doing it in this order can't leave auto disabled
         # behind our back.
-        for option in (rs.option.exposure, rs.option.gain):
-            if sensor.supports(option):
-                sensor.set_option(option, sensor.get_option_range(option).default)
+        sensor.set_option(rs.option.exposure, sensor.get_option_range(rs.option.exposure).default)
     sensor.set_option(rs.option.enable_auto_exposure, 1)
     return True
 
@@ -498,12 +507,20 @@ def set_emitter_enabled(sensor, enabled):
     return False
 
 
-def set_manual_exposure(sensor, exposure, gain):
-    if not (sensor.supports(rs.option.enable_auto_exposure) and sensor.supports(rs.option.exposure) and sensor.supports(rs.option.gain)):
+def set_manual_exposure(sensor, exposure):
+    """Manual mode touches EXPOSURE ONLY - gain is deliberately never read
+    or written here. See enable_auto_exposure's docstring for why: an
+    earlier version also set gain (to the Stream Config UI's spinbox
+    value) and tried to restore it on the way back to Auto, but that
+    restore proved unreliable on real hardware (the "RealSense D585
+    Prototype" rig), leaving gain stuck until a physical hardware reset.
+    Never touching gain from software at all means there's nothing of ours
+    to get stuck - the camera's own auto-exposure algorithm always owns
+    gain, whether this sensor is currently in manual exposure mode or not."""
+    if not (sensor.supports(rs.option.enable_auto_exposure) and sensor.supports(rs.option.exposure)):
         return False
     sensor.set_option(rs.option.enable_auto_exposure, 0)
     sensor.set_option(rs.option.exposure, exposure)
-    sensor.set_option(rs.option.gain, gain)
     return True
 
 

@@ -1,19 +1,22 @@
 """Diagnostic script - NOT part of the shipped app, no automated tests.
 
 Software-only alternative to unplugging the camera when a sensor is stuck
-with a bad manual exposure/gain from BEFORE engine.streams.enable_auto_exposure
-was fixed to restore both to factory defaults on switch-back to Auto (see
-CLAUDE.md's "Camera controls (emitter/exposure)" section). That fix only
-takes effect the NEXT time something calls enable_auto_exposure on the
-sensor - which happens automatically once you re-run ROI Select/Calibration/
-Threshold Tuning/Live Session with "Auto exposure" selected in Stream
-Config - but if you just want to clear a stuck sensor RIGHT NOW without
-navigating the wizard, this calls it directly.
-
-This does exactly what a physical power-cycle/hardware_reset does for
-exposure/gain specifically (restores the SDK-reported factory default),
+with a bad manual exposure/gain (see CLAUDE.md's "Camera controls
+(emitter/exposure)" section). Restores exposure AND gain to their
+SDK-reported factory defaults, then re-enables auto-exposure - exactly what
+a physical power-cycle/hardware_reset does for exposure/gain specifically,
 without dropping the device off USB or requiring a several-second
 re-enumeration wait.
+
+Note this script does its own EXPLICIT gain reset (direct set_option, not
+via engine.streams.enable_auto_exposure) - the app's own normal runtime no
+longer touches gain at all (set_manual_exposure was narrowed to
+exposure-only after that restore-on-switch-back-to-auto approach proved
+unreliable on real hardware and could leave gain stuck regardless). This
+script still resets gain directly because its whole purpose is a one-off
+manual recovery for a sensor that's ALREADY stuck - including one left over
+from before that narrowing shipped - not something the app itself should
+ever need to do again going forward.
 
 Run from the repo root:
     python tools/camera_diag/reset_camera_exposure.py
@@ -76,11 +79,27 @@ def main():
     any_restored = False
     for sensor_index, sensor in enumerate(device.query_sensors()):
         sensor_name = sensor.get_info(rs.camera_info.name) if sensor.supports(rs.camera_info.name) else "sensor {}".format(sensor_index)
-        if enable_auto_exposure(sensor):
+        restored_exposure = enable_auto_exposure(sensor)
+        # Explicit, independent of enable_auto_exposure - the app's own
+        # runtime code deliberately never touches gain anymore (see
+        # engine.streams.set_manual_exposure's docstring), but this script's
+        # whole job is clearing out whatever a real sensor is CURRENTLY
+        # stuck with, including gain left over from before that changed.
+        restored_gain = False
+        if sensor.supports(rs.option.gain):
+            sensor.set_option(rs.option.gain, sensor.get_option_range(rs.option.gain).default)
+            restored_gain = True
+
+        if restored_exposure or restored_gain:
             any_restored = True
-            print("  [{}] {}: restored exposure/gain to factory defaults, auto-exposure ON".format(sensor_index, sensor_name))
+            restored_what = " and ".join(
+                filter(None, ["exposure" if restored_exposure else None, "gain" if restored_gain else None])
+            )
+            print("  [{}] {}: restored {} to factory defaults, auto-exposure ON".format(
+                sensor_index, sensor_name, restored_what
+            ))
         else:
-            print("  [{}] {}: no auto-exposure option - skipped".format(sensor_index, sensor_name))
+            print("  [{}] {}: no auto-exposure/gain option - skipped".format(sensor_index, sensor_name))
 
     if not any_restored:
         print("\nNo sensor on this device supports auto-exposure - nothing to reset.")

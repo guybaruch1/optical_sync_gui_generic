@@ -90,9 +90,9 @@ class ThresholdPreviewThread(QThread):
                             "auto-exposure manually."
                         )
                 else:
-                    if not set_manual_exposure(sensor, self.camera_controls["exposure"], self.camera_controls["gain"]):
+                    if not set_manual_exposure(sensor, self.camera_controls["exposure"]):
                         self.error.emit(
-                            "WARNING: manual exposure/gain not supported on sensor - confirm "
+                            "WARNING: manual exposure not supported on sensor - confirm "
                             "exposure settings manually."
                         )
 

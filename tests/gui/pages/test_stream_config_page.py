@@ -174,17 +174,16 @@ def test_next_emits_picks_and_default_auto_exposure_camera_controls(qapp):
     assert pick_b == COLOR0
     assert camera_controls["auto_exposure"] is True
     assert camera_controls["exposure"] is None
-    assert camera_controls["gain"] is None
+    assert "gain" not in camera_controls  # manual exposure never touches gain - see engine.streams
     assert camera_controls["emitter_enabled"] is False  # checkbox checked by default -> emitter disabled
 
 
-def test_manual_exposure_selection_reports_spinbox_values(qapp):
+def test_manual_exposure_selection_reports_spinbox_value(qapp):
     page = StreamConfigPage()
     page.populate(ctx=None, device_serial="123", tests=_tests(("IR vs RGB sync", [(IR1, COLOR0)])))
 
     page._camera_controls["manual_radio"].setChecked(True)
     page._camera_controls["exposure_spin"].setValue(5000)
-    page._camera_controls["gain_spin"].setValue(32)
 
     received = []
     page.config_chosen.connect(lambda payload: received.append(payload))
@@ -193,7 +192,6 @@ def test_manual_exposure_selection_reports_spinbox_values(qapp):
     _, _, camera_controls = received[0]
     assert camera_controls["auto_exposure"] is False
     assert camera_controls["exposure"] == 5000
-    assert camera_controls["gain"] == 32
 
 
 def test_unchecking_disable_emitter_checkbox_reports_emitter_enabled(qapp):
