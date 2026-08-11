@@ -23,6 +23,20 @@ def test_is_frame_drop_still_detects_a_real_drop_with_valid_fps():
     assert _is_frame_drop(prev_ts=0.0, curr_ts=500_000.0, fps=30, threshold_factor=1.5) is True
 
 
+def test_is_frame_drop_false_for_a_normal_on_time_delta():
+    # Expected delta at 30fps is ~33333us; landing right on schedule is not a drop.
+    assert _is_frame_drop(prev_ts=0.0, curr_ts=33_333.0, fps=30, threshold_factor=1.5) is False
+
+
+def test_is_frame_drop_true_when_timestamp_exactly_repeats():
+    # delta == 0 means the pipeline handed back the SAME frame again instead of a
+    # new one (a stale/duplicate frame) - real hardware never produces two
+    # distinct captures with a byte-identical HW timestamp. This used to slip
+    # through uncaught: 0 is neither negative nor greater than the threshold, so
+    # a repeated frame looked indistinguishable from "right on schedule".
+    assert _is_frame_drop(prev_ts=100_000.0, curr_ts=100_000.0, fps=30, threshold_factor=1.5) is True
+
+
 def test_find_last_on_led_plain_block():
     on = np.zeros(10, dtype=bool)
     on[3:6] = True  # LEDs 3,4,5 on -> last is 5

@@ -139,7 +139,16 @@ def _is_frame_drop(prev_ts, curr_ts, fps, threshold_factor):
         return False
     delta = curr_ts - prev_ts
     expected_delta = 1_000_000.0 / fps
-    return delta < 0 or delta > expected_delta * threshold_factor
+    # delta <= 0 (not just < 0) on purpose: a real hardware timestamp never
+    # repeats between two distinct captures, so delta == 0 means the pipeline
+    # handed back the SAME frame again instead of a new one - a stale/duplicate
+    # frame, not "right on schedule". Real-hardware data confirmed this: a
+    # stream occasionally re-reports its previous frame's timestamp for one
+    # pair while the other stream advances normally, producing an unflagged,
+    # unexcluded one-frame-period gap between the two streams that self-corrects
+    # the very next pair - invisible here before, because 0 is neither negative
+    # nor greater than the threshold.
+    return delta <= 0 or delta > expected_delta * threshold_factor
 
 
 class PositionGapMetric(Metric):
