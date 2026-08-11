@@ -35,16 +35,23 @@ measures:
   above and, on its own, did not change the result.
 """
 
+import os
+
+import cv2
 import pyrealsense2 as rs
 from PySide6.QtCore import QThread, Signal
 
 from engine.acquisition_loop import AcquisitionLoop, AcquisitionCallbacks
+from engine.metrics import is_position_gap_debug_outlier
 from engine.streams import (
     ContinuousCapture, find_device_by_serial, resolve_and_group,
     set_emitter_enabled, enable_auto_exposure, set_manual_exposure,
 )
 from engine.dual_panel_control import start_scanning, stop_scanning
-from domain.realsense_utils import sample_all_neighborhood_brightness, safe_neighborhood_size
+from domain.realsense_utils import (
+    sample_all_neighborhood_brightness, safe_neighborhood_size,
+    draw_led_state_overlay, combine_side_by_side,
+)
 
 
 class SessionEngineThread(QThread):
@@ -69,7 +76,9 @@ class SessionEngineThread(QThread):
                  scan_direction=None, switch_time_ms=None,
                  display_stride=10, position_gap_metric=None, dual_panel_config=None,
                  enable_depth_for_ir_sync=True, hardware_reset_before_start=False,
-                 hardware_reset_settle_s=8.0, parent=None):
+                 hardware_reset_settle_s=8.0, output_dir=None,
+                 position_gap_outlier_threshold_ms=None, position_gap_outlier_max_snapshots=200,
+                 parent=None):
         super().__init__(parent)
         self.ctx = ctx
         self.device_serial = device_serial
@@ -103,6 +112,16 @@ class SessionEngineThread(QThread):
         self.switch_time_ms = switch_time_ms
         self.display_stride = display_stride
         self.position_gap_metric = position_gap_metric
+        # Optical Sync outlier debug images - see _maybe_save_position_gap_outlier.
+        # output_dir/position_gap_outlier_threshold_ms are both None-able (rather
+        # than required) so tests/tools constructing this class without wiring
+        # this feature (e.g. any future direct construction that doesn't care
+        # about it) don't need to pass them - _maybe_save_position_gap_outlier
+        # is a no-op when either is None.
+        self.output_dir = output_dir
+        self.position_gap_outlier_threshold_ms = position_gap_outlier_threshold_ms
+        self.position_gap_outlier_max_snapshots = position_gap_outlier_max_snapshots
+        self._position_gap_outlier_count = 0
         self._stop_requested = False
         self._capture = None
         self._start_time = None
@@ -128,6 +147,42 @@ class SessionEngineThread(QThread):
                 if self.stream_b_xy is not None else None
             )
             yield stream_a_image, stream_b_image, stream_a_ts_us, stream_b_ts_us, stream_a_bright, stream_b_bright
+
+    def _maybe_save_position_gap_outlier(self, stream_a_image, stream_b_image, row):
+        """Saves a side-by-side IR/RGB debug image (same on/off overlay style
+        as gui/pages/live_session_page.py's periodic LED-state snapshots) for
+        a pair whose position_gap_ms ("Optical Sync") magnitude crossed
+        position_gap_outlier_threshold_ms - lets the operator check by eye
+        whether a given outlier reading was a real physical desync or an
+        algorithm/detection artifact.
+
+        Runs synchronously on THIS background thread, called from
+        AcquisitionLoop's unthrottled on_frame_pair hook (unlike the periodic
+        snapshot above, which only sees the throttled display_stride subset
+        on_frames gets) - it deliberately does NOT go through a Qt signal,
+        since the write itself doesn't need the GUI thread at all and most
+        individual outlier pairs wouldn't otherwise land on a displayed
+        sample."""
+        if self.output_dir is None or self.position_gap_outlier_threshold_ms is None:
+            return
+        if self.position_gap_metric is None:
+            return
+        if not is_position_gap_debug_outlier(row, self.position_gap_outlier_threshold_ms):
+            return
+        if self._position_gap_outlier_count >= self.position_gap_outlier_max_snapshots:
+            return
+
+        stream_a_mask = self.position_gap_metric.last_stream_a_on_mask
+        stream_b_mask = self.position_gap_metric.last_stream_b_on_mask
+        if stream_a_mask is None or stream_b_mask is None:
+            return
+
+        pair_index = row["pair_index"]
+        path = os.path.join(self.output_dir, "optical_sync_outlier_pair{:05d}.png".format(pair_index))
+        stream_a_debug = draw_led_state_overlay(stream_a_image, self.stream_a_xy, stream_a_mask)
+        stream_b_debug = draw_led_state_overlay(stream_b_image, self.stream_b_xy, stream_b_mask)
+        cv2.imwrite(path, combine_side_by_side(stream_a_debug, stream_b_debug))
+        self._position_gap_outlier_count += 1
 
     def run(self):
         import time
@@ -222,7 +277,12 @@ class SessionEngineThread(QThread):
             def on_stats(stats):
                 self.stats_ready.emit(stats)
 
-            callbacks = AcquisitionCallbacks(on_frames=on_frames, on_row=on_row, on_stats=on_stats)
+            def on_frame_pair(stream_a_image, stream_b_image, row):
+                self._maybe_save_position_gap_outlier(stream_a_image, stream_b_image, row)
+
+            callbacks = AcquisitionCallbacks(
+                on_frames=on_frames, on_row=on_row, on_stats=on_stats, on_frame_pair=on_frame_pair,
+            )
             loop = AcquisitionLoop(
                 self._frame_pairs_with_brightness(), self.test_session, callbacks,
                 display_stride=self.display_stride,
