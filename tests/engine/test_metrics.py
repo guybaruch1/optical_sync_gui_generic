@@ -6,6 +6,7 @@ from engine.metrics import (
     PairingGapMetric,
     PositionGapMetric,
     _is_frame_drop,
+    is_position_gap_debug_outlier,
 )
 
 
@@ -215,3 +216,33 @@ def test_position_gap_metric_tracks_last_on_masks_for_debug_snapshots():
 
     assert metric.last_stream_a_on_mask.tolist() == [False, True, False, False]
     assert metric.last_stream_b_on_mask.tolist() == [True, False, False, False]
+
+
+def test_is_position_gap_debug_outlier_true_at_exact_positive_threshold():
+    # >=, not >, matching "delta above or equal to 5".
+    row = {"position_gap_ms": 5.0, "position_gap_ms_excluded": False}
+    assert is_position_gap_debug_outlier(row, threshold_ms=5.0) is True
+
+
+def test_is_position_gap_debug_outlier_true_at_exact_negative_threshold():
+    # Magnitude-based - a -5ms gap is just as much an outlier as +5ms.
+    row = {"position_gap_ms": -5.0, "position_gap_ms_excluded": False}
+    assert is_position_gap_debug_outlier(row, threshold_ms=5.0) is True
+
+
+def test_is_position_gap_debug_outlier_false_below_threshold():
+    row = {"position_gap_ms": 4.9, "position_gap_ms_excluded": False}
+    assert is_position_gap_debug_outlier(row, threshold_ms=5.0) is False
+
+
+def test_is_position_gap_debug_outlier_false_when_already_excluded():
+    # A frame_drop/warmup-excluded row already has a known cause - don't
+    # also flag it as an unexplained optical-sync outlier.
+    row = {"position_gap_ms": 50.0, "position_gap_ms_excluded": True}
+    assert is_position_gap_debug_outlier(row, threshold_ms=5.0) is False
+
+
+def test_is_position_gap_debug_outlier_false_when_value_is_none():
+    # no_led_data/miss rows carry value=None - nothing to threshold against.
+    row = {"position_gap_ms": None, "position_gap_ms_excluded": True}
+    assert is_position_gap_debug_outlier(row, threshold_ms=5.0) is False

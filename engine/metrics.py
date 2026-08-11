@@ -196,3 +196,22 @@ class PositionGapMetric(Metric):
         if is_warmup:
             return MetricResult(name=self.name, value=gap_ms, excluded=True, exclude_reason="warmup")
         return MetricResult(name=self.name, value=gap_ms, excluded=False, exclude_reason=None)
+
+
+def is_position_gap_debug_outlier(row, threshold_ms):
+    """Decides whether a frame pair's position_gap_ms ("Optical Sync" in the
+    UI) is large enough, and not already explained by another exclusion
+    reason, to be worth saving a side-by-side IR/RGB debug image for - see
+    engine/session_engine.py's _maybe_save_position_gap_outlier, the only
+    caller. Deliberately independent of PositionGapMetric's own exclusion
+    logic (no new MetricResult/exclude_reason) - this is a side-channel
+    debug-image trigger, not a metric change.
+
+    Magnitude-based (abs(value) >= threshold_ms): a large negative gap is
+    just as much an outlier as a large positive one. Already-excluded rows
+    (frame_drop/warmup/no_led_data/miss) return False - those already have a
+    known cause, and no_led_data/miss rows carry value=None anyway."""
+    value = row.get("position_gap_ms")
+    if value is None or row.get("position_gap_ms_excluded"):
+        return False
+    return abs(value) >= threshold_ms
