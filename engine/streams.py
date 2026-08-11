@@ -307,7 +307,62 @@ def _try_derive_expected_keys(groups):
     return keys
 
 
-def capture_synced_frame_pair(groups, on_both_streaming=None, settle_frames=15, timeout_s=10.0):
+# Floor for capture_synced_frame_pair's default timeout - unchanged from the
+# original fixed constant, so any stream fast enough that this floor was
+# already generous (everything at ~15fps or faster) behaves byte-for-byte
+# like before.
+_MIN_CAPTURE_TIMEOUT_S = 10.0
+# How many multiples of the bare-minimum time (settle_frames / fps) to
+# budget for the post-trigger settle wait - real-hardware startup/settle
+# latency (re-locking after a mode change, callback/dispatch overhead, LED
+# panel timing) is real overhead on top of the theoretical minimum, and it
+# costs proportionally more wall-clock time the slower the stream is
+# configured to run (each "slot" is bigger at 5fps than at 30fps).
+_CAPTURE_TIMEOUT_SAFETY_FACTOR = 5.0
+
+
+def _try_min_requested_fps(groups):
+    """Slowest fps among every profile across `groups` - that's the stream
+    that governs how long settle_frames actually takes to accumulate.
+    Returns None if any profile isn't introspectable this way (same opaque
+    test-fake-profile fallback convention as _try_get_stream_key/
+    _try_derive_expected_keys above; real rs profile objects always support
+    fps())."""
+    fps_values = []
+    for _, profiles in groups:
+        for p in profiles:
+            fps = getattr(p, "fps", None)
+            if not callable(fps):
+                return None
+            fps_values.append(fps())
+    return min(fps_values) if fps_values else None
+
+
+def _default_capture_timeout_s(groups, settle_frames):
+    """capture_synced_frame_pair's default timeout when the caller doesn't
+    pass one explicitly - scaled to the SLOWEST requested stream's own fps
+    rather than a flat constant blind to how slow a stream was configured
+    to run. Confirmed on real hardware: a 640x480@5fps manual-exposure
+    color stream needs a bare theoretical minimum of settle_frames/fps ~= 3s
+    just for settle_frames=15 fresh frames to arrive - a flat 10s budget
+    leaves almost no real-world margin at that rate (each dropped/delayed
+    frame costs a full 200ms slot, 6x what it costs at 30fps), and hitting
+    the timeout kills the capture (and the sensor's in-progress manual-
+    exposure transition) mid-settle instead of letting an otherwise-healthy
+    slow stream finish.
+
+    Can only ever equal or EXCEED _MIN_CAPTURE_TIMEOUT_S, never shrink below
+    it - every stream at ~15fps or faster keeps the exact old fixed-10s
+    behavior; only a slower-than-that stream gets a bigger budget. Falls
+    back to the fixed floor when fps can't be determined at all (opaque
+    test-fake profiles - see _try_min_requested_fps)."""
+    min_fps = _try_min_requested_fps(groups)
+    if not min_fps:  # None, or a nonsensical <=0 value
+        return _MIN_CAPTURE_TIMEOUT_S
+    return max(_MIN_CAPTURE_TIMEOUT_S, (settle_frames / min_fps) * _CAPTURE_TIMEOUT_SAFETY_FACTOR)
+
+
+def capture_synced_frame_pair(groups, on_both_streaming=None, settle_frames=15, timeout_s=None):
     """
     Generalized from the original two-sensor (stereo IR + RGB) version -
     ported verbatim from optical_sync_poc_/realsense_utils.py - to an
@@ -358,7 +413,15 @@ def capture_synced_frame_pair(groups, on_both_streaming=None, settle_frames=15, 
     profiles (they're never called, only passed to sensor.open()), so that
     cross-check is a known no-op under test and only actually engages
     against real hardware/profiles.
+
+    timeout_s: explicit override for both wait phases below. If None (the
+    default), it's derived per-call from settle_frames and the slowest
+    requested stream's own fps instead of a flat constant - see
+    _default_capture_timeout_s for why a fixed budget isn't enough margin
+    for a slow (e.g. 5fps) stream.
     """
+    if timeout_s is None:
+        timeout_s = _default_capture_timeout_s(groups, settle_frames)
     state = {}
     expected_stream_count = sum(len(profiles) for _, profiles in groups)
     expected_keys = _try_derive_expected_keys(groups)

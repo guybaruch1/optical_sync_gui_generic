@@ -9,6 +9,7 @@ from engine.streams import (
     list_video_stream_options_from_device, resolve_and_group, group_for_pick,
     set_emitter_enabled, set_manual_exposure, stream_slug,
     parse_camera_tests_config, resolve_camera_tests,
+    _default_capture_timeout_s, _MIN_CAPTURE_TIMEOUT_S, _CAPTURE_TIMEOUT_SAFETY_FACTOR,
 )
 
 
@@ -272,6 +273,55 @@ class _FakeNonDeliveringSensor:
 
     def close(self):
         pass
+
+
+# --- _default_capture_timeout_s: capture_synced_frame_pair's default
+# timeout (when the caller doesn't pass timeout_s explicitly) scales with
+# the slowest requested stream's own fps, rather than being a flat constant
+# blind to how slow a stream was configured to run - confirmed on real
+# hardware, a 640x480@5fps manual-exposure color stream's Calibration
+# capture timed out waiting for settle_frames=15 fresh frames within the
+# old fixed 10s budget, which left almost no real-world margin at that
+# rate (a bare theoretical minimum of 15/5=3s, no room for any real
+# startup/settle latency on top of it). ---
+
+class _FakeFpsProfile:
+    def __init__(self, fps):
+        self._fps = fps
+
+    def fps(self):
+        return self._fps
+
+
+def test_default_capture_timeout_floors_at_the_original_constant_for_fast_streams():
+    # 15 settle_frames at 30fps needs a bare 0.5s minimum - nowhere near
+    # enough to justify growing past the original fixed floor, so fast
+    # streams see byte-for-byte the same timeout as before this existed.
+    groups = [(None, [_FakeFpsProfile(30)])]
+    assert _default_capture_timeout_s(groups, settle_frames=15) == _MIN_CAPTURE_TIMEOUT_S
+
+
+def test_default_capture_timeout_scales_up_for_a_slow_stream():
+    groups = [(None, [_FakeFpsProfile(5)])]
+    expected = (15 / 5) * _CAPTURE_TIMEOUT_SAFETY_FACTOR  # 15.0 at the current safety factor
+    assert _default_capture_timeout_s(groups, settle_frames=15) == expected
+    assert expected > _MIN_CAPTURE_TIMEOUT_S  # the actual fix - genuinely bigger than the old flat budget
+
+
+def test_default_capture_timeout_uses_the_slowest_stream_across_groups():
+    # Two streams at different fps - the SLOWER one governs how long
+    # settle_frames actually takes to accumulate for a synced pair.
+    groups = [(None, [_FakeFpsProfile(30)]), (None, [_FakeFpsProfile(5)])]
+    expected = (15 / 5) * _CAPTURE_TIMEOUT_SAFETY_FACTOR
+    assert _default_capture_timeout_s(groups, settle_frames=15) == expected
+
+
+def test_default_capture_timeout_falls_back_to_floor_for_opaque_test_fake_profiles():
+    # Plain-string placeholder profiles (this file's own convention for
+    # sensor.open()-only fakes) don't support fps() - same fallback as
+    # _try_derive_expected_keys already has for stream_type()/stream_index().
+    groups = [(None, ["opaque_profile"])]
+    assert _default_capture_timeout_s(groups, settle_frames=15) == _MIN_CAPTURE_TIMEOUT_S
 
 
 def test_capture_synced_frame_pair_with_two_distinct_sensors():
