@@ -14,10 +14,15 @@ from engine.streams import (
 
 
 class FakeOptionRange:
-    """Stand-in for pyrealsense2's option_range - only .default is read."""
+    """Stand-in for pyrealsense2's option_range - .default is read by
+    enable_auto_exposure's restore; .min/.max are read by
+    set_manual_exposure's clamping. Unbounded (+/-inf) by default so tests
+    that don't care about range never accidentally trigger clamping."""
 
-    def __init__(self, default):
+    def __init__(self, default, min_value=float("-inf"), max_value=float("inf")):
         self.default = default
+        self.min = min_value
+        self.max = max_value
 
 
 class FakeOptionSensor:
@@ -32,12 +37,16 @@ class FakeOptionSensor:
     option IS set_option()'d, get_option() reads that value back instead
     (matching a real sensor). Falls back to 1 for anything neither seeded
     nor written, since "already auto-exposing" is the common case most
-    tests don't care about."""
+    tests don't care about.
 
-    def __init__(self, supported_options, option_defaults=None, initial_values=None):
+    option_ranges: {option: (min, max)} - unbounded for any option not
+    listed, so existing tests that only care about .default are unaffected."""
+
+    def __init__(self, supported_options, option_defaults=None, initial_values=None, option_ranges=None):
         self._supported_options = set(supported_options)
         self._option_defaults = option_defaults or {}
         self._initial_values = initial_values or {}
+        self._option_ranges = option_ranges or {}
         self.set_options = {}
         # Ordered log of every write, so a test can assert on ORDER (e.g. that
         # exposure/gain are restored BEFORE auto-exposure is switched on),
@@ -55,7 +64,8 @@ class FakeOptionSensor:
         return self.set_options.get(option, self._initial_values.get(option, 1))
 
     def get_option_range(self, option):
-        return FakeOptionRange(self._option_defaults.get(option, 0))
+        min_value, max_value = self._option_ranges.get(option, (float("-inf"), float("inf")))
+        return FakeOptionRange(self._option_defaults.get(option, 0), min_value, max_value)
 
 
 def test_enable_auto_exposure_sets_option_on_when_supported():
@@ -605,6 +615,41 @@ def test_set_manual_exposure_never_touches_gain():
     set_manual_exposure(sensor, exposure=150)
 
     assert rs.option.gain not in sensor.set_options
+
+
+# --- Regression: the Stream Config UI's exposure spinbox accepts any value
+# from 1 to 1,000,000 with no way to know a given sensor's actual valid
+# range ahead of time - that range isn't fixed per sensor model, it can
+# depend on the CURRENTLY configured resolution/fps. Confirmed on real
+# hardware: a 640x480@5fps color stream raised a raw pyrealsense2
+# "out of range value for argument 'value'" exception straight out of
+# sensor.set_option() when Manual exposure was applied at ROI Select. ---
+
+def test_set_manual_exposure_clamps_value_above_sensor_max():
+    sensor = FakeOptionSensor(
+        supported_options={rs.option.enable_auto_exposure, rs.option.exposure},
+        option_ranges={rs.option.exposure: (1, 10000)},
+    )
+    assert set_manual_exposure(sensor, exposure=1000000) is True
+    assert sensor.set_options[rs.option.exposure] == 10000  # clamped to the sensor's own max
+
+
+def test_set_manual_exposure_clamps_value_below_sensor_min():
+    sensor = FakeOptionSensor(
+        supported_options={rs.option.enable_auto_exposure, rs.option.exposure},
+        option_ranges={rs.option.exposure: (100, 10000)},
+    )
+    assert set_manual_exposure(sensor, exposure=1) is True
+    assert sensor.set_options[rs.option.exposure] == 100  # clamped to the sensor's own min
+
+
+def test_set_manual_exposure_passes_through_value_already_within_range():
+    sensor = FakeOptionSensor(
+        supported_options={rs.option.enable_auto_exposure, rs.option.exposure},
+        option_ranges={rs.option.exposure: (1, 10000)},
+    )
+    assert set_manual_exposure(sensor, exposure=8500) is True
+    assert sensor.set_options[rs.option.exposure] == 8500  # untouched - already valid
 
 
 def test_set_manual_exposure_returns_false_when_fully_unsupported():
