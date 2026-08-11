@@ -468,6 +468,7 @@ class LiveSessionPage(QWidget):
                      stream_a_threshold, stream_b_threshold,
                      stream_a_xy, stream_b_xy, num_leds, neighborhood_size,
                      frame_drop_threshold_factor, warmup_pairs_to_skip, pairing_gap_outlier_threshold_us,
+                     position_gap_outlier_threshold_ms, position_gap_outlier_max_snapshots,
                      output_root, kept_csv_filename, dropped_csv_filename, snapshot_every_n_pairs, max_snapshots,
                      stream_a_roi, stream_b_roi, camera_name, stream_a_label, stream_b_label,
                      dual_panel_config=None, enable_depth_for_ir_sync=True,
@@ -485,6 +486,8 @@ class LiveSessionPage(QWidget):
             frame_drop_threshold_factor=frame_drop_threshold_factor,
             warmup_pairs_to_skip=warmup_pairs_to_skip,
             pairing_gap_outlier_threshold_us=pairing_gap_outlier_threshold_us,
+            position_gap_outlier_threshold_ms=position_gap_outlier_threshold_ms,
+            position_gap_outlier_max_snapshots=position_gap_outlier_max_snapshots,
             # Raw root + filename templates, not a pre-joined output_dir/
             # kept_csv_path/dropped_csv_path - start_session() mints a fresh
             # run folder (_begin_new_run_output) and joins these on every
@@ -608,6 +611,9 @@ class LiveSessionPage(QWidget):
             enable_depth_for_ir_sync=ctx["enable_depth_for_ir_sync"],
             hardware_reset_before_start=ctx["hardware_reset_before_start"],
             hardware_reset_settle_s=ctx["hardware_reset_settle_s"],
+            output_dir=ctx["output_dir"],
+            position_gap_outlier_threshold_ms=ctx["position_gap_outlier_threshold_ms"],
+            position_gap_outlier_max_snapshots=ctx["position_gap_outlier_max_snapshots"],
         )
         self.engine_thread.frame_ready.connect(self._on_frame_ready)
         self.engine_thread.row_ready.connect(self._on_row_ready)

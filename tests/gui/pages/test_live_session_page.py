@@ -54,6 +54,7 @@ def _minimal_context(tmp_path, **overrides):
         stream_a_xy=np.array([(1, 1), (2, 2)]), stream_b_xy=np.array([(1, 1), (2, 2)]),
         num_leds=2, neighborhood_size=5, frame_drop_threshold_factor=1.5,
         warmup_pairs_to_skip=0, pairing_gap_outlier_threshold_us=100000,
+        position_gap_outlier_threshold_ms=5, position_gap_outlier_max_snapshots=200,
         output_root=str(tmp_path), kept_csv_filename="kept.csv", dropped_csv_filename="dropped.csv",
         snapshot_every_n_pairs=20, max_snapshots=2,
         stream_a_roi=(0, 0, 4, 4), stream_b_roi=(0, 0, 4, 4), camera_name="Intel RealSense D455",
