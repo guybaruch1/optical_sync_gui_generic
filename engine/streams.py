@@ -276,6 +276,38 @@ def group_for_pick(groups, pick):
     raise RuntimeError("No resolved sensor group contains pick {!r}".format(pick))
 
 
+def exposure_for_group(profiles, pick_a, pick_b, exposure_a, exposure_b):
+    """Which of exposure_a/exposure_b applies to a resolved sensor group,
+    given that group's own `profiles` list and the two original picks -
+    lets Stream Config's per-stream exposure values (different sensors have
+    different brightness characteristics, same reasoning as Threshold
+    Tuning's own independent per-stream threshold fraction) reach the right
+    physical sensor when pick_a and pick_b resolve to two DISTINCT sensors
+    (the common Stereo Module + RGB Camera shape).
+
+    A group containing BOTH pick_a's and pick_b's streams (the Dual-RGB
+    shape - two stream profiles sharing ONE physical sensor) can only ever
+    have ONE real exposure value in hardware, regardless of what the UI
+    offers per stream - exposure_a wins in that case, arbitrarily but
+    deterministically (matches this project's other "Stream A takes
+    precedence" spots, e.g. preselection logic only ever matching pick_a).
+    Callers applying camera controls per group (gui/pages/roi_select_page.py's
+    _apply_camera_controls and its duplicated inline copies in
+    engine/session_engine.py/engine/threshold_preview_thread.py) call this
+    once per group to resolve which value to actually write."""
+    has_a = any(_pick_matches(p, pick_a) for p in profiles)
+    has_b = any(_pick_matches(p, pick_b) for p in profiles)
+    if has_a:
+        return exposure_a
+    if has_b:
+        return exposure_b
+    # Shouldn't happen - every group resolve_and_group produces contains at
+    # least one of the two original picks by construction - but fall back
+    # to exposure_a rather than raising, matching this function's other
+    # "A takes precedence" tie-break.
+    return exposure_a
+
+
 def _try_get_stream_key(profile):
     """Return (stream_type, stream_index) for a real profile object, or None
     if `profile` doesn't support those calls (e.g. a plain-string test-fake

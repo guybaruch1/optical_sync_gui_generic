@@ -155,17 +155,17 @@ class MainWindow(QMainWindow):
         # off the still-current page rather than added to the signal payload.
         self.gui_state.last_test_name = self.stream_config_page.current_test_name
 
-        # camera_controls is now ONE global control set (applied to both
-        # streams together, see gui.pages.roi_select_page._apply_camera_
-        # controls) - GuiState still keeps separate stream_a_*/stream_b_*
-        # emitter/exposure/gain fields (it's just a lossy prefill record,
-        # see this module's docstring), so the same global values are
-        # written into both sides. camera_controls has no "gain" key at all
-        # anymore - manual exposure never touches gain (see
-        # engine.streams.set_manual_exposure's docstring) - so
-        # stream_a_gain/stream_b_gain are left at None; the GuiState fields
-        # themselves stay for backward compatibility with old gui_state.json
-        # files, just unused going forward.
+        # camera_controls' emitter/auto_exposure MODE is one shared choice
+        # (GuiState just mirrors the same value into both stream_a_*/
+        # stream_b_* fields, it's just a lossy prefill record, see this
+        # module's docstring) - but exposure itself is genuinely per-stream
+        # now (exposure_a/exposure_b), so each side gets its OWN value here
+        # too. camera_controls has no "gain" key at all anymore - manual
+        # exposure never touches gain (see engine.streams.
+        # set_manual_exposure's docstring) - so stream_a_gain/stream_b_gain
+        # are left at None; the GuiState fields themselves stay for
+        # backward compatibility with old gui_state.json files, just
+        # unused going forward.
         self.gui_state.stream_a_type = pick_a["stream_type"].name
         self.gui_state.stream_a_index = pick_a["stream_index"]
         self.gui_state.stream_a_width = pick_a["width"]
@@ -173,7 +173,7 @@ class MainWindow(QMainWindow):
         self.gui_state.stream_a_fps = pick_a["fps"]
         self.gui_state.stream_a_emitter_enabled = camera_controls["emitter_enabled"]
         self.gui_state.stream_a_auto_exposure = camera_controls["auto_exposure"]
-        self.gui_state.stream_a_exposure = camera_controls["exposure"]
+        self.gui_state.stream_a_exposure = camera_controls["exposure_a"]
         self.gui_state.stream_a_gain = None
         self.gui_state.stream_b_type = pick_b["stream_type"].name
         self.gui_state.stream_b_index = pick_b["stream_index"]
@@ -182,7 +182,7 @@ class MainWindow(QMainWindow):
         self.gui_state.stream_b_fps = pick_b["fps"]
         self.gui_state.stream_b_emitter_enabled = camera_controls["emitter_enabled"]
         self.gui_state.stream_b_auto_exposure = camera_controls["auto_exposure"]
-        self.gui_state.stream_b_exposure = camera_controls["exposure"]
+        self.gui_state.stream_b_exposure = camera_controls["exposure_b"]
         self.gui_state.stream_b_gain = None
         save_gui_state(self.gui_state)
 
