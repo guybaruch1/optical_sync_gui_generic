@@ -17,6 +17,7 @@ class AcquisitionCallbacks:
     on_frames: callable
     on_row: callable
     on_stats: callable
+    on_frame_pair: "callable | None" = None
 
 
 class AcquisitionLoop:
@@ -43,6 +44,8 @@ class AcquisitionLoop:
             )
             row = self.test_session.process_pair(sample)
             self.callbacks.on_row(row)
+            if self.callbacks.on_frame_pair is not None:
+                self.callbacks.on_frame_pair(stream_a_image, stream_b_image, row)
 
             if pair_index % self.display_stride == 0:
                 self.callbacks.on_frames(stream_a_image, stream_b_image, pair_index)
