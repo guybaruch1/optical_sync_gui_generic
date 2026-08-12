@@ -200,6 +200,32 @@ def test_manual_exposure_selection_reports_independent_spinbox_values(qapp):
     assert camera_controls["exposure_b"] == 9000
 
 
+def test_exposure_labels_show_actual_stream_for_ir_vs_rgb(qapp):
+    # Exposure A/B's labels must name the actual physical stream each
+    # spinbox controls (not a generic "Exposure A"/"Exposure B") - a fixed
+    # "IR"/"RGB" label would be flat wrong for the IR1-vs-IR2 test below.
+    page = StreamConfigPage()
+    page.populate(ctx=None, device_serial="123", tests=_tests(("IR vs RGB sync", [(IR1, COLOR0)])))
+
+    assert page._camera_controls["exposure_a_label"].text() == "Exposure (Infrared 1):"
+    assert page._camera_controls["exposure_b_label"].text() == "Exposure (Color 0):"
+
+
+def test_exposure_labels_update_on_test_change(qapp):
+    page = StreamConfigPage()
+    page.populate(
+        ctx=None, device_serial="123",
+        tests=_tests(("IR1 vs IR2 sync", [(IR1, IR2)]), ("IR vs RGB sync", [(IR1, COLOR0)])),
+    )
+    assert page._camera_controls["exposure_a_label"].text() == "Exposure (Infrared 1):"
+    assert page._camera_controls["exposure_b_label"].text() == "Exposure (Infrared 2):"
+
+    page.combo_test.setCurrentIndex(1)
+
+    assert page._camera_controls["exposure_a_label"].text() == "Exposure (Infrared 1):"
+    assert page._camera_controls["exposure_b_label"].text() == "Exposure (Color 0):"
+
+
 def test_unchecking_disable_emitter_checkbox_reports_emitter_enabled(qapp):
     # The checkbox now defaults to checked (emitter disabled - see
     # test_next_emits_picks_and_default_auto_exposure_camera_controls above

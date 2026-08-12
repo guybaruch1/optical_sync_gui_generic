@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
 )
 
 from engine.stream_preview_thread import StreamPreviewThread
+from gui.pages.roi_select_page import stream_label
 from gui.widgets.video_panel import VideoPanel
 
 
@@ -210,6 +211,7 @@ class StreamConfigPage(QWidget):
                 self.combo_sensor_options.addItem(_sensor_option_label(option), userData=option)
         self.combo_sensor_options.blockSignals(False)
         self._preselect_sensor_options()
+        self._update_exposure_labels()
 
     def _preselect_sensor_options(self):
         if not self._preferred_a:
@@ -260,13 +262,19 @@ class StreamConfigPage(QWidget):
         box_layout.addWidget(manual_radio)
 
         exposure_row = QHBoxLayout()
-        exposure_row.addWidget(QLabel("Exposure A:"))
+        # Placeholder text until _update_exposure_labels() fills in the
+        # actual stream each spinbox controls, once a test is selected (see
+        # populate()/_populate_sensor_options) - stays generic "Exposure A"/
+        # "Exposure B" only in the brief window before that first happens.
+        exposure_a_label = QLabel("Exposure A:")
+        exposure_row.addWidget(exposure_a_label)
         exposure_a_spin = QSpinBox()
         exposure_a_spin.setRange(1, 1000000)
         exposure_a_spin.setValue(8500)
         exposure_a_spin.setEnabled(False)
         exposure_row.addWidget(exposure_a_spin)
-        exposure_row.addWidget(QLabel("Exposure B:"))
+        exposure_b_label = QLabel("Exposure B:")
+        exposure_row.addWidget(exposure_b_label)
         exposure_b_spin = QSpinBox()
         exposure_b_spin.setRange(1, 1000000)
         exposure_b_spin.setValue(8500)
@@ -282,9 +290,32 @@ class StreamConfigPage(QWidget):
             "emitter_checkbox": emitter_checkbox,
             "auto_radio": auto_radio,
             "manual_radio": manual_radio,
+            "exposure_a_label": exposure_a_label,
             "exposure_a_spin": exposure_a_spin,
+            "exposure_b_label": exposure_b_label,
             "exposure_b_spin": exposure_b_spin,
         }
+
+    def _update_exposure_labels(self):
+        """Relabels the two exposure spinboxes with the actual stream each
+        one currently controls (e.g. "Exposure (Infrared 1):" - the same
+        stream_label() ROI Select's own window titles use), rather than
+        generic position-based "Exposure A"/"Exposure B" text. A test's
+        stream_a/stream_b identities are fixed by settings.yaml (see this
+        module's own docstring) and don't change across sensor_options
+        selections within the same test, so this only needs re-running when
+        the selected TEST changes - called from _populate_sensor_options,
+        which runs on both populate() and combo_test's own currentIndexChanged.
+        Falls back to the generic labels if no pick exists yet (e.g. an
+        empty tests list)."""
+        pick_a, pick_b = self.pick_a, self.pick_b
+        w = self._camera_controls
+        w["exposure_a_label"].setText(
+            "Exposure ({}):".format(stream_label(pick_a)) if pick_a is not None else "Exposure A:"
+        )
+        w["exposure_b_label"].setText(
+            "Exposure ({}):".format(stream_label(pick_b)) if pick_b is not None else "Exposure B:"
+        )
 
     def _read_camera_controls(self):
         """Returns the single global camera-control dict - applied
