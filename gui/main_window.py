@@ -160,7 +160,12 @@ class MainWindow(QMainWindow):
         # controls) - GuiState still keeps separate stream_a_*/stream_b_*
         # emitter/exposure/gain fields (it's just a lossy prefill record,
         # see this module's docstring), so the same global values are
-        # written into both sides.
+        # written into both sides. camera_controls has no "gain" key at all
+        # anymore - manual exposure never touches gain (see
+        # engine.streams.set_manual_exposure's docstring) - so
+        # stream_a_gain/stream_b_gain are left at None; the GuiState fields
+        # themselves stay for backward compatibility with old gui_state.json
+        # files, just unused going forward.
         self.gui_state.stream_a_type = pick_a["stream_type"].name
         self.gui_state.stream_a_index = pick_a["stream_index"]
         self.gui_state.stream_a_width = pick_a["width"]
@@ -169,7 +174,7 @@ class MainWindow(QMainWindow):
         self.gui_state.stream_a_emitter_enabled = camera_controls["emitter_enabled"]
         self.gui_state.stream_a_auto_exposure = camera_controls["auto_exposure"]
         self.gui_state.stream_a_exposure = camera_controls["exposure"]
-        self.gui_state.stream_a_gain = camera_controls["gain"]
+        self.gui_state.stream_a_gain = None
         self.gui_state.stream_b_type = pick_b["stream_type"].name
         self.gui_state.stream_b_index = pick_b["stream_index"]
         self.gui_state.stream_b_width = pick_b["width"]
@@ -178,7 +183,7 @@ class MainWindow(QMainWindow):
         self.gui_state.stream_b_emitter_enabled = camera_controls["emitter_enabled"]
         self.gui_state.stream_b_auto_exposure = camera_controls["auto_exposure"]
         self.gui_state.stream_b_exposure = camera_controls["exposure"]
-        self.gui_state.stream_b_gain = camera_controls["gain"]
+        self.gui_state.stream_b_gain = None
         save_gui_state(self.gui_state)
 
         self.roi_page.set_context(

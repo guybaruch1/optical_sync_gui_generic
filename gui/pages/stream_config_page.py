@@ -250,16 +250,9 @@ class StreamConfigPage(QWidget):
         exposure_spin.setValue(8500)
         exposure_spin.setEnabled(False)
         exposure_row.addWidget(exposure_spin)
-        exposure_row.addWidget(QLabel("Gain:"))
-        gain_spin = QSpinBox()
-        gain_spin.setRange(0, 128)
-        gain_spin.setValue(16)
-        gain_spin.setEnabled(False)
-        exposure_row.addWidget(gain_spin)
         box_layout.addLayout(exposure_row)
 
         manual_radio.toggled.connect(exposure_spin.setEnabled)
-        manual_radio.toggled.connect(gain_spin.setEnabled)
 
         return {
             "group_box": box,
@@ -267,21 +260,22 @@ class StreamConfigPage(QWidget):
             "auto_radio": auto_radio,
             "manual_radio": manual_radio,
             "exposure_spin": exposure_spin,
-            "gain_spin": gain_spin,
         }
 
     def _read_camera_controls(self):
         """Returns the single global camera-control dict - applied
         uniformly to every resolved sensor (see
         gui.pages.roi_select_page._apply_camera_controls), unlike the old
-        per-sensor-group list."""
+        per-sensor-group list. No "gain" key - manual exposure mode never
+        touches gain at all (see engine.streams.set_manual_exposure's
+        docstring for why), so there is nothing for this dict to carry for
+        it."""
         w = self._camera_controls
         auto_exposure = w["auto_radio"].isChecked()
         return {
             "emitter_enabled": not w["emitter_checkbox"].isChecked(),
             "auto_exposure": auto_exposure,
             "exposure": None if auto_exposure else w["exposure_spin"].value(),
-            "gain": None if auto_exposure else w["gain_spin"].value(),
         }
 
     def _streams_are_identical(self, pick_a, pick_b):

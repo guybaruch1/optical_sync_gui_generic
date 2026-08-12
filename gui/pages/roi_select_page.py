@@ -102,9 +102,9 @@ def _apply_camera_controls(groups, camera_controls):
                     "auto-exposure manually."
                 )
         else:
-            if not set_manual_exposure(sensor, camera_controls["exposure"], camera_controls["gain"]):
+            if not set_manual_exposure(sensor, camera_controls["exposure"]):
                 warnings.append(
-                    "WARNING: manual exposure/gain not supported on sensor - confirm "
+                    "WARNING: manual exposure not supported on sensor - confirm "
                     "exposure settings manually."
                 )
     return warnings

@@ -43,8 +43,8 @@ class FakeProfile:
         return self._stream_type
 
 
-def _global_controls(emitter_enabled=False, auto_exposure=True, exposure=None, gain=None):
-    return {"emitter_enabled": emitter_enabled, "auto_exposure": auto_exposure, "exposure": exposure, "gain": gain}
+def _global_controls(emitter_enabled=False, auto_exposure=True, exposure=None):
+    return {"emitter_enabled": emitter_enabled, "auto_exposure": auto_exposure, "exposure": exposure}
 
 
 # --- stream_label ---
@@ -111,8 +111,8 @@ def test_apply_camera_controls_gates_per_group_not_globally():
 
 
 def test_apply_camera_controls_applies_exposure_to_every_group_regardless_of_stream_type():
-    # auto_exposure/gain are NOT gated by stream type, unlike emitter -
-    # exposure control is meaningful for color sensors too.
+    # auto_exposure is NOT gated by stream type, unlike emitter - exposure
+    # control is meaningful for color sensors too.
     color_sensor = FakeSensor(supported_options={rs.option.enable_auto_exposure})
     warnings = _apply_camera_controls(
         [(color_sensor, [FakeProfile(rs.stream.color)])],

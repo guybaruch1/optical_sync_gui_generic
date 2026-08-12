@@ -72,10 +72,21 @@ def test_enable_auto_exposure_returns_false_when_unsupported():
 
 
 # --- Regression: switching Stream Config back to "Auto exposure" must undo
-# what set_manual_exposure wrote, not just flip the auto flag. Leaving the
-# manual gain behind (the UI defaults it to 16) left the camera dark enough
-# that Calibration's Otsu blob detection stopped finding LEDs at all - and
-# since the value lives in the CAMERA it survived app restarts. ---
+# what set_manual_exposure wrote to EXPOSURE, not just flip the auto flag -
+# leaving manual exposure behind stuck the camera at a bad brightness that
+# survived app restarts (the value lives in the CAMERA, not the app), only
+# clearable with a physical power-cycle/hardware_reset. ---
+#
+# GAIN is deliberately excluded from all of this - see
+# enable_auto_exposure's/set_manual_exposure's own docstrings for why: an
+# earlier version also wrote/restored gain the same way exposure is handled
+# here, but on real hardware (the "RealSense D585 Prototype" rig) that
+# restore proved unreliable and left gain stuck anyway. Since
+# set_manual_exposure no longer touches gain at all, there's nothing of
+# ours for enable_auto_exposure to restore - see
+# test_set_manual_exposure_never_touches_gain/
+# test_enable_auto_exposure_never_touches_gain below for the actual
+# regression coverage locking that in.
 
 def _full_exposure_sensor(currently_manual=False):
     initial_values = {rs.option.enable_auto_exposure: 0} if currently_manual else None
@@ -86,18 +97,17 @@ def _full_exposure_sensor(currently_manual=False):
     )
 
 
-def test_enable_auto_exposure_restores_exposure_and_gain_defaults():
+def test_enable_auto_exposure_restores_exposure_default():
     sensor = _full_exposure_sensor()
-    set_manual_exposure(sensor, exposure=8500, gain=16)  # what the UI defaults to - now genuinely manual
+    set_manual_exposure(sensor, exposure=8500)  # now genuinely manual
 
     assert enable_auto_exposure(sensor) is True
 
     assert sensor.set_options[rs.option.exposure] == 7500  # factory default, not 8500
-    assert sensor.set_options[rs.option.gain] == 64        # factory default, not 16
     assert sensor.set_options[rs.option.enable_auto_exposure] == 1
 
 
-def test_enable_auto_exposure_restores_defaults_before_switching_auto_on():
+def test_enable_auto_exposure_restores_default_before_switching_auto_on():
     # Order is load-bearing: on some sensors writing exposure while auto is
     # ON implicitly turns auto back off, which would leave auto disabled.
     sensor = _full_exposure_sensor(currently_manual=True)
@@ -107,12 +117,11 @@ def test_enable_auto_exposure_restores_defaults_before_switching_auto_on():
     written_options = [option for option, _ in sensor.writes]
     assert written_options[-1] == rs.option.enable_auto_exposure
     assert rs.option.exposure in written_options[:-1]
-    assert rs.option.gain in written_options[:-1]
 
 
-def test_enable_auto_exposure_skips_unsupported_exposure_gain_options():
-    # A sensor supporting auto-exposure but not manual exposure/gain must
-    # still get auto enabled, with no attempt to restore what it can't set.
+def test_enable_auto_exposure_skips_unsupported_exposure_option():
+    # A sensor supporting auto-exposure but not manual exposure must still
+    # get auto enabled, with no attempt to restore what it can't set.
     sensor = FakeOptionSensor(supported_options={rs.option.enable_auto_exposure},
                               initial_values={rs.option.enable_auto_exposure: 0})
 
@@ -121,27 +130,39 @@ def test_enable_auto_exposure_skips_unsupported_exposure_gain_options():
     assert sensor.set_options == {rs.option.enable_auto_exposure: 1}
 
 
-def test_enable_auto_exposure_does_not_disturb_exposure_gain_when_already_auto():
-    # Regression: an earlier version restored exposure/gain unconditionally
-    # on EVERY call, even when the sensor was already auto-exposing
-    # correctly. This function is called on EVERY apply point (ROI Select,
-    # Calibration, Threshold Tuning, Live Session) whenever "Auto exposure"
-    # is selected - not just on an actual Manual->Auto transition - so that
-    # forced every single Calibration/ROI Select run to reset exposure/gain
-    # to a cold default and let auto-exposure re-converge from scratch,
-    # which could leave it under-converged within calibration's short
-    # settle_frames window even though the sensor would have stayed
-    # correctly exposed if left alone. Symptom on real hardware: scattered,
-    # intermittent LED detection dropouts (not the original bug's total
-    # blackout) that came back on every run, not just after a Manual round
-    # trip.
+def test_enable_auto_exposure_does_not_disturb_exposure_when_already_auto():
+    # Regression: an earlier version restored exposure unconditionally on
+    # EVERY call, even when the sensor was already auto-exposing correctly.
+    # This function is called on EVERY apply point (ROI Select, Calibration,
+    # Threshold Tuning, Live Session) whenever "Auto exposure" is selected -
+    # not just on an actual Manual->Auto transition - so that forced every
+    # single Calibration/ROI Select run to reset exposure to a cold default
+    # and let auto-exposure re-converge from scratch, which could leave it
+    # under-converged within calibration's short settle_frames window even
+    # though the sensor would have stayed correctly exposed if left alone.
+    # Symptom on real hardware: scattered, intermittent LED detection
+    # dropouts (not the original bug's total blackout) that came back on
+    # every run, not just after a Manual round trip.
     sensor = _full_exposure_sensor()  # currently_manual=False - already auto
 
     assert enable_auto_exposure(sensor) is True
 
     assert rs.option.exposure not in sensor.set_options
-    assert rs.option.gain not in sensor.set_options
     assert sensor.set_options[rs.option.enable_auto_exposure] == 1
+
+
+def test_enable_auto_exposure_never_touches_gain():
+    # The actual fix: a manual->auto round trip left gain stuck on real
+    # hardware even with the old restore-gain-to-default logic (unreliable
+    # on the "RealSense D585 Prototype" rig specifically) - the robust fix
+    # is to never touch gain from software at all, so there's nothing to
+    # get stuck. This is true regardless of whether the sensor is currently
+    # manual or already auto.
+    sensor = _full_exposure_sensor(currently_manual=True)
+
+    enable_auto_exposure(sensor)
+
+    assert rs.option.gain not in sensor.set_options
 
 
 def test_list_devices_lists_any_device_regardless_of_sensor_names():
@@ -515,24 +536,37 @@ def test_set_emitter_enabled_returns_false_when_unsupported():
     assert set_emitter_enabled(sensor, False) is False
 
 
-def test_set_manual_exposure_sets_exposure_and_gain_and_disables_auto():
+def test_set_manual_exposure_sets_exposure_and_disables_auto():
     sensor = FakeOptionSensor(supported_options={rs.option.enable_auto_exposure, rs.option.exposure, rs.option.gain})
-    assert set_manual_exposure(sensor, exposure=150, gain=16) is True
+    assert set_manual_exposure(sensor, exposure=150) is True
     assert sensor.set_options[rs.option.enable_auto_exposure] == 0
     assert sensor.set_options[rs.option.exposure] == 150
-    assert sensor.set_options[rs.option.gain] == 16
+
+
+def test_set_manual_exposure_never_touches_gain():
+    # The actual fix: manual mode used to also write gain (to the Stream
+    # Config UI's spinbox value) and rely on enable_auto_exposure to
+    # restore it later - a restore that proved unreliable on real hardware
+    # (the "RealSense D585 Prototype" rig) and left gain stuck until a
+    # physical hardware reset. Never writing it in the first place means
+    # there's nothing to get stuck, regardless of what the sensor supports.
+    sensor = FakeOptionSensor(supported_options={rs.option.enable_auto_exposure, rs.option.exposure, rs.option.gain})
+
+    set_manual_exposure(sensor, exposure=150)
+
+    assert rs.option.gain not in sensor.set_options
 
 
 def test_set_manual_exposure_returns_false_when_fully_unsupported():
     sensor = FakeOptionSensor(supported_options=set())
-    assert set_manual_exposure(sensor, exposure=150, gain=16) is False
+    assert set_manual_exposure(sensor, exposure=150) is False
     assert sensor.set_options == {}
 
 
 def test_set_manual_exposure_returns_false_when_partially_unsupported():
-    # exposure is supported but enable_auto_exposure and gain are not
+    # exposure is supported but enable_auto_exposure is not
     sensor = FakeOptionSensor(supported_options={rs.option.exposure})
-    assert set_manual_exposure(sensor, exposure=150, gain=16) is False
+    assert set_manual_exposure(sensor, exposure=150) is False
     assert sensor.set_options == {}  # nothing should be set if guard fails
 
 
