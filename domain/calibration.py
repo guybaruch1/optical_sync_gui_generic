@@ -8,7 +8,7 @@ keeps only the pure computation, not the camera/LED-panel orchestration.
 
 import yaml
 
-from domain.realsense_utils import sample_neighborhood_brightness, safe_neighborhood_size
+from domain.realsense_utils import sample_neighborhood_brightness, safe_neighborhood_size, safe_row_gap_px
 
 
 def assign_grid_ids(centroids, row_gap_px=15):
@@ -16,9 +16,16 @@ def assign_grid_ids(centroids, row_gap_px=15):
         raise RuntimeError("No LEDs detected at all - check threshold/min_area/framing.")
 
     sorted_pts = sorted(centroids, key=lambda p: p[1])
+    # Caps row_gap_px at what's actually safe for THIS stream's real
+    # measured centroid spacing (see safe_row_gap_px's docstring) - a fixed
+    # configured gap can otherwise end up larger than the real row-to-row
+    # pitch at some resolution/sensor combination (e.g. VGA), silently
+    # merging rows and scrambling led_id numbering. See
+    # docs/algorithm_review_log.md's Issue 4.
+    safe_gap_px = safe_row_gap_px(sorted_pts, row_gap_px)
     rows = [[sorted_pts[0]]]
     for prev, curr in zip(sorted_pts, sorted_pts[1:]):
-        if curr[1] - prev[1] > row_gap_px:
+        if curr[1] - prev[1] > safe_gap_px:
             rows.append([])
         rows[-1].append(curr)
     rows = [sorted(row, key=lambda p: p[0]) for row in rows]

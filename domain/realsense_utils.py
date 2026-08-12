@@ -41,6 +41,60 @@ def safe_neighborhood_size(xy_positions, configured_size, min_size=3, spacing_fr
     return min(configured_size, safe_size)
 
 
+def safe_row_gap_px(points, configured_gap_px, min_gap_px=4, spacing_fraction=0.6):
+    """Caps `configured_gap_px` (settings.yaml's calibration.row_gap_px) at a
+    safe fraction of the REAL measured nearest-neighbor LED spacing for this
+    specific run's centroids, so domain.calibration.assign_grid_ids' row-split
+    test (`curr_y - prev_y > row_gap_px` starts a new row) can never end up
+    ABOVE the real column-to-column spacing within a row.
+
+    Real-world failure this fixes (confirmed by direct simulation of
+    assign_grid_ids on a synthetic grid, then reproduced on real VGA data -
+    see docs/algorithm_review_log.md's Issue 4): LED-to-LED pixel spacing
+    shrinks roughly proportionally with resolution for the same physical
+    panel/FOV - VGA (640x480) has half the linear pixels of 720p for the
+    same scene. Since two streams (e.g. IR vs RGB, or two different IR
+    sensors) are physically different sensors with different optics, the
+    same nominal resolution does not guarantee the same real LED pixel
+    spacing on both. A fixed row_gap_px comfortably below one stream's real
+    row-to-row pitch at HD can end up ABOVE the other stream's real pitch
+    once captured at a smaller resolution - silently merging that stream's
+    rows into one and scrambling its led_id numbering relative to the other
+    stream's, even though each stream's raw (x, y) centroid detection is
+    still correct. That's exactly why the on/off overlay can still look
+    synced (the dot positions are fine) while position_gap_ms (which diffs
+    led_id indices, not positions) reports large, spurious deltas - a 2px
+    difference in real spacing straddling the fixed constant was enough to
+    flip a 10x10 grid from a perfect row-major split to all 100 LEDs
+    collapsing into row_layout=[100].
+
+    Same shrink-only-cap shape as safe_neighborhood_size (Issue 1) and
+    _debug_circle_radius (Issue 3): only ever shrinks the configured value,
+    never grows it (an intentionally tight configured_gap_px stays tight
+    even at generous real spacing), and falls back to configured_gap_px
+    unchanged when there are fewer than two centroids to measure a spacing
+    from - assign_grid_ids' own single-row/single-point case, where there's
+    nothing to split anyway.
+
+    min_gap_px=4 and spacing_fraction=0.6 are deliberately different from
+    safe_neighborhood_size's min_size=3/spacing_fraction=0.5 - a row-gap
+    threshold and a brightness-sampling window solve different problems and
+    fail in different directions. Shrinking this cap too far risks a NEW
+    failure mode this fix doesn't want to introduce: splitting one real row
+    into spurious multiple rows from ordinary within-row y-jitter (centroid-
+    detection noise, sub-pixel rounding, slight panel/camera misalignment).
+    Shrinking it too little just reproduces a milder version of the bug
+    this exists to fix. These defaults are workable starting points, not
+    asserted as definitively correct for every rig without real panel-pitch
+    data - the same "open question for the user" Issue 1 left for its own
+    spacing_fraction/min_size."""
+    spacing = _typical_spacing(list(points))
+    if spacing is None:
+        return configured_gap_px
+    safe_gap = max(min_gap_px, int(spacing * spacing_fraction))
+    return min(configured_gap_px, safe_gap)
+
+
 def sample_all_neighborhood_brightness(image, xy_positions, size=5):
     """Like sample_neighborhood_brightness, but for many LED positions on
     the same frame - converts BGR to grayscale once up front instead of

@@ -330,9 +330,33 @@ changes needed there.
 
 ---
 
-## Issue 4 (candidate, newly found - not yet fully scoped): `assign_grid_ids`'s row-splitting is a fixed pixel-gap constant, same root cause class as Issues 1/3
+## Issue 4: `assign_grid_ids`'s row-splitting is a fixed pixel-gap constant, same root cause class as Issues 1/3
 
-**Status:** open
+**Status:** fixed (implemented on `fix-led-grid-row-gap-resolution-scaling`)
+
+**Real-hardware confirmation (2026-08-12):** this stopped being a purely
+theoretical code-inspection finding - it reproduced on real hardware at
+640x480 (VGA): the "Optical Sync" (`position_gap_ms`) live graph showed
+large, spurious deltas (~30-40 LED-index units) even though the on/off
+overlay images looked well-synced (the same physical LED visibly lit in
+both stream panels). Root-caused by directly exercising the actual
+`assign_grid_ids` function (a pure function, no hardware needed) against a
+synthetic 10x10 grid: real row spacing of 16px against the default
+`row_gap_px=15` produced a perfect `row_layout=[10]*10` with 0 mismatched
+ids, while real row spacing of 14px (just under the same constant)
+collapsed to `row_layout=[100]` (all rows merged into one), scrambling
+90/100 led_ids with shifts up to 81. A 2px difference in real spacing -
+exactly the kind of margin VGA erodes relative to HD for the same physical
+panel/FOV, especially since IR and RGB (or two different IR sensors) are
+physically different sensors with different optics/FOV even at the same
+nominal resolution - flips the algorithm from perfect to catastrophically
+wrong. Once one stream's rows silently merge while the other's don't, the
+same physical LED gets a different `led_id` on each stream even though each
+stream's raw (x, y) centroid detection is still correct - exactly why the
+overlay images looked synced while `position_gap_ms` (which diffs `led_id`
+indices, not positions) was wildly off, with no existing exclusion
+mechanism catching it (not a timing anomaly, and the LED *count* stays
+unchanged, so the existing count-mismatch warning stays silent too).
 
 **Where:** `domain/calibration.py:14-34` (`assign_grid_ids`), called from
 `gui/pages/calibration_page.py:152,161`.
@@ -396,6 +420,59 @@ Issue 4 finding, or fixing independently (e.g. compare each candidate row
 split against the row's own first point, not just the immediate
 predecessor, to prevent one bridging point from merging two rows) -
 tradeoffs not yet analyzed, flagging for discussion like the rest of Issue 4.
+
+**Sub-finding 4a is explicitly NOT fixed by the change below and remains
+open** - it's a distinct failure mode (a single noise centroid defeating
+ANY `row_gap_px` value via single-linkage chaining) from the one that
+actually reproduced on real VGA hardware (a fixed constant simply too large
+relative to real, resolution-shrunk spacing). Only the latter was in scope
+for this fix.
+
+**Decision: Option A chosen** (measure real per-run spacing and cap the
+fixed constant against it) - the same "Option B: recompute on the fly, no
+`config.yaml` schema change" approach already chosen for Issue 1, applied
+here to `row_gap_px` instead of `neighborhood_size`.
+
+**Fix applied:** new `domain/realsense_utils.py` helper, `safe_row_gap_px
+(points, configured_gap_px, min_gap_px=4, spacing_fraction=0.6)`, reuses the
+same `_typical_spacing` helper Issues 1 and 3 already reuse to measure the
+real median nearest-neighbor centroid spacing, then caps `configured_gap_px`
+at `max(min_gap_px, int(spacing * spacing_fraction))` via
+`min(configured_gap_px, safe_gap)` - only ever shrinks the configured value,
+never grows it, and falls back to `configured_gap_px` unchanged when there
+are fewer than two centroids to measure a spacing from. `domain/
+calibration.py`'s `assign_grid_ids` now computes `safe_gap_px =
+safe_row_gap_px(sorted_pts, row_gap_px)` once per call and uses it in place
+of the raw `row_gap_px` parameter for the row-split comparison - no
+signature or call-site changes anywhere (`centroids_in_grid_order`,
+`build_grid_positions`, `gui/pages/calibration_page.py`, `gui/pages/
+threshold_tuning_page.py`, `tools/panel_drift/panel_drift_calibrate.py` all
+already just thread `row_gap_px` straight through). `min_gap_px=4`/
+`spacing_fraction=0.6` are deliberately different from `safe_neighborhood_
+size`'s `min_size=3`/`spacing_fraction=0.5` - a row-gap threshold and a
+brightness-sampling window fail in different directions (shrinking a
+row-gap cap too far risks splitting one real row into spurious multiple
+rows from ordinary within-row y-jitter, rather than the window-bleed risk
+`safe_neighborhood_size` guards against), left as an open tuning question
+for real-rig panel-pitch data, same as Issue 1's own still-open `spacing_
+fraction`/`min_size` question. `settings.yaml`'s `calibration.row_gap_px`
+comment updated with the same "upper bound, not guaranteed actual value"
+language Issue 1's fix added for `neighborhood_size`.
+
+**Verification:** full suite green (66 passed in `tests/domain/`, no
+existing assertions changed) after adding: `tests/domain/
+test_realsense_utils.py` mirrors `safe_neighborhood_size`'s exact test
+style for `safe_row_gap_px` (fallback below 2 points, no-op at wide
+spacing, caps at tight spacing, floors at `min_gap_px`, never exceeds
+configured even with a higher `min_gap_px`); `tests/domain/
+test_calibration.py` adds a direct regression test reproducing the
+confirmed failure mechanism (a 3x3 grid, 10px columns / 14px rows -
+tighter than the default `row_gap_px=15`) that fails against the
+unpatched code (`row_layout == [9]`, all rows collapsed) and passes after
+the fix (`row_layout == [3, 3, 3]`), plus a companion test confirming an
+operator's own configured value tighter than the safe cap still governs
+(`min(configured, safe)`, not the safe fraction alone) so intentionally
+tight configs aren't silently loosened.
 
 ---
 

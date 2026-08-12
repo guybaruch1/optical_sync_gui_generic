@@ -85,7 +85,13 @@ calibration:
   # Frames to let each stream settle on before treating a frame as "good".
   settle_frames: 15
   # y-gap (pixels) larger than this starts a new row when sorting detected
-  # LED centroids into grid order.
+  # LED centroids into grid order. This is an UPPER BOUND, not a guaranteed
+  # actual value: domain.realsense_utils.safe_row_gap_px caps it down at
+  # run time if it's geometrically too big for this run's real measured LED
+  # pixel spacing (resolution/sensor optics vary per run and per stream, so
+  # a fixed constant can't be trusted to always stay below the real
+  # row-to-row pitch - e.g. VGA vs HD for the same physical panel) - see
+  # docs/algorithm_review_log.md's Issue 4.
   row_gap_px: 15
   # Minimum contour area (px^2) to count as a real LED blob, not noise.
   min_blob_area: 20

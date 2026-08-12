@@ -17,6 +17,7 @@ from domain.realsense_utils import (
     _typical_spacing,
     _debug_circle_radius,
     safe_neighborhood_size,
+    safe_row_gap_px,
 )
 
 
@@ -148,6 +149,43 @@ def test_safe_neighborhood_size_never_exceeds_configured_even_if_min_size_is_hig
     # grow the result past what was actually configured.
     assert safe_neighborhood_size(
         [(10.0, 10.0), (12.0, 10.0)], configured_size=2, min_size=3,
+    ) == 2
+
+
+def test_safe_row_gap_px_falls_back_to_configured_below_two_points():
+    # Can't measure a spacing from fewer than two LEDs - trust the
+    # configured value unchanged (same fallback safe_neighborhood_size and
+    # _debug_circle_radius already use).
+    assert safe_row_gap_px([(25.0, 25.0)], configured_gap_px=15) == 15
+
+
+def test_safe_row_gap_px_leaves_configured_value_unchanged_for_wide_spacing():
+    # LEDs 40px apart -> spacing * 0.6 = 24, well above the configured 15,
+    # so the configured value is never grown, only ever shrunk.
+    assert safe_row_gap_px([(10.0, 10.0), (50.0, 10.0)], configured_gap_px=15) == 15
+
+
+def test_safe_row_gap_px_caps_at_safe_fraction_of_tight_spacing():
+    # LEDs 10px apart -> spacing * 0.6 = 6, tighter than the configured 15,
+    # so the row-split threshold shrinks to stay below the real spacing -
+    # this is the exact VGA failure mode: a fixed row_gap_px that's fine at
+    # HD ends up ABOVE real spacing once resolution shrinks it.
+    assert safe_row_gap_px([(10.0, 10.0), (20.0, 10.0)], configured_gap_px=15) == 6
+
+
+def test_safe_row_gap_px_floors_at_min_gap_px_for_very_tight_spacing():
+    # LEDs 5px apart -> spacing * 0.6 = 3, floored at the default
+    # min_gap_px=4 so the threshold never shrinks to something that would
+    # start splitting a single real row into spurious multiple rows purely
+    # from ordinary centroid-detection y-jitter.
+    assert safe_row_gap_px([(10.0, 10.0), (15.0, 10.0)], configured_gap_px=15) == 4
+
+
+def test_safe_row_gap_px_never_exceeds_configured_even_if_min_gap_px_is_higher():
+    # A custom min_gap_px higher than the configured value must still never
+    # grow the result past what was actually configured.
+    assert safe_row_gap_px(
+        [(10.0, 10.0), (15.0, 10.0)], configured_gap_px=2, min_gap_px=4,
     ) == 2
 
 
