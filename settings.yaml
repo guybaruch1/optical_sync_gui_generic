@@ -47,6 +47,33 @@ camera:
         sensor_options:
           - stream_a: {width: 1280, height: 720, fps: 30, format: y8}
             stream_b: {width: 1280, height: 720, fps: 30, format: bgr8}
+    "RealSense D585 Prototype":
+      - test_name: "IR1 vs IR2 sync"
+        stream_a_identity: { stream_type: infrared, stream_index: 1 }
+        stream_b_identity: { stream_type: infrared, stream_index: 2 }
+        sensor_options:
+          - stream_a: { width: 1280, height: 720, fps: 30, format: y8 }
+            stream_b: { width: 1280, height: 720, fps: 30, format: y8 }
+      - test_name: "IR vs RGB sync"
+        stream_a_identity: { stream_type: infrared, stream_index: 1 }
+        stream_b_identity: { stream_type: color, stream_index: 0 }
+        sensor_options:
+          - stream_a: { width: 1280, height: 720, fps: 60, format: y8 }
+            stream_b: { width: 1280, height: 720, fps: 60, format: bgr8 }
+          - stream_a: { width: 1280, height: 720, fps: 30, format: y8 }
+            stream_b: { width: 1280, height: 720, fps: 30, format: bgr8 }
+          - stream_a: { width: 1280, height: 720, fps: 15, format: y8 }
+            stream_b: { width: 1280, height: 720, fps: 15, format: bgr8 }
+          - stream_a: { width: 1280, height: 720, fps: 5, format: y8 }
+            stream_b: { width: 1280, height: 720, fps: 5, format: bgr8 }
+          - stream_a: { width: 640, height: 480, fps: 60, format: y8 }
+            stream_b: { width: 640, height: 480, fps: 60, format: bgr8 }
+          - stream_a: { width: 640, height: 480, fps: 30, format: y8 }
+            stream_b: { width: 640, height: 480, fps: 30, format: bgr8 }
+          - stream_a: { width: 640, height: 480, fps: 15, format: y8 }
+            stream_b: { width: 640, height: 480, fps: 15, format: bgr8 }
+          - stream_a: { width: 640, height: 480, fps: 5, format: y8 }
+            stream_b: { width: 640, height: 480, fps: 5, format: bgr8 }
   # Used as the PRE-SELECTED default in the Stream Config wizard page's
   # dropdowns, if the connected camera actually reports this exact combo -
   # you can still pick a different one there if this rig/camera doesn't
