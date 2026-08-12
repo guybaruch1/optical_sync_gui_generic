@@ -562,7 +562,8 @@ class LiveSessionPage(QWidget):
         run_output_suffix = build_live_session_config_suffix(
             width=ctx["pick_a"]["width"], height=ctx["pick_a"]["height"], fps=ctx["pick_a"]["fps"],
             duration_s=duration_s,
-            auto_exposure=ctx["camera_controls"]["auto_exposure"], exposure=ctx["camera_controls"]["exposure"],
+            auto_exposure=ctx["camera_controls"]["auto_exposure"],
+            exposure_a=ctx["camera_controls"]["exposure_a"], exposure_b=ctx["camera_controls"]["exposure_b"],
             display_stride=display_stride, switch_time_ms=switch_time_ms,
         )
         self._begin_new_run_output(suffix=run_output_suffix)

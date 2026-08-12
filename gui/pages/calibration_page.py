@@ -126,7 +126,7 @@ class CalibrationPage(QWidget):
         device = find_device_by_serial(ctx, device_serial)
         groups = resolve_and_group(device, pick_a, pick_b)
 
-        for warning in _apply_camera_controls(groups, camera_controls):
+        for warning in _apply_camera_controls(groups, camera_controls, pick_a, pick_b):
             self._log(warning)
 
         if dual_panel_config is not None:

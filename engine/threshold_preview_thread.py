@@ -12,7 +12,7 @@ from PySide6.QtCore import QThread, Signal
 
 from engine.streams import (
     ContinuousCapture, find_device_by_serial, resolve_and_group,
-    set_emitter_enabled, enable_auto_exposure, set_manual_exposure,
+    set_emitter_enabled, enable_auto_exposure, set_manual_exposure, exposure_for_group,
 )
 from engine.dual_panel_control import start_scanning, stop_scanning
 from domain.realsense_utils import sample_all_neighborhood_brightness, safe_neighborhood_size
@@ -90,9 +90,13 @@ class ThresholdPreviewThread(QThread):
                             "auto-exposure manually."
                         )
                 else:
-                    if not set_manual_exposure(sensor, self.camera_controls["exposure"], self.camera_controls["gain"]):
+                    exposure = exposure_for_group(
+                        profiles, self.pick_a, self.pick_b,
+                        self.camera_controls["exposure_a"], self.camera_controls["exposure_b"],
+                    )
+                    if not set_manual_exposure(sensor, exposure):
                         self.error.emit(
-                            "WARNING: manual exposure/gain not supported on sensor - confirm "
+                            "WARNING: manual exposure not supported on sensor - confirm "
                             "exposure settings manually."
                         )
 

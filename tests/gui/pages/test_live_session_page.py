@@ -46,9 +46,12 @@ def _minimal_context(tmp_path, **overrides):
         pick_b={"stream_type": "color", "stream_index": 0, "width": 4, "height": 4, "fps": 30, "format": "bgr8"},
         # Shape matches gui/pages/stream_config_page.py's own
         # _read_camera_controls() output - start_session() now reads
-        # auto_exposure/exposure from this to build the output folder's
-        # config suffix (see domain.run_output.build_live_session_config_suffix).
-        camera_controls={"emitter_enabled": True, "auto_exposure": True, "exposure": None, "gain": None},
+        # auto_exposure/exposure_a/exposure_b from this to build the output
+        # folder's config suffix (see
+        # domain.run_output.build_live_session_config_suffix). No "gain" key -
+        # manual exposure mode never touches gain at all (see
+        # engine.streams.set_manual_exposure's docstring).
+        camera_controls={"emitter_enabled": True, "auto_exposure": True, "exposure_a": None, "exposure_b": None},
         switch_time_ms=1.0, scan_direction=1,
         # Already-tuned final threshold arrays (Threshold Tuning page's own
         # job now, not Live Session's) - 150.0 matches what the old
@@ -388,6 +391,25 @@ def test_two_start_session_calls_use_two_different_run_folders(qapp, tmp_path):
     assert first_output_dir != second_output_dir
     assert os.path.isdir(first_output_dir)
     assert os.path.isdir(second_output_dir)
+
+
+def test_start_session_with_manual_exposure_builds_folder_from_both_per_stream_values(qapp, tmp_path):
+    # Regression: start_session() used to read a single shared
+    # camera_controls["exposure"] key to build the output folder's config
+    # suffix - a raw KeyError on real hardware once camera_controls moved to
+    # independent exposure_a/exposure_b (see engine.streams.
+    # exposure_for_group). Manual mode with genuinely different per-stream
+    # values must not crash, and both values must show up in the folder name.
+    page = LiveSessionPage()
+    page.set_context(**_minimal_context(
+        tmp_path,
+        camera_controls={"emitter_enabled": True, "auto_exposure": False, "exposure_a": 100, "exposure_b": 8500},
+    ))
+
+    with patch("gui.pages.live_session_page.SessionEngineThread", _FakeEngineThread):
+        page.start_session()
+
+    assert "manualA100B8500" in os.path.basename(page._context["output_dir"])
 
 
 # --- The 3 live charts (HW TS Latency / Optical Sync / Frame Drops) must

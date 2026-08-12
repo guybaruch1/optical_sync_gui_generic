@@ -1,10 +1,11 @@
 """Wizard step 2: pick a named test (e.g. "IR1 vs IR2 sync", "IR vs RGB
 sync" - settings.yaml's camera.stream_options, per connected camera model)
-and a resolution/fps/format "sensor options" pairing for it, configure ONE
-global set of camera controls (IR emitter, auto/manual exposure+gain)
-applied to both streams together, and preview live pairing quality
-(bundle/frame-number/timestamp/delta overlay, plus matching console
-logging) for the currently selected pair before committing to it.
+and a resolution/fps/format "sensor options" pairing for it, configure
+camera controls (IR emitter + a shared auto/manual exposure MODE, but two
+independent exposure VALUES underneath it - see _build_camera_control_
+group), and preview live pairing quality (bundle/frame-number/timestamp/
+delta overlay, plus matching console logging) for the currently selected
+pair before committing to it.
 
 Generalized from the old two-independent-combo version (separate "Stream
 A"/"Stream B" pickers): a test's two streams are a FIXED identity
@@ -16,13 +17,20 @@ entirely ("Stream A" and "Stream B" landing on the same stream): a test's
 two streams differ by construction (engine.streams.resolve_camera_tests
 only ever pairs a test's own distinct stream_a_identity/stream_b_identity).
 
-Camera controls are ONE global block regardless of how Stream A/B resolve
-to physical sensors at capture time (engine.streams.resolve_and_group can
-still fold them onto one shared sensor or split them across two - that's
-an orthogonal, capture-time concern) - simpler for the operator than
-juggling per-sensor-group settings, and every prior version of this app's
-camera setup (before the multi-sensor-group generalization) worked this
-way too."""
+The emitter checkbox and auto/manual MODE stay ONE global choice regardless
+of how Stream A/B resolve to physical sensors at capture time
+(engine.streams.resolve_and_group can still fold them onto one shared
+sensor or split them across two - that's an orthogonal, capture-time
+concern) - simpler for the operator than juggling per-sensor-group mode
+toggles. Exposure's actual VALUE is the one exception: two independent
+spinboxes, one per stream, since different sensors (IR vs RGB, or two
+different IR sensors) have genuinely different brightness characteristics -
+engine.streams.exposure_for_group routes each one to whichever resolved
+sensor group actually contains that stream. A group containing BOTH
+streams (the Dual-RGB shape, one shared physical sensor) can only ever
+have one real exposure value in hardware regardless of what the UI offers
+per stream - Stream A's value wins in that case (see exposure_for_group's
+own docstring)."""
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
@@ -31,6 +39,7 @@ from PySide6.QtWidgets import (
 )
 
 from engine.stream_preview_thread import StreamPreviewThread
+from gui.pages.roi_select_page import stream_label
 from gui.widgets.video_panel import VideoPanel
 
 
@@ -202,6 +211,7 @@ class StreamConfigPage(QWidget):
                 self.combo_sensor_options.addItem(_sensor_option_label(option), userData=option)
         self.combo_sensor_options.blockSignals(False)
         self._preselect_sensor_options()
+        self._update_exposure_labels()
 
     def _preselect_sensor_options(self):
         if not self._preferred_a:
@@ -213,13 +223,21 @@ class StreamConfigPage(QWidget):
                 return
 
     def _build_camera_control_group(self):
-        """ONE global camera-control block, built once and shown regardless
-        of which streams are currently picked - applied to both Stream A
-        and Stream B together at capture time (see
-        gui.pages.roi_select_page._apply_camera_controls), not per resolved
-        sensor group. The "Disable IR emitter" checkbox is always present;
-        it's simply a no-op (with a surfaced warning) if neither resolved
-        sensor actually supports emitter control."""
+        """ONE global emitter checkbox + auto/manual MODE toggle, shared by
+        both streams together - but exposure ITSELF is two independent
+        values underneath that shared mode, one spinbox per stream (see
+        exposure_a_spin/exposure_b_spin below). Different sensors (IR vs
+        RGB, or two different IR sensors) have different brightness
+        characteristics - same reasoning Threshold Tuning's own independent
+        per-stream threshold fraction already uses - so one shared exposure
+        value across both streams doesn't fit every rig. Applied at capture
+        time via gui.pages.roi_select_page._apply_camera_controls (and its
+        duplicated inline copies), which route each stream's own exposure
+        value to whichever resolved sensor group actually contains that
+        stream (engine.streams.exposure_for_group). The "Disable IR
+        emitter" checkbox is always present; it's simply a no-op (with a
+        surfaced warning) if neither resolved sensor actually supports
+        emitter control."""
         box = QGroupBox("Camera Controls")
         box_layout = QVBoxLayout(box)
 
@@ -244,44 +262,77 @@ class StreamConfigPage(QWidget):
         box_layout.addWidget(manual_radio)
 
         exposure_row = QHBoxLayout()
-        exposure_row.addWidget(QLabel("Exposure:"))
-        exposure_spin = QSpinBox()
-        exposure_spin.setRange(1, 1000000)
-        exposure_spin.setValue(8500)
-        exposure_spin.setEnabled(False)
-        exposure_row.addWidget(exposure_spin)
-        exposure_row.addWidget(QLabel("Gain:"))
-        gain_spin = QSpinBox()
-        gain_spin.setRange(0, 128)
-        gain_spin.setValue(16)
-        gain_spin.setEnabled(False)
-        exposure_row.addWidget(gain_spin)
+        # Placeholder text until _update_exposure_labels() fills in the
+        # actual stream each spinbox controls, once a test is selected (see
+        # populate()/_populate_sensor_options) - stays generic "Exposure A"/
+        # "Exposure B" only in the brief window before that first happens.
+        exposure_a_label = QLabel("Exposure A:")
+        exposure_row.addWidget(exposure_a_label)
+        exposure_a_spin = QSpinBox()
+        exposure_a_spin.setRange(1, 1000000)
+        exposure_a_spin.setValue(8500)
+        exposure_a_spin.setEnabled(False)
+        exposure_row.addWidget(exposure_a_spin)
+        exposure_b_label = QLabel("Exposure B:")
+        exposure_row.addWidget(exposure_b_label)
+        exposure_b_spin = QSpinBox()
+        exposure_b_spin.setRange(1, 1000000)
+        exposure_b_spin.setValue(8500)
+        exposure_b_spin.setEnabled(False)
+        exposure_row.addWidget(exposure_b_spin)
         box_layout.addLayout(exposure_row)
 
-        manual_radio.toggled.connect(exposure_spin.setEnabled)
-        manual_radio.toggled.connect(gain_spin.setEnabled)
+        manual_radio.toggled.connect(exposure_a_spin.setEnabled)
+        manual_radio.toggled.connect(exposure_b_spin.setEnabled)
 
         return {
             "group_box": box,
             "emitter_checkbox": emitter_checkbox,
             "auto_radio": auto_radio,
             "manual_radio": manual_radio,
-            "exposure_spin": exposure_spin,
-            "gain_spin": gain_spin,
+            "exposure_a_label": exposure_a_label,
+            "exposure_a_spin": exposure_a_spin,
+            "exposure_b_label": exposure_b_label,
+            "exposure_b_spin": exposure_b_spin,
         }
+
+    def _update_exposure_labels(self):
+        """Relabels the two exposure spinboxes with the actual stream each
+        one currently controls (e.g. "Exposure (Infrared 1):" - the same
+        stream_label() ROI Select's own window titles use), rather than
+        generic position-based "Exposure A"/"Exposure B" text. A test's
+        stream_a/stream_b identities are fixed by settings.yaml (see this
+        module's own docstring) and don't change across sensor_options
+        selections within the same test, so this only needs re-running when
+        the selected TEST changes - called from _populate_sensor_options,
+        which runs on both populate() and combo_test's own currentIndexChanged.
+        Falls back to the generic labels if no pick exists yet (e.g. an
+        empty tests list)."""
+        pick_a, pick_b = self.pick_a, self.pick_b
+        w = self._camera_controls
+        w["exposure_a_label"].setText(
+            "Exposure ({}):".format(stream_label(pick_a)) if pick_a is not None else "Exposure A:"
+        )
+        w["exposure_b_label"].setText(
+            "Exposure ({}):".format(stream_label(pick_b)) if pick_b is not None else "Exposure B:"
+        )
 
     def _read_camera_controls(self):
         """Returns the single global camera-control dict - applied
-        uniformly to every resolved sensor (see
-        gui.pages.roi_select_page._apply_camera_controls), unlike the old
-        per-sensor-group list."""
+        uniformly to every resolved sensor group (see
+        gui.pages.roi_select_page._apply_camera_controls), which then picks
+        exposure_a vs exposure_b per group via engine.streams.
+        exposure_for_group depending on which stream that group actually
+        contains. No "gain" key - manual exposure mode never touches gain
+        at all (see engine.streams.set_manual_exposure's docstring for
+        why), so there is nothing for this dict to carry for it."""
         w = self._camera_controls
         auto_exposure = w["auto_radio"].isChecked()
         return {
             "emitter_enabled": not w["emitter_checkbox"].isChecked(),
             "auto_exposure": auto_exposure,
-            "exposure": None if auto_exposure else w["exposure_spin"].value(),
-            "gain": None if auto_exposure else w["gain_spin"].value(),
+            "exposure_a": None if auto_exposure else w["exposure_a_spin"].value(),
+            "exposure_b": None if auto_exposure else w["exposure_b_spin"].value(),
         }
 
     def _streams_are_identical(self, pick_a, pick_b):
