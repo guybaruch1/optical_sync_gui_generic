@@ -110,7 +110,7 @@ def _patch_hardware_boundary(on_frame_a, off_frame_a, on_frame_b, off_frame_b, p
         "gui.pages.calibration_page",
         find_device_by_serial=lambda ctx, serial: object(),
         resolve_and_group=lambda device, pick_a, pick_b: [],
-        _apply_camera_controls=lambda groups, camera_controls: [],
+        _apply_camera_controls=lambda groups, camera_controls, pick_a, pick_b: [],
         turn_all_leds_on=lambda dual_panel_config: None,
         turn_all_leds_off=lambda dual_panel_config: None,
         capture_synced_frame_pair=lambda groups, on_both_streaming=None, settle_frames=15: (

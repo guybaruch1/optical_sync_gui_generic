@@ -32,7 +32,7 @@ from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QPushButton
 from domain.realsense_utils import decode_frame
 from engine.streams import (
     find_device_by_serial, resolve_and_group, capture_synced_frame_pair, group_for_pick,
-    set_emitter_enabled, enable_auto_exposure, set_manual_exposure,
+    set_emitter_enabled, enable_auto_exposure, set_manual_exposure, exposure_for_group,
 )
 from engine.led_panel import LEDPanel
 from engine.dual_panel_control import turn_all_leds_on, turn_all_leds_off, switched_to_stream_panel
@@ -69,15 +69,19 @@ def _select_roi(image, window_title):
     return x, y, w, h
 
 
-def _apply_camera_controls(groups, camera_controls):
+def _apply_camera_controls(groups, camera_controls, pick_a, pick_b):
     """Applies the ONE global camera_controls dict (from Stream Select's
-    _read_camera_controls) uniformly to every resolved sensor group -
-    Stream Select no longer configures emitter/exposure/gain per resolved
-    sensor group, just once for both streams together. A sensor that
-    doesn't support a given setting (e.g. emitter control on a color-only
-    sensor) just gets a surfaced warning for that setting, same as before.
-    Returns a list of warning strings for any setting any sensor doesn't
-    support, so the caller can surface them without silently proceeding."""
+    _read_camera_controls) to every resolved sensor group - emitter enable
+    and auto/manual MODE are one shared choice applied uniformly, but the
+    actual exposure VALUE in Manual mode is per-stream (camera_controls'
+    "exposure_a"/"exposure_b"): engine.streams.exposure_for_group picks
+    whichever one belongs to the stream this particular group actually
+    contains (pick_a/pick_b are needed for exactly that routing). A sensor
+    that doesn't support a given setting (e.g. emitter control on a
+    color-only sensor) just gets a surfaced warning for that setting, same
+    as before. Returns a list of warning strings for any setting any sensor
+    doesn't support, so the caller can surface them without silently
+    proceeding."""
     warnings = []
     for sensor, profiles in groups:
         # The "Disable IR emitter" checkbox is global (always shown/checked
@@ -102,7 +106,10 @@ def _apply_camera_controls(groups, camera_controls):
                     "auto-exposure manually."
                 )
         else:
-            if not set_manual_exposure(sensor, camera_controls["exposure"]):
+            exposure = exposure_for_group(
+                profiles, pick_a, pick_b, camera_controls["exposure_a"], camera_controls["exposure_b"],
+            )
+            if not set_manual_exposure(sensor, exposure):
                 warnings.append(
                     "WARNING: manual exposure not supported on sensor - confirm "
                     "exposure settings manually."
@@ -153,7 +160,7 @@ class RoiSelectPage(QWidget):
         device = find_device_by_serial(ctx, device_serial)
         groups = resolve_and_group(device, pick_a, pick_b)
 
-        warnings = _apply_camera_controls(groups, camera_controls)
+        warnings = _apply_camera_controls(groups, camera_controls, pick_a, pick_b)
         if warnings:
             self.status_label.setText("\n".join(warnings))
 

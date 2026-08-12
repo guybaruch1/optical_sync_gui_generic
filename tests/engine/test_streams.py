@@ -6,7 +6,7 @@ import pyrealsense2 as rs
 from engine.streams import (
     list_devices, capture_synced_frame_pair, ContinuousCapture,
     enable_auto_exposure,
-    list_video_stream_options_from_device, resolve_and_group, group_for_pick,
+    list_video_stream_options_from_device, resolve_and_group, group_for_pick, exposure_for_group,
     set_emitter_enabled, set_manual_exposure, stream_slug,
     parse_camera_tests_config, resolve_camera_tests,
 )
@@ -491,6 +491,53 @@ def test_group_for_pick_raises_when_no_group_matches():
 
     with pytest.raises(RuntimeError):
         group_for_pick(groups, unrelated_pick)
+
+
+# --- exposure_for_group: routes each stream's OWN exposure value
+# (Stream Config's per-stream exposure_a/exposure_b) to whichever resolved
+# sensor group actually contains that stream - different sensors (IR vs
+# RGB, or two different IR sensors) have different brightness
+# characteristics, so one shared exposure value across both doesn't fit
+# every rig. ---
+
+def test_exposure_for_group_picks_exposure_a_for_a_group_containing_only_pick_a():
+    ir_profile = FakeProfile2(rs.stream.infrared, 1, rs.format.y8, 1280, 720, 30)
+    pick_a = {"stream_type": rs.stream.infrared, "stream_index": 1,
+              "format": rs.format.y8, "width": 1280, "height": 720, "fps": 30}
+    pick_b = {"stream_type": rs.stream.color, "stream_index": 0,
+              "format": rs.format.bgr8, "width": 1280, "height": 720, "fps": 30}
+
+    result = exposure_for_group([ir_profile], pick_a, pick_b, exposure_a=1111, exposure_b=2222)
+
+    assert result == 1111
+
+
+def test_exposure_for_group_picks_exposure_b_for_a_group_containing_only_pick_b():
+    color_profile = FakeProfile2(rs.stream.color, 0, rs.format.bgr8, 1280, 720, 30)
+    pick_a = {"stream_type": rs.stream.infrared, "stream_index": 1,
+              "format": rs.format.y8, "width": 1280, "height": 720, "fps": 30}
+    pick_b = {"stream_type": rs.stream.color, "stream_index": 0,
+              "format": rs.format.bgr8, "width": 1280, "height": 720, "fps": 30}
+
+    result = exposure_for_group([color_profile], pick_a, pick_b, exposure_a=1111, exposure_b=2222)
+
+    assert result == 2222
+
+
+def test_exposure_for_group_prefers_exposure_a_when_a_group_has_both_picks():
+    # Dual-RGB shape - both picks share ONE physical sensor/group. Only ONE
+    # real exposure value can apply in hardware regardless of what the UI
+    # offers per stream - Stream A wins, arbitrarily but deterministically.
+    left_profile = FakeProfile2(rs.stream.color, 1, rs.format.bgr8, 1280, 720, 30)
+    right_profile = FakeProfile2(rs.stream.color, 2, rs.format.bgr8, 1280, 720, 30)
+    pick_a = {"stream_type": rs.stream.color, "stream_index": 1,
+              "format": rs.format.bgr8, "width": 1280, "height": 720, "fps": 30}
+    pick_b = {"stream_type": rs.stream.color, "stream_index": 2,
+              "format": rs.format.bgr8, "width": 1280, "height": 720, "fps": 30}
+
+    result = exposure_for_group([left_profile, right_profile], pick_a, pick_b, exposure_a=1111, exposure_b=2222)
+
+    assert result == 1111
 
 
 def test_resolve_and_group_raises_when_picks_are_the_same_stream():
