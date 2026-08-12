@@ -44,7 +44,7 @@ def _format_number(value):
     return str(value)
 
 
-def build_live_session_config_suffix(width, height, fps, duration_s, auto_exposure, exposure,
+def build_live_session_config_suffix(width, height, fps, duration_s, auto_exposure, exposure_a, exposure_b,
                                       display_stride, switch_time_ms):
     """Builds the descriptive suffix create_run_dir appends after the
     timestamp for a Live Session run - lets the operator identify a run's
@@ -56,12 +56,17 @@ def build_live_session_config_suffix(width, height, fps, duration_s, auto_exposu
     every settings.yaml camera.stream_options sensor_options entry pairs
     stream_a/stream_b with matching width/height/fps, so stream_a's values
     represent the run. duration_s=None (the toolbar's "0 = unlimited"
-    convention) renders as "unlimited". Manual exposure includes only the
-    exposure value, not gain, by explicit choice - keeps the name shorter."""
+    convention) renders as "unlimited". Manual exposure includes both
+    per-stream values (engine.streams.exposure_for_group - different
+    sensors can genuinely need different exposure now), not gain, by
+    explicit choice - keeps the name shorter."""
     resolution = "{}x{}".format(width, height)
     fps_part = "{}fps".format(_format_number(fps))
     duration_part = "unlimited" if duration_s is None else "{}s".format(_format_number(duration_s))
-    exposure_part = "auto" if auto_exposure else "manual{}".format(_format_number(exposure))
+    exposure_part = (
+        "auto" if auto_exposure
+        else "manualA{}B{}".format(_format_number(exposure_a), _format_number(exposure_b))
+    )
     interval_part = "interval{}".format(display_stride)
     switch_part = "switch{}ms".format(_format_number(switch_time_ms))
     return "_".join([resolution, fps_part, duration_part, exposure_part, interval_part, switch_part])

@@ -76,16 +76,28 @@ def test_create_run_dir_collision_numbering_appends_after_suffix(tmp_path):
 def test_build_live_session_config_suffix_manual_exposure_whole_switch_time():
     suffix = build_live_session_config_suffix(
         width=1280, height=720, fps=30, duration_s=200,
-        auto_exposure=False, exposure=100,
+        auto_exposure=False, exposure_a=100, exposure_b=100,
         display_stride=10, switch_time_ms=1.0,
     )
-    assert suffix == "1280x720_30fps_200s_manual100_interval10_switch1ms"
+    assert suffix == "1280x720_30fps_200s_manualA100B100_interval10_switch1ms"
+
+
+def test_build_live_session_config_suffix_manual_exposure_with_different_per_stream_values():
+    # exposure_a/exposure_b can genuinely differ now (engine.streams.
+    # exposure_for_group) - both must show up distinctly in the folder name,
+    # not collapse to one shared value.
+    suffix = build_live_session_config_suffix(
+        width=1280, height=720, fps=30, duration_s=200,
+        auto_exposure=False, exposure_a=100, exposure_b=8500,
+        display_stride=10, switch_time_ms=1.0,
+    )
+    assert suffix == "1280x720_30fps_200s_manualA100B8500_interval10_switch1ms"
 
 
 def test_build_live_session_config_suffix_auto_exposure_and_unlimited_duration():
     suffix = build_live_session_config_suffix(
         width=1280, height=720, fps=30, duration_s=None,
-        auto_exposure=True, exposure=None,
+        auto_exposure=True, exposure_a=None, exposure_b=None,
         display_stride=10, switch_time_ms=0.5,
     )
     assert suffix == "1280x720_30fps_unlimited_auto_interval10_switch0.5ms"
