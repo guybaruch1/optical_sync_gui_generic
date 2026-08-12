@@ -461,6 +461,41 @@ Unlike `engine/session_engine.py`'s `SessionEngineThread`, `engine/threshold_pre
 
 "Continue to Live Test" emits a bare `tuning_done` signal (matching `CalibrationPage.calibration_done`'s convention); `gui/main_window.py`'s `_on_tuning_done` reads the final tuned arrays off `ThresholdTuningPage.stream_a_threshold`/`stream_b_threshold` properties (each a `compute_threshold(...)` call using that stream's own calibrated on/off values and its own live spinbox fraction) and passes them into `LiveSessionPage.set_context()`'s `stream_a_threshold`/`stream_b_threshold` params - Live Session itself no longer has any threshold-fraction control or on/off-to-threshold math of its own; tuning already happened, with visual confirmation, on the page before it. `MainWindow._on_calibration_done` stashes everything Live Session still needs but Threshold Tuning has no use for (CSV paths, `output_dir`, frame-drop/pairing-gap tuning, etc.) in `self._pending_ctx`, merged back in by `_on_tuning_done`.
 
+### `_is_frame_drop` treats a repeated timestamp as a drop too, not just backwards/too-slow
+
+`engine/metrics.py`'s `_is_frame_drop(prev_ts, curr_ts, fps, threshold_factor)` flags a pair as dropped when `delta <= 0` (backwards OR **exactly zero**) or `delta > expected_delta * threshold_factor` (too slow). The `<= 0` (not `< 0`) is deliberate: real-hardware session data showed a stream occasionally handing back its own previous frame's HW timestamp unchanged for one pair - `delta == 0` - while the other stream advanced normally, then self-correcting the very next pair. That's a stale/duplicate frame, not "right on schedule" - real hardware never produces two distinct captures with a byte-identical timestamp - but a plain `delta < 0` check let it through uncaught (0 is neither negative nor over threshold), which showed up as an unexcluded, unexplained one-frame-period spike in `pairing_gap_us` at a rate of roughly 3% of pairs, riding on top of the much larger (~20% on one 60fps/HD run) rate of genuine 2x-interval drops the threshold check already caught correctly. Don't narrow this back to `delta < 0` without re-confirming a repeated timestamp can't happen on real hardware.
+
+### Optical Sync outlier debug images run on the background thread, not throttled
+
+`engine/acquisition_loop.py`'s `AcquisitionCallbacks` has a fourth, optional
+`on_frame_pair(stream_a_image, stream_b_image, row)` field, called unconditionally
+every pair (unlike `on_frames`/`on_stats`, both throttled to `display_stride`).
+`engine/session_engine.py`'s `SessionEngineThread` wires this to
+`_maybe_save_position_gap_outlier`, which saves a side-by-side IR/RGB debug image
+(same `draw_led_state_overlay`/`combine_side_by_side` calls as the existing
+periodic LED-state snapshot) whenever `engine.metrics.is_position_gap_debug_outlier`
+says a pair's `position_gap_ms` ("Optical Sync") magnitude crossed
+`settings.yaml`'s `test.position_gap_outlier_threshold_ms` (default 5) - lets the
+operator check by eye whether a given outlier reading was a real physical desync or
+a detection-algorithm artifact.
+
+This has to run unthrottled and on the background capture thread on purpose:
+`position_gap_ms` is computed every pair inside `TestSession.process_pair()`, but
+the GUI-facing callbacks only ever see a throttled `display_stride` subset (default
+every 10th pair) - checking only that subset would miss most individual outlier
+pairs. The write itself never touches a Qt signal, so it can't reintroduce the
+GUI-thread signal-backlog freeze documented in the "Live Session pipeline" section
+below (that bug was specifically about queued cross-thread Qt work, not
+background-thread file I/O). `position_gap_outlier_max_snapshots` (default 200)
+caps how many images one session can write, the same safety-cap idea as
+`max_snapshots` for the periodic snapshots.
+
+Deliberately independent of `PositionGapMetric`'s own exclusion logic - no new CSV
+column, no new `exclude_reason` - `is_position_gap_debug_outlier` only reads the
+row's already-computed `position_gap_ms`/`position_gap_ms_excluded` and returns
+`False` for anything already excluded for another reason (frame_drop/warmup/etc.),
+since those already have a known cause.
+
 ### Live Session pipeline (the core runtime loop)
 
 `gui/pages/live_session_page.py`'s `start_session()` builds a `TestSession` (with `PairingGapMetric` + `PositionGapMetric`) and starts a `SessionEngineThread`. That thread's `run()` resolves `pick_a`/`pick_b` into sensor groups via `resolve_and_group`, applies camera controls per group, opens the RealSense sensors via `ContinuousCapture(device_serial, pick_a, pick_b)`, puts the LED panel into scanning mode, then drives `engine.acquisition_loop.AcquisitionLoop.run_until_stopped()` in a plain Python loop - `AcquisitionLoop` calls `TestSession.process_pair()` per frame pair and invokes three callbacks (`on_frames`, `on_row`, `on_stats`), which `SessionEngineThread` re-emits as Qt signals (`frame_ready`, `row_ready`, `stats_ready`, `session_finished`, `error`) to cross into the GUI thread safely.

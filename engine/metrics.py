@@ -139,7 +139,16 @@ def _is_frame_drop(prev_ts, curr_ts, fps, threshold_factor):
         return False
     delta = curr_ts - prev_ts
     expected_delta = 1_000_000.0 / fps
-    return delta < 0 or delta > expected_delta * threshold_factor
+    # delta <= 0 (not just < 0) on purpose: a real hardware timestamp never
+    # repeats between two distinct captures, so delta == 0 means the pipeline
+    # handed back the SAME frame again instead of a new one - a stale/duplicate
+    # frame, not "right on schedule". Real-hardware data confirmed this: a
+    # stream occasionally re-reports its previous frame's timestamp for one
+    # pair while the other stream advances normally, producing an unflagged,
+    # unexcluded one-frame-period gap between the two streams that self-corrects
+    # the very next pair - invisible here before, because 0 is neither negative
+    # nor greater than the threshold.
+    return delta <= 0 or delta > expected_delta * threshold_factor
 
 
 class PositionGapMetric(Metric):
@@ -187,3 +196,22 @@ class PositionGapMetric(Metric):
         if is_warmup:
             return MetricResult(name=self.name, value=gap_ms, excluded=True, exclude_reason="warmup")
         return MetricResult(name=self.name, value=gap_ms, excluded=False, exclude_reason=None)
+
+
+def is_position_gap_debug_outlier(row, threshold_ms):
+    """Decides whether a frame pair's position_gap_ms ("Optical Sync" in the
+    UI) is large enough, and not already explained by another exclusion
+    reason, to be worth saving a side-by-side IR/RGB debug image for - see
+    engine/session_engine.py's _maybe_save_position_gap_outlier, the only
+    caller. Deliberately independent of PositionGapMetric's own exclusion
+    logic (no new MetricResult/exclude_reason) - this is a side-channel
+    debug-image trigger, not a metric change.
+
+    Magnitude-based (abs(value) >= threshold_ms): a large negative gap is
+    just as much an outlier as a large positive one. Already-excluded rows
+    (frame_drop/warmup/no_led_data/miss) return False - those already have a
+    known cause, and no_led_data/miss rows carry value=None anyway."""
+    value = row.get("position_gap_ms")
+    if value is None or row.get("position_gap_ms_excluded"):
+        return False
+    return abs(value) >= threshold_ms

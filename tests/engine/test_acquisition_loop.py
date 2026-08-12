@@ -96,3 +96,35 @@ def test_run_until_stopped_honors_session_auto_stop_duration():
     # 1.0 (< duration_s, so frame 0 is processed), call 2 returns 2.0
     # (>= duration_s, so the loop stops before processing a second frame).
     assert len(rows) == 1
+
+
+def test_run_until_stopped_calls_on_frame_pair_every_pair_unthrottled():
+    session = TestSession(TestSessionConfig(metrics=[CountingMetric()]))
+    session.start()
+    frame_pairs_seen = []
+    callbacks = AcquisitionCallbacks(
+        on_frames=lambda stream_a, stream_b, idx: None,
+        on_row=lambda row: None,
+        on_stats=lambda stats: None,
+        on_frame_pair=lambda stream_a, stream_b, row: frame_pairs_seen.append(row["pair_index"]),
+    )
+    loop = AcquisitionLoop(fake_frame_source(5), session, callbacks, display_stride=10)
+    loop.run_until_stopped(is_stop_requested=lambda: False, elapsed_s_fn=lambda: 0.0)
+
+    # Unlike on_frames (throttled to every display_stride pairs), on_frame_pair
+    # fires for every single pair - it must be able to see pairs the GUI's
+    # own throttled callbacks never do.
+    assert frame_pairs_seen == [0, 1, 2, 3, 4]
+
+
+def test_run_until_stopped_works_without_on_frame_pair():
+    # on_frame_pair is optional (defaults to None) - every existing caller
+    # that doesn't pass it (SessionEngineThread before this change,
+    # tools/panel_drift/panel_drift_measure.py, the other tests in this
+    # file) must keep working unchanged.
+    session = TestSession(TestSessionConfig(metrics=[CountingMetric()]))
+    session.start()
+    callbacks = AcquisitionCallbacks(on_frames=lambda *a: None, on_row=lambda r: None, on_stats=lambda s: None)
+    loop = AcquisitionLoop(fake_frame_source(3), session, callbacks, display_stride=10)
+    rows = loop.run_until_stopped(is_stop_requested=lambda: False, elapsed_s_fn=lambda: 0.0)
+    assert len(rows) == 3

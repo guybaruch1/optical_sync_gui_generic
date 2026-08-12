@@ -47,6 +47,33 @@ camera:
         sensor_options:
           - stream_a: {width: 1280, height: 720, fps: 30, format: y8}
             stream_b: {width: 1280, height: 720, fps: 30, format: bgr8}
+    "RealSense D585 Prototype":
+      - test_name: "IR1 vs IR2 sync"
+        stream_a_identity: { stream_type: infrared, stream_index: 1 }
+        stream_b_identity: { stream_type: infrared, stream_index: 2 }
+        sensor_options:
+          - stream_a: { width: 1280, height: 720, fps: 30, format: y8 }
+            stream_b: { width: 1280, height: 720, fps: 30, format: y8 }
+      - test_name: "IR vs RGB sync"
+        stream_a_identity: { stream_type: infrared, stream_index: 1 }
+        stream_b_identity: { stream_type: color, stream_index: 0 }
+        sensor_options:
+          - stream_a: { width: 1280, height: 720, fps: 60, format: y8 }
+            stream_b: { width: 1280, height: 720, fps: 60, format: bgr8 }
+          - stream_a: { width: 1280, height: 720, fps: 30, format: y8 }
+            stream_b: { width: 1280, height: 720, fps: 30, format: bgr8 }
+          - stream_a: { width: 1280, height: 720, fps: 15, format: y8 }
+            stream_b: { width: 1280, height: 720, fps: 15, format: bgr8 }
+          - stream_a: { width: 1280, height: 720, fps: 5, format: y8 }
+            stream_b: { width: 1280, height: 720, fps: 5, format: bgr8 }
+          - stream_a: { width: 640, height: 480, fps: 60, format: y8 }
+            stream_b: { width: 640, height: 480, fps: 60, format: bgr8 }
+          - stream_a: { width: 640, height: 480, fps: 30, format: y8 }
+            stream_b: { width: 640, height: 480, fps: 30, format: bgr8 }
+          - stream_a: { width: 640, height: 480, fps: 15, format: y8 }
+            stream_b: { width: 640, height: 480, fps: 15, format: bgr8 }
+          - stream_a: { width: 640, height: 480, fps: 5, format: y8 }
+            stream_b: { width: 640, height: 480, fps: 5, format: bgr8 }
   # Used as the PRE-SELECTED default in the Stream Config wizard page's
   # dropdowns, if the connected camera actually reports this exact combo -
   # you can still pick a different one there if this rig/camera doesn't
@@ -117,6 +144,20 @@ test:
   # µs-scale). 100_000us is the same real-world cutoff as an old 100ms
   # default would have been.
   pairing_gap_outlier_threshold_us: 100000
+  # Save a side-by-side IR/RGB debug image (same on/off overlay style as the
+  # periodic LED-state snapshots above) for every pair whose position_gap_ms
+  # ("Optical Sync" in the UI) magnitude is >= this many ms - lets you check
+  # by eye whether a given outlier reading was a real physical desync or an
+  # algorithm/detection artifact. Checked on EVERY pair (not throttled to
+  # display_stride, unlike the periodic snapshots above), since most
+  # individual outlier pairs wouldn't otherwise land on a displayed sample.
+  # Only fires on pairs position_gap_ms did NOT already exclude for another
+  # reason (frame_drop/warmup) - those already have a known cause.
+  position_gap_outlier_threshold_ms: 5
+  # Safety cap, same idea as max_snapshots above - a sustained real desync
+  # could otherwise flag many consecutive pairs and write a very large
+  # number of files / slow the capture loop with disk I/O.
+  position_gap_outlier_max_snapshots: 200
   # Ignore this many frame-pairs at the START of the run when computing the
   # metrics (position gap / frame-drop stats) - everything is still captured
   # and written to the CSV (flagged via is_warmup), just excluded from the

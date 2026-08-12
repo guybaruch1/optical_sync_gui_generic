@@ -223,6 +223,7 @@ def _full_settings(stream_options):
         "stream_a_threshold_fraction": 0.25, "stream_b_threshold_fraction": 0.25,
         "frame_drop_threshold_factor": 1.5, "warmup_pairs_to_skip": 0,
         "pairing_gap_outlier_threshold_us": 100000, "snapshot_every_n_pairs": 20, "max_snapshots": 15,
+        "position_gap_outlier_threshold_ms": 5, "position_gap_outlier_max_snapshots": 200,
     }
     settings["dual_panel"] = {
         "stream_a_panel_port": 1, "stream_b_panel_port": 0, "relay_port": 6,
