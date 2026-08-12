@@ -516,11 +516,28 @@ def set_manual_exposure(sensor, exposure):
     Prototype" rig), leaving gain stuck until a physical hardware reset.
     Never touching gain from software at all means there's nothing of ours
     to get stuck - the camera's own auto-exposure algorithm always owns
-    gain, whether this sensor is currently in manual exposure mode or not."""
+    gain, whether this sensor is currently in manual exposure mode or not.
+
+    `exposure` is CLAMPED to this specific sensor's own currently-reported
+    valid range (get_option_range().min/.max) before being written.
+    Confirmed on real hardware: the Stream Config UI's exposure spinbox
+    accepts any value from 1 to 1,000,000 with no way to know ahead of time
+    what a given sensor's actual valid range is - that range isn't a fixed
+    property of the sensor model, it can depend on the CURRENTLY configured
+    resolution/fps (e.g. a color sensor's valid exposure range can differ
+    at 640x480@5fps vs. other configurations). Passing an out-of-range
+    value straight to sensor.set_option() raises a raw pyrealsense2
+    exception ("out of range value for argument 'value'") instead of a
+    sensible fallback - clamping to whatever this sensor/configuration
+    actually supports right now means a value that's merely too extreme
+    for this rig still applies (at its nearest valid bound) instead of
+    hard-failing the whole capture."""
     if not (sensor.supports(rs.option.enable_auto_exposure) and sensor.supports(rs.option.exposure)):
         return False
     sensor.set_option(rs.option.enable_auto_exposure, 0)
-    sensor.set_option(rs.option.exposure, exposure)
+    exposure_range = sensor.get_option_range(rs.option.exposure)
+    clamped_exposure = max(exposure_range.min, min(exposure_range.max, exposure))
+    sensor.set_option(rs.option.exposure, clamped_exposure)
     return True
 
 
