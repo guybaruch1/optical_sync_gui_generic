@@ -44,7 +44,11 @@ def _minimal_context(tmp_path, **overrides):
         ctx=None, device_serial="123456",
         pick_a={"stream_type": "infrared", "stream_index": 1, "width": 4, "height": 4, "fps": 30, "format": "y8"},
         pick_b={"stream_type": "color", "stream_index": 0, "width": 4, "height": 4, "fps": 30, "format": "bgr8"},
-        camera_controls={},
+        # Shape matches gui/pages/stream_config_page.py's own
+        # _read_camera_controls() output - start_session() now reads
+        # auto_exposure/exposure from this to build the output folder's
+        # config suffix (see domain.run_output.build_live_session_config_suffix).
+        camera_controls={"emitter_enabled": True, "auto_exposure": True, "exposure": None, "gain": None},
         switch_time_ms=1.0, scan_direction=1,
         # Already-tuned final threshold arrays (Threshold Tuning page's own
         # job now, not Live Session's) - 150.0 matches what the old

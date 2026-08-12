@@ -99,7 +99,7 @@ from domain.csv_export import export_session_csvs, export_series_csv
 from domain.plot_export import export_session_plot
 from domain.realsense_utils import draw_led_state_overlay, crop_to_roi, combine_side_by_side
 from domain.running_stats import RunningStats
-from domain.run_output import create_run_dir
+from domain.run_output import create_run_dir, build_live_session_config_suffix
 
 
 def _build_copy_icon(color="#555555", size=18):
@@ -527,16 +527,18 @@ class LiveSessionPage(QWidget):
         self.stream_a_title_label.setText("{} - {}".format(short_name, stream_a_label))
         self.stream_b_title_label.setText("{} - {}".format(short_name, stream_b_label))
 
-    def _begin_new_run_output(self):
-        # Mints a fresh timestamped output/live_session_<timestamp>/ folder
-        # for THIS run and joins the CSV filename templates onto it - called
-        # first thing in start_session() so every other output_dir/
-        # kept_csv_path/dropped_csv_path reader below (and everything
-        # _on_session_finished/_export_chart_csv/_save_led_state_debug_images/
-        # _reexport_last_session_csvs read later) already sees this run's own
-        # folder, not a shared/overwritten one from a previous Start click.
+    def _begin_new_run_output(self, suffix=None):
+        # Mints a fresh timestamped output/live_session_<timestamp>[_<config
+        # suffix>]/ folder for THIS run and joins the CSV filename templates
+        # onto it - called from start_session() (after the toolbar values
+        # the suffix is built from are already read) so every other
+        # output_dir/kept_csv_path/dropped_csv_path reader below (and
+        # everything _on_session_finished/_export_chart_csv/
+        # _save_led_state_debug_images/_reexport_last_session_csvs read
+        # later) already sees this run's own folder, not a shared/overwritten
+        # one from a previous Start click.
         ctx = self._context
-        output_dir = create_run_dir(ctx["output_root"], "live_session")
+        output_dir = create_run_dir(ctx["output_root"], "live_session", suffix=suffix)
         ctx["output_dir"] = output_dir
         ctx["kept_csv_path"] = os.path.join(output_dir, ctx["kept_csv_filename"])
         ctx["dropped_csv_path"] = os.path.join(output_dir, ctx["dropped_csv_filename"])
@@ -544,7 +546,6 @@ class LiveSessionPage(QWidget):
 
     def start_session(self):
         ctx = self._context
-        self._begin_new_run_output()
         duration_s = self.duration_spinbox.value() or None
         # Read live from the toolbar, not ctx["switch_time_ms"] - the
         # spinbox is what the operator can tune per-run (see set_context).
@@ -553,6 +554,18 @@ class LiveSessionPage(QWidget):
         # computed against a switch time the panel wasn't really using.
         switch_time_ms = self.switch_time_spinbox.value()
         display_stride = self.frame_sample_interval_spinbox.value()
+        # Read BEFORE _begin_new_run_output() (unlike before this feature
+        # existed) - the output folder's own name now encodes these three
+        # plus the camera pick/exposure mode, so they all have to be known
+        # first. Nothing between the old call site and here reads
+        # ctx["output_dir"], so this reordering is safe.
+        run_output_suffix = build_live_session_config_suffix(
+            width=ctx["pick_a"]["width"], height=ctx["pick_a"]["height"], fps=ctx["pick_a"]["fps"],
+            duration_s=duration_s,
+            auto_exposure=ctx["camera_controls"]["auto_exposure"], exposure=ctx["camera_controls"]["exposure"],
+            display_stride=display_stride, switch_time_ms=switch_time_ms,
+        )
+        self._begin_new_run_output(suffix=run_output_suffix)
         position_gap_metric = PositionGapMetric(
             stream_a_threshold=ctx["stream_a_threshold"], stream_b_threshold=ctx["stream_b_threshold"],
             num_leds=ctx["num_leds"], switch_time_ms=switch_time_ms,
