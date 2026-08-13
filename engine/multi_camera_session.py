@@ -118,7 +118,28 @@ class MultiCameraSessionController(QObject):
         its role, rather than a silent partial run (a real error reaching
         the operator beats guessing whether a half-genlocked rig is safe to
         run). 3. Only once every role is confirmed applied, construct and
-        start one thread per camera."""
+        start one thread per camera.
+
+        Also enforces: at most one configured camera may use dual-panel
+        mode. engine.dual_panel_control's relay/hub singletons
+        (_dual_panel_primed, _relay_connection, _dual_panel_lock) represent
+        exactly ONE shared relay/hub for the whole app - confirmed real
+        wiring on the rig this was designed for is that ALL panels across
+        ALL cameras share one relay, so two cameras' threads both calling
+        start_scanning()/stop_scanning() concurrently would corrupt each
+        other's state. Checked here, before anything else starts, rather
+        than left to fail unpredictably mid-run."""
+        dual_panel_camera_count = sum(
+            1 for spec in self._camera_specs if spec.thread_kwargs.get("dual_panel_config") is not None
+        )
+        if dual_panel_camera_count > 1:
+            raise RuntimeError(
+                "{} cameras are configured for dual-panel mode, but this rig's panels all share one "
+                "relay - at most one camera may use dual-panel mode per multi-camera run.".format(
+                    dual_panel_camera_count
+                )
+            )
+
         for spec in self._camera_specs:
             if spec.hardware_reset_before_start:
                 device = self._device_lookup(ctx, spec.device_serial)

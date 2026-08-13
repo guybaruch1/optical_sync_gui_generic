@@ -42,7 +42,7 @@ class _FakeSessionEngineThread(QObject):
 
 
 def _spec(camera_id, is_master, inter_cam_sync_value=1, stream_identities=None,
-          hardware_reset_before_start=False, device_serial=None):
+          hardware_reset_before_start=False, device_serial=None, dual_panel_config=None):
     return CameraSessionSpec(
         camera_id=camera_id,
         is_master=is_master,
@@ -51,7 +51,7 @@ def _spec(camera_id, is_master, inter_cam_sync_value=1, stream_identities=None,
         device_serial=device_serial or "{}_serial".format(camera_id),
         hardware_reset_before_start=hardware_reset_before_start,
         hardware_reset_settle_s=0.0,
-        thread_kwargs={},
+        thread_kwargs={"dual_panel_config": dual_panel_config} if dual_panel_config is not None else {},
     )
 
 
@@ -158,6 +158,51 @@ def test_start_all_never_lets_a_camera_thread_redo_its_own_hardware_reset():
     controller.start_all(ctx=object())
 
     assert fake_threads["cam1_serial"].kwargs["hardware_reset_before_start"] is False
+
+
+def test_start_all_raises_and_starts_nothing_when_two_cameras_want_dual_panel_mode():
+    # engine.dual_panel_control's relay/hub singletons (_dual_panel_primed,
+    # _relay_connection, _dual_panel_lock) represent exactly ONE shared
+    # relay/hub for the whole app - two cameras' threads both calling
+    # start_scanning()/stop_scanning() concurrently would corrupt each
+    # other's state (confirmed real wiring on the rig this was designed
+    # for: all panels across all cameras share one relay). v1 scope is "at
+    # most one configured camera may use dual-panel mode per run" - see the
+    # multi-camera design doc's "Design detail" section 6.
+    panel_config = {"stream_a_panel_port": 1, "stream_b_panel_port": 0, "relay_port": 6}
+    controller, fake_threads = _controller([
+        _spec("cam1", True, device_serial="s1", dual_panel_config=panel_config),
+        _spec("cam2", False, device_serial="s2", dual_panel_config=panel_config),
+    ])
+
+    with pytest.raises(RuntimeError):
+        controller.start_all(ctx=object())
+
+    assert controller.threads == {}
+    assert all(not t.started for t in fake_threads.values())
+
+
+def test_start_all_allows_exactly_one_camera_in_dual_panel_mode():
+    panel_config = {"stream_a_panel_port": 1, "stream_b_panel_port": 0, "relay_port": 6}
+    controller, fake_threads = _controller([
+        _spec("cam1", True, device_serial="s1", dual_panel_config=panel_config),
+        _spec("cam2", False, device_serial="s2"),  # single-panel/no panel
+    ])
+
+    controller.start_all(ctx=object())
+
+    assert len(controller.threads) == 2
+    assert all(t.started for t in fake_threads.values())
+
+
+def test_start_all_allows_zero_cameras_in_dual_panel_mode():
+    controller, fake_threads = _controller([
+        _spec("cam1", True, device_serial="s1"), _spec("cam2", False, device_serial="s2"),
+    ])
+
+    controller.start_all(ctx=object())
+
+    assert len(controller.threads) == 2
 
 
 def test_start_all_skips_genlock_entirely_for_a_lone_camera():
