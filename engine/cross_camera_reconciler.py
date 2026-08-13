@@ -18,7 +18,7 @@ dicts, same layering convention as engine.test_session/engine.metrics.
 
 from dataclasses import dataclass
 
-from engine.metrics import FramePairSample
+from engine.metrics import FramePairSample, PairingGapMetric
 
 
 @dataclass
@@ -34,6 +34,49 @@ class CrossCameraPairSpec:
     master_row_role: str  # "stream_a" or "stream_b" - which field on the MASTER's own row
     slave_row_role: str   # "stream_a" or "stream_b" - which field on the SLAVE's own row
     pairing_gap_metric: object  # engine.metrics.PairingGapMetric, one instance per pair
+
+
+def build_cross_camera_pair_specs(camera_specs, outlier_threshold_us):
+    """Builds one CrossCameraPairSpec per (slave, shared stream identity)
+    pair against the single designated master, from a rig's camera specs -
+    duck-typed on camera_id/is_master/stream_identities
+    ({"stream_a": "infrared1", "stream_b": "color"}, one entry per stream
+    that camera's own wizard flow configured), so this works with either
+    engine.multi_camera_session's real CameraSessionSpec or a lightweight
+    test fake. A slave missing an identity the master has just produces no
+    pair for that identity - no error, same "heterogeneous sensor setups
+    are fine" requirement CrossCameraReconciler itself follows. Every
+    returned spec gets its OWN PairingGapMetric instance (never shared
+    across pairs, matching how each intra-camera test already gets its own
+    metric instances today). Raises ValueError if exactly one master isn't
+    designated - loud failure instead of silently building nothing or
+    picking an arbitrary one, matching this project's "abort with a clear
+    error, not a silent partial run" convention (see e.g. main_window.py's
+    settings.yaml validation)."""
+    masters = [spec for spec in camera_specs if spec.is_master]
+    if len(masters) != 1:
+        raise ValueError(
+            "Exactly one camera must be designated master, found {}".format(len(masters))
+        )
+    master = masters[0]
+
+    pair_specs = []
+    for slave in camera_specs:
+        if slave is master:
+            continue
+        shared_identities = set(master.stream_identities.values()) & set(slave.stream_identities.values())
+        for identity in sorted(shared_identities):
+            master_row_role = next(role for role, ident in master.stream_identities.items() if ident == identity)
+            slave_row_role = next(role for role, ident in slave.stream_identities.items() if ident == identity)
+            pair_specs.append(CrossCameraPairSpec(
+                master_camera_id=master.camera_id,
+                slave_camera_id=slave.camera_id,
+                stream_identity=identity,
+                master_row_role=master_row_role,
+                slave_row_role=slave_row_role,
+                pairing_gap_metric=PairingGapMetric(outlier_threshold_us=outlier_threshold_us),
+            ))
+    return pair_specs
 
 
 class _PendingBuffer:

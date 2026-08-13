@@ -4,8 +4,24 @@ produce the new cross-camera (master-vs-slave) HW TS Latency metric for a
 multi-camera sync test. See docs/superpowers's multi-camera design doc's
 "Design detail" section 1 for the full rationale."""
 
-from engine.cross_camera_reconciler import CrossCameraPairSpec, CrossCameraReconciler
+import pytest
+
+from engine.cross_camera_reconciler import (
+    CrossCameraPairSpec, CrossCameraReconciler, build_cross_camera_pair_specs,
+)
 from engine.metrics import PairingGapMetric
+
+
+class _CamSpec:
+    """Minimal duck-typed stand-in for engine.multi_camera_session's real
+    CameraSessionSpec - build_cross_camera_pair_specs only ever reads these
+    three attributes, so tests don't need the full per-camera session
+    config (device_serial, session_engine_kwargs, etc.)."""
+
+    def __init__(self, camera_id, is_master, stream_identities):
+        self.camera_id = camera_id
+        self.is_master = is_master
+        self.stream_identities = stream_identities  # e.g. {"stream_a": "infrared1", "stream_b": "color"}
 
 
 def _spec(master_camera_id="cam1", slave_camera_id="cam2", stream_identity="infrared1",
@@ -139,3 +155,87 @@ def test_matches_using_each_camera_own_row_role_when_master_is_stream_b():
 
     assert len(cross_rows) == 1
     assert cross_rows[0]["pairing_gap_us"] == -5.0
+
+
+# --- build_cross_camera_pair_specs: pure spec-building from a rig's camera
+# configs, no Qt/hardware. Consumed by engine.multi_camera_session to wire
+# up a CrossCameraReconciler once the operator has designated a master and
+# up to 2 slaves on the new hub page. ---
+
+def test_build_specs_one_master_two_slaves_shared_identities():
+    master = _CamSpec("cam1", is_master=True,
+                       stream_identities={"stream_a": "infrared1", "stream_b": "color"})
+    slave1 = _CamSpec("cam2", is_master=False,
+                       stream_identities={"stream_a": "infrared1", "stream_b": "color"})
+    slave2 = _CamSpec("cam3", is_master=False,
+                       stream_identities={"stream_a": "infrared1", "stream_b": "color"})
+
+    specs = build_cross_camera_pair_specs([master, slave1, slave2], outlier_threshold_us=100_000)
+
+    assert len(specs) == 4  # 2 slaves x 2 shared identities
+    pairs = {(s.slave_camera_id, s.stream_identity) for s in specs}
+    assert pairs == {("cam2", "infrared1"), ("cam2", "color"), ("cam3", "infrared1"), ("cam3", "color")}
+    for s in specs:
+        assert s.master_camera_id == "cam1"
+        assert s.master_row_role == "stream_a" if s.stream_identity == "infrared1" else s.master_row_role == "stream_b"
+
+
+def test_build_specs_skips_identity_the_slave_does_not_have():
+    # Heterogeneous per-camera sensor setups must be supported - a camera
+    # missing a given identity just means no pair for it, no error.
+    master = _CamSpec("cam1", is_master=True,
+                       stream_identities={"stream_a": "infrared1", "stream_b": "color"})
+    slave = _CamSpec("cam2", is_master=False, stream_identities={"stream_a": "infrared1"})  # no color
+
+    specs = build_cross_camera_pair_specs([master, slave], outlier_threshold_us=100_000)
+
+    assert len(specs) == 1
+    assert specs[0].stream_identity == "infrared1"
+
+
+def test_build_specs_uses_each_camera_own_row_role_independently():
+    # The master's "infrared1" might live under a different stream_a/b slot
+    # than the slave's own "infrared1" - each camera's role mapping is its
+    # own, matched only by the shared identity string.
+    master = _CamSpec("cam1", is_master=True, stream_identities={"stream_b": "infrared1"})
+    slave = _CamSpec("cam2", is_master=False, stream_identities={"stream_a": "infrared1"})
+
+    specs = build_cross_camera_pair_specs([master, slave], outlier_threshold_us=100_000)
+
+    assert len(specs) == 1
+    assert specs[0].master_row_role == "stream_b"
+    assert specs[0].slave_row_role == "stream_a"
+
+
+def test_build_specs_returns_empty_list_with_no_slaves():
+    # Single-camera case (N=1) degrades gracefully - no cross-camera pairs,
+    # no error.
+    master = _CamSpec("cam1", is_master=True, stream_identities={"stream_a": "infrared1"})
+
+    assert build_cross_camera_pair_specs([master], outlier_threshold_us=100_000) == []
+
+
+def test_build_specs_raises_when_no_master_designated():
+    slave = _CamSpec("cam2", is_master=False, stream_identities={"stream_a": "infrared1"})
+
+    with pytest.raises(ValueError):
+        build_cross_camera_pair_specs([slave], outlier_threshold_us=100_000)
+
+
+def test_build_specs_raises_when_more_than_one_master_designated():
+    master1 = _CamSpec("cam1", is_master=True, stream_identities={"stream_a": "infrared1"})
+    master2 = _CamSpec("cam2", is_master=True, stream_identities={"stream_a": "infrared1"})
+
+    with pytest.raises(ValueError):
+        build_cross_camera_pair_specs([master1, master2], outlier_threshold_us=100_000)
+
+
+def test_build_specs_gives_each_pair_its_own_pairing_gap_metric_instance():
+    master = _CamSpec("cam1", is_master=True,
+                       stream_identities={"stream_a": "infrared1", "stream_b": "color"})
+    slave = _CamSpec("cam2", is_master=False,
+                      stream_identities={"stream_a": "infrared1", "stream_b": "color"})
+
+    specs = build_cross_camera_pair_specs([master, slave], outlier_threshold_us=100_000)
+
+    assert specs[0].pairing_gap_metric is not specs[1].pairing_gap_metric
