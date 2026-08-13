@@ -24,6 +24,45 @@ def test_assign_grid_ids_orders_row_major():
     assert positions["3"] == [10.0, 30.0]
 
 
+def test_assign_grid_ids_stays_split_when_row_spacing_is_tighter_than_configured_row_gap_px():
+    # Regression test for Issue 4 (docs/algorithm_review_log.md): a fixed,
+    # resolution-independent row_gap_px risks ending up ABOVE the real
+    # row-to-row pixel pitch once resolution shrinks it (e.g. VGA vs HD for
+    # the same physical panel) - here real row spacing is 14px, tighter than
+    # the default row_gap_px=15, so the OLD code (curr_y - prev_y > 15)
+    # never split at all and collapsed all 9 centroids into row_layout=[9],
+    # scrambling every led_id. Column spacing is 10px, so
+    # safe_row_gap_px caps the effective threshold at 6 (10 * 0.6), well
+    # under the real 14px row gap, restoring the correct 3x3 split.
+    centroids = [
+        (0.0, 0.0), (10.0, 0.0), (20.0, 0.0),
+        (0.0, 14.0), (10.0, 14.0), (20.0, 14.0),
+        (0.0, 28.0), (10.0, 28.0), (20.0, 28.0),
+    ]
+    positions, row_layout = assign_grid_ids(centroids, row_gap_px=15)
+    assert row_layout == [3, 3, 3]
+    assert positions["0"] == [0.0, 0.0]
+    assert positions["1"] == [10.0, 0.0]
+    assert positions["2"] == [20.0, 0.0]
+    assert positions["3"] == [0.0, 14.0]
+    assert positions["8"] == [20.0, 28.0]
+
+
+def test_assign_grid_ids_respects_a_configured_row_gap_px_smaller_than_the_safe_cap():
+    # Companion sanity check: when the operator's OWN configured row_gap_px
+    # is already tighter than what safe_row_gap_px would compute, that
+    # smaller configured value must still be what actually governs (min(),
+    # not the safe fraction alone) - otherwise an intentionally-tight config
+    # would be silently loosened back up by this fix. Real row spacing here
+    # is 4px; safe_row_gap_px would cap at 4 (max(min_gap_px=4, int(4*0.6)=2)),
+    # which would NOT split (4 is not > 4) - but the explicitly configured
+    # row_gap_px=3 (tighter than that safe cap) correctly still splits
+    # (4 > 3), confirming min(configured, safe) - not safe alone - is used.
+    centroids = [(0.0, 0.0), (30.0, 0.0), (0.0, 4.0), (30.0, 4.0)]
+    positions, row_layout = assign_grid_ids(centroids, row_gap_px=3)
+    assert row_layout == [2, 2]
+
+
 def test_assign_grid_ids_raises_on_empty_input():
     try:
         assign_grid_ids([])
