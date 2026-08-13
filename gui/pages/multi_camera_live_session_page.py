@@ -76,7 +76,7 @@ def _stream_identities(config):
 
 class MultiCameraLiveSessionPage(QWidget):
     def __init__(self, thread_factory=None, device_lookup=None, sync_setter=None,
-                 controller_factory=None, parent=None):
+                 camera_start_stagger_s=None, controller_factory=None, parent=None):
         super().__init__(parent)
         # Injectable for testing (mirrors MultiCameraSessionController's own
         # injectable collaborators) - None means "use the real ones",
@@ -84,6 +84,13 @@ class MultiCameraLiveSessionPage(QWidget):
         self._thread_factory = thread_factory
         self._device_lookup = device_lookup
         self._sync_setter = sync_setter
+        # None here means "let MultiCameraSessionController use its own
+        # real default" - only overridden by tests that want start_all_
+        # sessions() to run at test speed instead of paying the real,
+        # multi-second-per-extra-camera USB-collision-avoidance delay (see
+        # that controller's own __init__ docstring for why the delay
+        # exists at all).
+        self._camera_start_stagger_s = camera_start_stagger_s
         self._controller_factory = controller_factory or MultiCameraSessionController
 
         self._ctx = None
@@ -284,6 +291,8 @@ class MultiCameraLiveSessionPage(QWidget):
             controller_kwargs["device_lookup"] = self._device_lookup
         if self._sync_setter is not None:
             controller_kwargs["sync_setter"] = self._sync_setter
+        if self._camera_start_stagger_s is not None:
+            controller_kwargs["camera_start_stagger_s"] = self._camera_start_stagger_s
 
         self._controller = self._controller_factory(camera_specs, **controller_kwargs)
         self._controller.camera_frame_ready.connect(self._on_camera_frame_ready)

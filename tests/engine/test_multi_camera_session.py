@@ -6,7 +6,7 @@ engine/session_engine.py itself (see CLAUDE.md's "Testing" note) - this
 file only proves the controller's own orchestration is correct given
 whatever its collaborators do."""
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from PySide6.QtCore import QObject, Signal
@@ -55,7 +55,11 @@ def _spec(camera_id, is_master, inter_cam_sync_value=1, stream_identities=None,
     )
 
 
-def _controller(camera_specs, sync_setter=None, device_lookup=None):
+def _controller(camera_specs, sync_setter=None, device_lookup=None, camera_start_stagger_s=0):
+    # Defaults the stagger to 0 (instant) - tests that don't care about
+    # stagger behavior specifically shouldn't pay a real multi-second sleep
+    # just because they happen to construct a 2+ camera controller. Tests
+    # that DO care about stagger pass a real value explicitly.
     fake_threads = {}
 
     def thread_factory(**kwargs):
@@ -68,6 +72,7 @@ def _controller(camera_specs, sync_setter=None, device_lookup=None):
         thread_factory=thread_factory,
         device_lookup=device_lookup or (lambda ctx, serial: MagicMock(name=serial)),
         sync_setter=sync_setter or MagicMock(return_value=True),
+        camera_start_stagger_s=camera_start_stagger_s,
     )
     return controller, fake_threads
 
@@ -203,6 +208,81 @@ def test_start_all_allows_zero_cameras_in_dual_panel_mode():
     controller.start_all(ctx=object())
 
     assert len(controller.threads) == 2
+
+
+# --- Real bug: two cameras sharing a USB hub/controller (e.g. an Acroname
+# hub) - starting both threads back-to-back with zero delay let camera 1's
+# rs.pipeline().start() (already documented elsewhere in this codebase as
+# having unpredictable USB-level side effects) collide with camera 2's own
+# device-opening sequence, producing a real-hardware "resolve_and_group: no
+# matching profile found... after a reconnect" failure on the second
+# camera. A settle delay between each camera's thread start - same "give
+# the hardware a moment" pattern as hardware_reset_settle_s/
+# hub_switch_settle_s elsewhere in this project - reduces that collision
+# window. ---
+
+def test_start_all_staggers_camera_thread_starts():
+    controller, fake_threads = _controller(
+        [_spec("cam1", True, device_serial="s1"), _spec("cam2", False, device_serial="s2")],
+        camera_start_stagger_s=2.0,
+    )
+
+    with patch("engine.multi_camera_session.time.sleep") as mock_sleep:
+        controller.start_all(ctx=object())
+
+    mock_sleep.assert_called_once_with(2.0)
+    assert fake_threads["s1"].started
+    assert fake_threads["s2"].started
+
+
+def test_start_all_does_not_sleep_before_starting_the_first_camera():
+    controller, fake_threads = _controller([_spec("cam1", True, device_serial="s1")], camera_start_stagger_s=2.0)
+
+    with patch("engine.multi_camera_session.time.sleep") as mock_sleep:
+        controller.start_all(ctx=object())
+
+    mock_sleep.assert_not_called()
+
+
+def test_start_all_stagger_defaults_to_a_positive_settle_time():
+    # Real-hardware-tunable default, same humility this project already
+    # applies to every other guessed hardware timing constant - not claimed
+    # to be exactly right, just a reasonable starting point. Bypasses
+    # _controller()'s own test-convenience default (0, for every OTHER
+    # test's speed) to check MultiCameraSessionController's real default.
+    fake_threads = {}
+
+    def thread_factory(**kwargs):
+        thread = _FakeSessionEngineThread(**kwargs)
+        fake_threads[kwargs["device_serial"]] = thread
+        return thread
+
+    controller = MultiCameraSessionController(
+        camera_specs=[_spec("cam1", True, device_serial="s1"), _spec("cam2", False, device_serial="s2")],
+        thread_factory=thread_factory,
+        device_lookup=lambda ctx, serial: MagicMock(name=serial),
+        sync_setter=MagicMock(return_value=True),
+    )
+
+    with patch("engine.multi_camera_session.time.sleep") as mock_sleep:
+        controller.start_all(ctx=object())
+
+    assert mock_sleep.call_count == 1
+    assert mock_sleep.call_args[0][0] > 0
+
+
+def test_start_all_stagger_applies_before_every_camera_after_the_first():
+    controller, fake_threads = _controller(
+        [_spec("cam1", True, device_serial="s1"), _spec("cam2", False, device_serial="s2"),
+         _spec("cam3", False, device_serial="s3")],
+        camera_start_stagger_s=1.5,
+    )
+
+    with patch("engine.multi_camera_session.time.sleep") as mock_sleep:
+        controller.start_all(ctx=object())
+
+    assert mock_sleep.call_count == 2  # before camera 2, and before camera 3
+    assert all(call.args == (1.5,) for call in mock_sleep.call_args_list)
 
 
 def test_start_all_skips_genlock_entirely_for_a_lone_camera():

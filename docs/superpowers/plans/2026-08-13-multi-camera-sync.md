@@ -330,6 +330,18 @@ wiring). This means:
 5. **Thread/GIL contention** — 3 concurrent `QThread`s each doing per-pair
    numpy brightness sampling; measure per-camera frame-drop rate with all
    three running concurrently before assuming pure reuse is free.
+6. **✅ Confirmed on real hardware and fixed**: two cameras sharing a USB
+   hub/controller (e.g. an Acroname hub) can disrupt each other's device
+   enumeration if their `rs.pipeline().start()` calls happen at nearly the
+   same moment — starting both camera threads back-to-back with zero delay
+   reproduced this on the real rig every time (`resolve_and_group: no
+   matching profile found... after a reconnect` on the second camera).
+   Fixed with `MultiCameraSessionController`'s `camera_start_stagger_s`
+   (default 2.0s, applied before starting every camera after the first) —
+   a real-hardware-tunable guess, not a proven-correct value; keep raising
+   it if collisions are still observed with 3 cameras. The LED-panel
+   version of this exact same mechanism (camera vs. LED panel sharing a
+   hub) is documented separately in `CLAUDE.md`.
 
 ## Critical files
 

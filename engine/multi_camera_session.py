@@ -89,12 +89,28 @@ class MultiCameraSessionController(QObject):
     all_sessions_finished = Signal(dict)
 
     def __init__(self, camera_specs, pairing_gap_outlier_threshold_us=100_000,
-                 thread_factory=None, device_lookup=None, sync_setter=None, parent=None):
+                 thread_factory=None, device_lookup=None, sync_setter=None,
+                 camera_start_stagger_s=2.0, parent=None):
         super().__init__(parent)
         self._camera_specs = camera_specs
         self._thread_factory = thread_factory or SessionEngineThread
         self._device_lookup = device_lookup or find_device_by_serial
         self._sync_setter = sync_setter or set_inter_cam_sync_mode
+        # Real-hardware finding: two cameras sharing a USB hub/controller
+        # (e.g. an Acroname hub) can disrupt each other's device enumeration
+        # if their rs.pipeline().start() calls (already documented elsewhere
+        # in this codebase as having unpredictable USB-level side effects)
+        # happen at nearly the same moment - starting all N threads back-to-
+        # back with zero delay hit this every time on the rig this was found
+        # on (the second camera's resolve_and_group failed with "no matching
+        # profile found... after a reconnect"). This settle delay, applied
+        # before starting every camera AFTER the first, gives the previous
+        # camera's own noisy open/negotiate window time to finish - same
+        # "give the hardware a moment" pattern as hardware_reset_settle_s/
+        # hub_switch_settle_s elsewhere in this project. 2.0s is a
+        # real-hardware-tunable starting guess, not a proven-correct value -
+        # keep raising it if two-camera collisions are still observed.
+        self._camera_start_stagger_s = camera_start_stagger_s
 
         pair_specs = build_cross_camera_pair_specs(camera_specs, pairing_gap_outlier_threshold_us)
         self._reconciler = CrossCameraReconciler(pair_specs) if pair_specs else None
@@ -158,7 +174,15 @@ class MultiCameraSessionController(QObject):
                 )
 
         self._finished_rows_by_camera = {}
-        for spec in self._camera_specs:
+        for index, spec in enumerate(self._camera_specs):
+            # See __init__'s own comment - staggered so each camera's
+            # rs.pipeline().start() gets a moment to finish its own noisy
+            # USB open/negotiate window before the next camera starts its
+            # own, if they share a USB hub/controller. No delay before the
+            # very first camera - nothing else is starting concurrently
+            # with it yet.
+            if index > 0 and self._camera_start_stagger_s > 0:
+                time.sleep(self._camera_start_stagger_s)
             thread = self._thread_factory(
                 ctx=ctx,
                 device_serial=spec.device_serial,

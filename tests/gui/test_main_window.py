@@ -508,6 +508,49 @@ def test_second_committed_camera_is_not_master_by_default(qapp, monkeypatch, tmp
     assert second_camera_id != first_master
 
 
+def test_two_fully_configured_cameras_both_reach_the_live_session_page(qapp, monkeypatch, tmp_path):
+    # Regression check for a real bug report: "only one camera ran" when
+    # clicking Start Multi-Camera Live Session after configuring 2 cameras
+    # through the hub. Drives the ENTIRE real MainWindow flow for both
+    # cameras (not a hand-built cameras list, unlike
+    # test_multi_camera_live_session_page.py's own tests) to prove the
+    # MainWindow -> MultiCameraLiveSessionPage handoff itself carries BOTH
+    # cameras through correctly.
+    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+    first_camera_id = window._editing_camera_id
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window._on_tuning_done()
+
+    window._on_add_camera_requested()
+    second_camera_id = window._editing_camera_id
+    window._on_device_chosen("SN456", "Intel RealSense D455")
+    window._on_config_chosen((IR1, COLOR0, {
+        "emitter_enabled": False, "auto_exposure": True, "exposure_a": None, "exposure_b": None,
+    }))
+    window.gui_state.stream_a_roi = [0, 0, 50, 50]
+    window.gui_state.stream_b_roi = [0, 0, 50, 50]
+    window.calibration_page.last_calibration_result = dict(
+        image_a_on=np.full((50, 50), 50, dtype=np.uint8), image_a_off=np.full((50, 50), 50, dtype=np.uint8),
+        image_b_on=np.full((50, 50), 50, dtype=np.uint8), image_b_off=np.full((50, 50), 50, dtype=np.uint8),
+        stream_a_otsu_threshold=127, stream_b_otsu_threshold=127,
+        min_blob_area=5, row_gap_px=15, neighborhood_size=5,
+    )
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window._on_tuning_done()
+
+    assert set(window._cameras.keys()) == {first_camera_id, second_camera_id}
+    assert window.camera_hub_page.start_button.isEnabled()
+
+    window._on_start_multi_camera_session_requested()
+
+    page = window.multi_camera_live_session_page
+    assert page.tabs.count() == 2
+    assert set(page._panels.keys()) == {first_camera_id, second_camera_id}
+    assert len(page._cameras) == 2
+
+
 def test_master_change_requested_updates_master(qapp, monkeypatch, tmp_path):
     window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
     with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):

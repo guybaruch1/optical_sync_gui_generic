@@ -78,6 +78,10 @@ def _page_with_fake_threads():
         thread_factory=thread_factory,
         device_lookup=lambda ctx, serial: MagicMock(),
         sync_setter=MagicMock(return_value=True),
+        # 0, not the real multi-second-per-extra-camera default - these are
+        # fake threads with nothing to actually collide over on a real USB
+        # bus, and 7+ tests here construct 2-camera pages.
+        camera_start_stagger_s=0,
     )
     return page, fake_threads
 
