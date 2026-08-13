@@ -307,13 +307,14 @@ def test_on_tuning_done_reads_stream_xy_live_from_threshold_tuning_page_not_a_st
     # gets the PAGE's current value, not the stale pre-tuning one.
     window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
 
+    camera_id = window._editing_camera_id
     with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
         window._on_calibration_done()
         retuned_stream_a_xy = np.array([(9.0, 9.0), (8.0, 8.0), (7.0, 7.0)])  # deliberately a different shape
         window.threshold_tuning_page._context["stream_a_xy"] = retuned_stream_a_xy
         window._on_tuning_done()
 
-    assert window.live_session_page._context["stream_a_xy"] is retuned_stream_a_xy
+    assert window._cameras[camera_id]["config"]["stream_a_xy"] is retuned_stream_a_xy
 
 
 # --- settings.yaml camera_sync: read-through. Deliberately tolerant of a
@@ -322,12 +323,13 @@ def test_on_tuning_done_reads_stream_xy_live_from_threshold_tuning_page_not_a_st
 
 def test_camera_sync_falls_back_to_defaults_when_section_absent(qapp, monkeypatch, tmp_path):
     window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+    camera_id = window._editing_camera_id
 
     with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
         window._on_calibration_done()
         window._on_tuning_done()
 
-    ctx = window.live_session_page._context
+    ctx = window._cameras[camera_id]["config"]
     assert ctx["enable_depth_for_ir_sync"] is True
     assert ctx["hardware_reset_before_start"] is False
     assert ctx["hardware_reset_settle_s"] == 8.0
@@ -335,6 +337,7 @@ def test_camera_sync_falls_back_to_defaults_when_section_absent(qapp, monkeypatc
 
 def test_camera_sync_settings_are_read_and_passed_to_live_session(qapp, monkeypatch, tmp_path):
     window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+    camera_id = window._editing_camera_id
     window.settings["camera_sync"] = {
         "enable_depth_for_ir_sync": False,
         "hardware_reset_before_start": True,
@@ -345,7 +348,7 @@ def test_camera_sync_settings_are_read_and_passed_to_live_session(qapp, monkeypa
         window._on_calibration_done()
         window._on_tuning_done()
 
-    ctx = window.live_session_page._context
+    ctx = window._cameras[camera_id]["config"]
     assert ctx["enable_depth_for_ir_sync"] is False
     assert ctx["hardware_reset_before_start"] is True
     assert ctx["hardware_reset_settle_s"] == 2.5
@@ -365,6 +368,7 @@ def test_camera_sync_enable_depth_for_ir_sync_also_reaches_threshold_tuning(qapp
 
 def test_on_tuning_done_passes_tuned_per_stream_thresholds_to_live_session(qapp, monkeypatch, tmp_path):
     window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+    camera_id = window._editing_camera_id
 
     with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
         window._on_calibration_done()
@@ -374,8 +378,8 @@ def test_on_tuning_done_passes_tuned_per_stream_thresholds_to_live_session(qapp,
         window.threshold_tuning_page.switch_time_spinbox.setValue(5)
         window._on_tuning_done()
 
-    assert window.stack.currentWidget() is window.live_session_page
-    ctx = window.live_session_page._context
+    assert window.stack.currentWidget() is window.camera_hub_page
+    ctx = window._cameras[camera_id]["config"]
     assert list(ctx["stream_a_threshold"]) == [200.0]  # 100 + 0.5*200
     assert list(ctx["stream_b_threshold"]) == [500.0]  # 200 + 0.75*400
     assert ctx["switch_time_ms"] == 5
@@ -383,13 +387,14 @@ def test_on_tuning_done_passes_tuned_per_stream_thresholds_to_live_session(qapp,
 
 def test_on_tuning_done_passes_a_fractional_switch_time_to_live_session(qapp, monkeypatch, tmp_path):
     window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+    camera_id = window._editing_camera_id
 
     with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
         window._on_calibration_done()
         window.threshold_tuning_page.switch_time_spinbox.setValue(0.5)
         window._on_tuning_done()
 
-    ctx = window.live_session_page._context
+    ctx = window._cameras[camera_id]["config"]
     assert ctx["switch_time_ms"] == 0.5
 
 
@@ -414,7 +419,154 @@ def test_dual_panel_config_built_from_settings_when_checkbox_checked(qapp, monke
 
     with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
         window._on_calibration_done()
+        camera_id = window._editing_camera_id
         window._on_tuning_done()
 
     assert window.threshold_tuning_page._context["dual_panel_config"] == window.settings["dual_panel"]
-    assert window.live_session_page._context["dual_panel_config"] == window.settings["dual_panel"]
+    assert window._cameras[camera_id]["config"]["dual_panel_config"] == window.settings["dual_panel"]
+
+
+# --- Multi-camera hub: _on_tuning_done now commits the just-finished
+# camera's config into self._cameras and returns to the new CameraHubPage,
+# rather than populating LiveSessionPage directly - "hub in front of every
+# run, including a single camera" (see docs/superpowers's multi-camera
+# design doc's "Design detail" section 4). LiveSessionPage itself is
+# untouched and still fully covered by its own test file - MainWindow
+# simply no longer routes to it; the new multi-camera Live Session page
+# that eventually will is a later step, not built yet. ---
+
+def test_main_window_starts_on_camera_hub_page(qapp):
+    settings = _minimal_settings({})
+    window = _make_window(qapp, settings)
+
+    assert window.stack.currentWidget() is window.camera_hub_page
+
+
+def test_add_camera_requested_switches_to_device_select_and_assigns_a_slot(qapp):
+    settings = _minimal_settings({})
+    window = _make_window(qapp, settings)
+
+    window._on_add_camera_requested()
+
+    assert window.stack.currentWidget() is window.device_page
+    assert window._editing_camera_id is not None
+
+
+def test_completing_a_cameras_flow_commits_it_and_returns_to_hub(qapp, monkeypatch, tmp_path):
+    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+    camera_id = window._editing_camera_id
+
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window._on_tuning_done()
+
+    assert window.stack.currentWidget() is window.camera_hub_page
+    assert window._editing_camera_id is None
+    assert camera_id in window._cameras
+    assert window._cameras[camera_id]["label"] == "Intel RealSense D455"
+    assert window._cameras[camera_id]["config"]["switch_time_ms"] == 1
+
+
+def test_first_committed_camera_becomes_master_automatically(qapp, monkeypatch, tmp_path):
+    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+    camera_id = window._editing_camera_id
+
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window._on_tuning_done()
+
+    assert window._master_camera_id == camera_id
+
+
+def test_second_committed_camera_is_not_master_by_default(qapp, monkeypatch, tmp_path):
+    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window._on_tuning_done()
+    first_master = window._master_camera_id
+
+    window._on_add_camera_requested()
+    second_camera_id = window._editing_camera_id
+    window._on_device_chosen("SN456", "Intel RealSense D455")
+    window._on_config_chosen((IR1, COLOR0, {
+        "emitter_enabled": False, "auto_exposure": True, "exposure_a": None, "exposure_b": None,
+    }))
+    window.gui_state.stream_a_roi = [0, 0, 50, 50]
+    window.gui_state.stream_b_roi = [0, 0, 50, 50]
+    window.calibration_page.last_calibration_result = dict(
+        image_a_on=np.full((50, 50), 50, dtype=np.uint8), image_a_off=np.full((50, 50), 50, dtype=np.uint8),
+        image_b_on=np.full((50, 50), 50, dtype=np.uint8), image_b_off=np.full((50, 50), 50, dtype=np.uint8),
+        stream_a_otsu_threshold=127, stream_b_otsu_threshold=127,
+        min_blob_area=5, row_gap_px=15, neighborhood_size=5,
+    )
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window._on_tuning_done()
+
+    assert window._master_camera_id == first_master  # unchanged
+    assert second_camera_id in window._cameras
+    assert second_camera_id != first_master
+
+
+def test_master_change_requested_updates_master(qapp, monkeypatch, tmp_path):
+    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window._on_tuning_done()
+    window._cameras["some_other_cam"] = {"label": "other", "config": {}}
+
+    window._on_master_change_requested("some_other_cam")
+
+    assert window._master_camera_id == "some_other_cam"
+
+
+def test_remove_camera_requested_removes_it(qapp, monkeypatch, tmp_path):
+    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window._on_tuning_done()
+    camera_id = list(window._cameras.keys())[0]
+
+    window._on_remove_camera_requested(camera_id)
+
+    assert camera_id not in window._cameras
+    assert window._master_camera_id is None  # no cameras left
+
+
+def test_removing_the_master_promotes_a_remaining_camera(qapp, monkeypatch, tmp_path):
+    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window._on_tuning_done()
+    master_id = window._master_camera_id
+    window._cameras["some_other_cam"] = {"label": "other", "config": {}}
+
+    window._on_remove_camera_requested(master_id)
+
+    assert window._master_camera_id == "some_other_cam"
+
+
+def test_edit_camera_requested_switches_to_device_select_reusing_the_camera_id(qapp, monkeypatch, tmp_path):
+    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window._on_tuning_done()
+    camera_id = list(window._cameras.keys())[0]
+
+    window._on_edit_camera_requested(camera_id)
+
+    assert window.stack.currentWidget() is window.device_page
+    assert window._editing_camera_id == camera_id
+
+
+def test_start_multi_camera_session_requested_reports_not_yet_wired(qapp):
+    # Not built yet - the new multi-camera Live Session page + controller
+    # wiring is a separate, later step (see design doc's suggested
+    # implementation order). Documents the current, honest limitation
+    # rather than silently doing nothing.
+    settings = _minimal_settings({})
+    window = _make_window(qapp, settings)
+
+    window._on_start_multi_camera_session_requested()
+
+    assert "later step" in window.camera_hub_page.status_label.text().lower()

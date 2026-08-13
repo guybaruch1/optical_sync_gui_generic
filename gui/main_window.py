@@ -1,15 +1,28 @@
-"""Wizard shell: Device select -> Stream config -> ROI select ->
-Calibration -> Threshold tuning -> Live session, in a QStackedWidget,
-persisting choices to state.gui_state as the user moves through the wizard.
+"""Wizard shell: a Camera Hub page in front of every run (even a single
+camera - see docs/superpowers's multi-camera design doc's "Design detail"
+section 4) that fans out into the existing per-camera sub-flow (Device
+select -> Stream config -> ROI select -> Calibration -> Threshold tuning),
+in a QStackedWidget, persisting choices to state.gui_state as the user
+moves through the wizard.
 
-Generalized from the old hardcoded IR/RGB-sensor version to the generic
-pick_a/pick_b stream picks the Stream Config page now produces (Task 18):
-this file itself is the only place that still needs to remember the LIVE
-pick_a/pick_b/camera_controls values across wizard steps within one run
-(as self._pick_a/self._pick_b/self._camera_controls instance attributes) -
-GuiState only stores a lossy, JSON-friendly prefill record (no `format`/
-`sensor_index`) for the NEXT app launch's Stream Config defaults, not a
-full pick reconstruction usable later in this same run.
+Per-camera sub-flow pages stay single, SHARED instances re-entered once per
+configured camera (via the hub's Add/Edit actions) - none of their own
+internals changed for multi-camera support, only this file's routing
+around them. Within one camera's sub-flow, self._pick_a/self._pick_b/
+self._camera_controls/self._pending_ctx are that camera's own SCRATCH state
+(exactly as before this feature existed) - only committed into
+self._cameras[self._editing_camera_id] once that camera's flow fully
+completes (_on_tuning_done). GuiState still only stores a lossy,
+JSON-friendly prefill record for the NEXT app launch's Stream Config
+defaults (now reflecting whichever camera was edited most recently, a
+known, deliberately-deferred limitation - see the design doc's "Explicitly
+deferred to v2" list); self._cameras is this run's actual source of truth
+for every configured camera's full config.
+
+LiveSessionPage/the eventual multi-camera Live Session page + controller
+wiring are NOT reached from here yet - CameraHubPage's "Start Multi-Camera
+Live Session" is a later, separate step (_on_start_multi_camera_session_
+requested just reports that honestly rather than silently no-op'ing).
 """
 
 import numpy as np
@@ -20,7 +33,7 @@ from gui.pages.stream_config_page import StreamConfigPage
 from gui.pages.roi_select_page import RoiSelectPage, stream_label
 from gui.pages.calibration_page import CalibrationPage
 from gui.pages.threshold_tuning_page import ThresholdTuningPage
-from gui.pages.live_session_page import LiveSessionPage
+from gui.pages.camera_hub_page import CameraHubPage, CameraSummary
 from state.gui_state import GuiState, save_gui_state
 from engine.streams import (
     list_video_stream_options, stream_slug,
@@ -46,20 +59,22 @@ class MainWindow(QMainWindow):
         self.roi_page = RoiSelectPage()
         self.calibration_page = CalibrationPage()
         self.threshold_tuning_page = ThresholdTuningPage()
-        self.live_session_page = LiveSessionPage()
+        self.camera_hub_page = CameraHubPage()
         self._device_name = None
         # Stashed in _on_calibration_done, consumed in _on_tuning_done -
-        # everything Live Session still needs that Threshold Tuning itself
-        # has no use for (CSV paths, output_dir, frame-drop/pairing-gap
-        # tuning, etc.). See module docstring for why this can't just live
-        # in GuiState/settings alone.
+        # everything the eventual multi-camera Live Session controller will
+        # still need that Threshold Tuning itself has no use for (CSV paths,
+        # output_dir, frame-drop/pairing-gap tuning, etc.). See module
+        # docstring for why this can't just live in GuiState/settings alone.
         self._pending_ctx = None
         # Live pick_a/pick_b/camera_controls, stashed here in
         # _on_config_chosen and read back in _on_roi_chosen/
         # _on_calibration_done - GuiState alone can't round-trip these (it
         # deliberately doesn't store `format`/`sensor_index`, see module
         # docstring), and CalibrationPage.calibration_done is a bare signal
-        # with no payload.
+        # with no payload. All THREE of these are one camera's own SCRATCH
+        # state during its sub-flow - committed into self._cameras (see
+        # below) once that camera's flow fully completes.
         self._pick_a = None
         self._pick_b = None
         self._camera_controls = None
@@ -72,8 +87,27 @@ class MainWindow(QMainWindow):
         # calls need this too.
         self._dual_panel_config = None
 
+        # camera_id -> {"label": str, "config": dict} for every camera that
+        # has FINISHED its own 5-page sub-flow at least once - this run's
+        # actual source of truth (GuiState is only ever a lossy prefill, see
+        # module docstring). A camera only appears here once fully
+        # committed by _on_tuning_done; while a camera is mid-flow it's
+        # tracked only by self._editing_camera_id, with no placeholder card
+        # shown on the hub - simplest v1 behavior, matching how the
+        # single-camera wizard never showed an intermediate "hub" state
+        # either.
+        self._cameras = {}
+        self._master_camera_id = None
+        # Which camera_id the 5-page sub-flow currently in progress will
+        # commit into once it finishes - set by _on_add_camera_requested/
+        # _on_edit_camera_requested, or lazily assigned by _on_device_chosen
+        # itself if still None (keeps direct-call testing/tooling working
+        # without requiring every caller to go through the hub first).
+        self._editing_camera_id = None
+        self._next_camera_slot = 1
+
         for page in (self.device_page, self.stream_config_page, self.roi_page,
-                     self.calibration_page, self.threshold_tuning_page, self.live_session_page):
+                     self.calibration_page, self.threshold_tuning_page, self.camera_hub_page):
             self.stack.addWidget(page)
 
         self.device_page.device_chosen.connect(self._on_device_chosen)
@@ -81,11 +115,23 @@ class MainWindow(QMainWindow):
         self.roi_page.roi_chosen.connect(self._on_roi_chosen)
         self.calibration_page.calibration_done.connect(self._on_calibration_done)
         self.threshold_tuning_page.tuning_done.connect(self._on_tuning_done)
+        self.camera_hub_page.add_camera_requested.connect(self._on_add_camera_requested)
+        self.camera_hub_page.edit_camera_requested.connect(self._on_edit_camera_requested)
+        self.camera_hub_page.master_change_requested.connect(self._on_master_change_requested)
+        self.camera_hub_page.remove_camera_requested.connect(self._on_remove_camera_requested)
+        self.camera_hub_page.start_multi_camera_session_requested.connect(
+            self._on_start_multi_camera_session_requested
+        )
 
-        self.device_page.refresh_devices(self.ctx)
-        self.stack.setCurrentWidget(self.device_page)
+        self.stack.setCurrentWidget(self.camera_hub_page)
 
     def _on_device_chosen(self, serial, name):
+        # Device Select is always the entry point into a camera's sub-flow -
+        # ensure an editing camera_id exists even if we got here without
+        # going through the hub's Add/Edit actions first (e.g. a direct
+        # call, same as every pre-existing test in this file does).
+        if self._editing_camera_id is None:
+            self._editing_camera_id = self._new_camera_slot_id()
         self.gui_state.device_serial = serial
         self._device_name = name
         self._dual_panel_config = (
@@ -333,8 +379,13 @@ class MainWindow(QMainWindow):
 
     def _on_tuning_done(self):
         pending = self._pending_ctx
-        self.live_session_page.set_context(
-            self.ctx, pending["device_serial"], pending["pick_a"], pending["pick_b"], pending["camera_controls"],
+        # Everything the eventual multi-camera Live Session controller will
+        # need for THIS camera - same set of values LiveSessionPage.
+        # set_context() used to receive directly; now stored per-camera
+        # instead, keyed by the camera_id this whole sub-flow was for.
+        config = dict(
+            device_serial=pending["device_serial"], pick_a=pending["pick_a"], pick_b=pending["pick_b"],
+            camera_controls=pending["camera_controls"],
             # The tuned switch time (not settings.yaml's raw default) - this
             # is what was actually previewed on the Threshold Tuning page,
             # so it's the more accurate starting point for the real test.
@@ -367,7 +418,68 @@ class MainWindow(QMainWindow):
             hardware_reset_before_start=pending["hardware_reset_before_start"],
             hardware_reset_settle_s=pending["hardware_reset_settle_s"],
         )
-        self.stack.setCurrentWidget(self.live_session_page)
+
+        camera_id = self._editing_camera_id
+        is_first_camera = not self._cameras
+        self._cameras[camera_id] = {"label": pending["camera_name"], "config": config}
+        if is_first_camera:
+            self._master_camera_id = camera_id
+        self._editing_camera_id = None
+
+        self._refresh_camera_hub()
+        self.stack.setCurrentWidget(self.camera_hub_page)
+
+    def _new_camera_slot_id(self):
+        slot_id = "camera_{}".format(self._next_camera_slot)
+        self._next_camera_slot += 1
+        return slot_id
+
+    def _refresh_camera_hub(self):
+        summaries = [
+            CameraSummary(
+                camera_id=camera_id, label=camera["label"],
+                is_master=(camera_id == self._master_camera_id), configured=True,
+            )
+            for camera_id, camera in self._cameras.items()
+        ]
+        self.camera_hub_page.set_cameras(summaries)
+
+    def _on_add_camera_requested(self):
+        self._editing_camera_id = self._new_camera_slot_id()
+        self.device_page.refresh_devices(self.ctx)
+        self.stack.setCurrentWidget(self.device_page)
+
+    def _on_edit_camera_requested(self, camera_id):
+        # Simplest v1 behavior: re-run that camera's ENTIRE sub-flow from
+        # Device Select, same as adding a new one - no pre-population of
+        # its previous choices beyond whatever GuiState's own lossy prefill
+        # already offers. The camera's previously-committed config is left
+        # in self._cameras untouched until the sub-flow completes again
+        # (_on_tuning_done overwrites it under the same camera_id).
+        self._editing_camera_id = camera_id
+        self.device_page.refresh_devices(self.ctx)
+        self.stack.setCurrentWidget(self.device_page)
+
+    def _on_master_change_requested(self, camera_id):
+        self._master_camera_id = camera_id
+        self._refresh_camera_hub()
+
+    def _on_remove_camera_requested(self, camera_id):
+        self._cameras.pop(camera_id, None)
+        if self._master_camera_id == camera_id:
+            remaining = list(self._cameras.keys())
+            self._master_camera_id = remaining[0] if remaining else None
+        self._refresh_camera_hub()
+
+    def _on_start_multi_camera_session_requested(self):
+        # engine.multi_camera_session.MultiCameraSessionController + the new
+        # multi-camera Live Session page exist but aren't wired up here yet -
+        # a later, separate step (see docs/superpowers's multi-camera design
+        # doc's suggested implementation order). Report that honestly
+        # instead of silently doing nothing when the button is clicked.
+        self.camera_hub_page.status_label.setText(
+            "Multi-camera Live Session isn't wired up yet - coming in a later step."
+        )
 
     def _current_device_name(self):
         # Cached from DeviceSelectPage.device_chosen's payload (see
