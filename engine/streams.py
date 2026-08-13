@@ -539,6 +539,41 @@ def set_emitter_enabled(sensor, enabled):
     return False
 
 
+# D400-series' own values for rs.option.inter_cam_sync_mode. D500-series
+# devices (e.g. this project's "RealSense D585 Prototype") use the SAME
+# option but a DIFFERENT value scheme entirely - rs.d500_intercam_sync_mode's
+# own enum (none=0/rgb_master=1/pwm_master=2/external_master=3), confirmed
+# via direct pyrealsense2 2.58.3 introspection, NOT the plain master/slave
+# scheme below. Picking the right raw value per camera model/generation is
+# the responsibility of whoever assigns master/slave roles (not this
+# function - see set_inter_cam_sync_mode's own docstring), and needs real
+# multi-camera hardware confirmation before it's load-bearing either way -
+# see the multi-camera design doc's "Known risks" section.
+INTER_CAM_SYNC_DEFAULT = 0
+INTER_CAM_SYNC_MASTER = 1
+INTER_CAM_SYNC_SLAVE = 2
+
+
+def set_inter_cam_sync_mode(device, mode):
+    """Applies rs.option.inter_cam_sync_mode to whichever sensor on `device`
+    actually supports it - NOT assumed to be a fixed sensor/index, since a
+    camera can have multiple sensors and (per public RealSense documentation,
+    not yet confirmed on this project's own hardware) genlock is reportedly
+    carried by the depth/stereo sensor, not the color sensor. `mode` is
+    written as given - this function does NOT translate between D400-series'
+    plain master/slave scheme and D500-series' differently-numbered
+    rs.d500_intercam_sync_mode scheme (see the constants above); the caller
+    must pass whichever raw value is correct for that specific device's
+    generation. Returns True/False so callers can warn the operator instead
+    of silently proceeding unsynced - same convention as
+    set_emitter_enabled/enable_auto_exposure."""
+    for sensor in device.query_sensors():
+        if sensor.supports(rs.option.inter_cam_sync_mode):
+            sensor.set_option(rs.option.inter_cam_sync_mode, mode)
+            return True
+    return False
+
+
 def set_manual_exposure(sensor, exposure):
     """Manual mode touches EXPOSURE ONLY - gain is deliberately never read
     or written here. See enable_auto_exposure's docstring for why: an

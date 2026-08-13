@@ -9,6 +9,7 @@ from engine.streams import (
     list_video_stream_options_from_device, resolve_and_group, group_for_pick, exposure_for_group,
     set_emitter_enabled, set_manual_exposure, stream_slug,
     parse_camera_tests_config, resolve_camera_tests,
+    set_inter_cam_sync_mode, INTER_CAM_SYNC_MASTER, INTER_CAM_SYNC_SLAVE,
 )
 
 
@@ -591,6 +592,61 @@ def test_set_emitter_enabled_false_when_supported():
 def test_set_emitter_enabled_returns_false_when_unsupported():
     sensor = FakeOptionSensor(supported_options=set())
     assert set_emitter_enabled(sensor, False) is False
+
+
+class _FakeSensorDevice:
+    """Fake device exposing just query_sensors() - enough for
+    set_inter_cam_sync_mode, which iterates a device's sensors looking for
+    whichever one supports the genlock option (mirrors resolve_and_group's
+    own list(device.query_sensors()) usage)."""
+
+    def __init__(self, sensors):
+        self._sensors = sensors
+
+    def query_sensors(self):
+        return self._sensors
+
+
+def test_set_inter_cam_sync_mode_writes_option_on_the_supporting_sensor():
+    # Multi-camera genlock (D400-series): a camera can have multiple
+    # sensors, but only the one that actually supports inter_cam_sync_mode
+    # (believed to be the depth/stereo sensor, not color) should be written.
+    non_supporting = FakeOptionSensor(supported_options=set())
+    supporting = FakeOptionSensor(supported_options={rs.option.inter_cam_sync_mode})
+    device = _FakeSensorDevice([non_supporting, supporting])
+
+    assert set_inter_cam_sync_mode(device, INTER_CAM_SYNC_MASTER) is True
+
+    assert supporting.set_options[rs.option.inter_cam_sync_mode] == INTER_CAM_SYNC_MASTER
+    assert non_supporting.set_options == {}
+
+
+def test_set_inter_cam_sync_mode_writes_whatever_raw_value_the_caller_passes():
+    # There is only ONE rs.option (inter_cam_sync_mode) - confirmed via SDK
+    # introspection, not a second differently-named option for D500-series.
+    # What DOES differ per camera generation is which raw integer VALUE
+    # means what: D400-series uses 0=default/1=master/2=slave: D500-series
+    # (e.g. "RealSense D585 Prototype") uses rs.d500_intercam_sync_mode's own
+    # scheme (0=none/1=rgb_master/2=pwm_master/3=external_master) on this
+    # SAME option. Picking the right raw value per camera model is the
+    # CALLER's responsibility (needs real-hardware confirmation before it's
+    # load-bearing - see the multi-camera design doc's Known Risks) - this
+    # function just writes whatever value it's given, generically.
+    supporting = FakeOptionSensor(supported_options={rs.option.inter_cam_sync_mode})
+    device = _FakeSensorDevice([supporting])
+
+    assert set_inter_cam_sync_mode(device, int(rs.d500_intercam_sync_mode.external_master)) is True
+
+    assert supporting.set_options[rs.option.inter_cam_sync_mode] == int(rs.d500_intercam_sync_mode.external_master)
+
+
+def test_set_inter_cam_sync_mode_returns_false_when_no_sensor_supports_it():
+    # Callers rely on this to warn the operator that a device can't be
+    # genlocked, instead of silently proceeding unsynced - same convention
+    # as set_emitter_enabled/enable_auto_exposure.
+    device = _FakeSensorDevice([FakeOptionSensor(supported_options=set())])
+
+    assert set_inter_cam_sync_mode(device, INTER_CAM_SYNC_SLAVE) is False
 
 
 def test_set_manual_exposure_sets_exposure_and_disables_auto():
