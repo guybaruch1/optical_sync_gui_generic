@@ -559,14 +559,26 @@ def test_edit_camera_requested_switches_to_device_select_reusing_the_camera_id(q
     assert window._editing_camera_id == camera_id
 
 
-def test_start_multi_camera_session_requested_reports_not_yet_wired(qapp):
-    # Not built yet - the new multi-camera Live Session page + controller
-    # wiring is a separate, later step (see design doc's suggested
-    # implementation order). Documents the current, honest limitation
-    # rather than silently doing nothing.
+def test_start_multi_camera_session_requested_does_nothing_with_no_cameras(qapp):
+    # Not reachable via the real hub (Start is disabled with 0 cameras -
+    # see CameraHubPage._can_start), but guard defensively rather than crash
+    # if something else ever calls this directly.
     settings = _minimal_settings({})
     window = _make_window(qapp, settings)
 
+    window._on_start_multi_camera_session_requested()  # must not raise
+
+    assert window.stack.currentWidget() is window.camera_hub_page
+
+
+def test_start_multi_camera_session_requested_switches_to_the_new_page_with_cameras(qapp, monkeypatch, tmp_path):
+    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+    camera_id = window._editing_camera_id
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window._on_tuning_done()
+
     window._on_start_multi_camera_session_requested()
 
-    assert "later step" in window.camera_hub_page.status_label.text().lower()
+    assert window.stack.currentWidget() is window.multi_camera_live_session_page
+    assert camera_id in window.multi_camera_live_session_page._panels

@@ -19,10 +19,12 @@ known, deliberately-deferred limitation - see the design doc's "Explicitly
 deferred to v2" list); self._cameras is this run's actual source of truth
 for every configured camera's full config.
 
-LiveSessionPage/the eventual multi-camera Live Session page + controller
-wiring are NOT reached from here yet - CameraHubPage's "Start Multi-Camera
-Live Session" is a later, separate step (_on_start_multi_camera_session_
-requested just reports that honestly rather than silently no-op'ing).
+CameraHubPage's "Start Multi-Camera Live Session" now switches to
+gui/pages/multi_camera_live_session_page.py's MultiCameraLiveSessionPage,
+handing it self._cameras/self._master_camera_id verbatim - the original
+single-camera LiveSessionPage is untouched and no longer constructed here
+at all (its logic lives on in gui/widgets/camera_live_session_panel.py's
+CameraLiveSessionPanel, one per configured camera on the new page).
 """
 
 import numpy as np
@@ -34,6 +36,7 @@ from gui.pages.roi_select_page import RoiSelectPage, stream_label
 from gui.pages.calibration_page import CalibrationPage
 from gui.pages.threshold_tuning_page import ThresholdTuningPage
 from gui.pages.camera_hub_page import CameraHubPage, CameraSummary
+from gui.pages.multi_camera_live_session_page import MultiCameraLiveSessionPage
 from state.gui_state import GuiState, save_gui_state
 from engine.streams import (
     list_video_stream_options, stream_slug,
@@ -60,6 +63,7 @@ class MainWindow(QMainWindow):
         self.calibration_page = CalibrationPage()
         self.threshold_tuning_page = ThresholdTuningPage()
         self.camera_hub_page = CameraHubPage()
+        self.multi_camera_live_session_page = MultiCameraLiveSessionPage()
         self._device_name = None
         # Stashed in _on_calibration_done, consumed in _on_tuning_done -
         # everything the eventual multi-camera Live Session controller will
@@ -107,7 +111,8 @@ class MainWindow(QMainWindow):
         self._next_camera_slot = 1
 
         for page in (self.device_page, self.stream_config_page, self.roi_page,
-                     self.calibration_page, self.threshold_tuning_page, self.camera_hub_page):
+                     self.calibration_page, self.threshold_tuning_page, self.camera_hub_page,
+                     self.multi_camera_live_session_page):
             self.stack.addWidget(page)
 
         self.device_page.device_chosen.connect(self._on_device_chosen)
@@ -472,14 +477,18 @@ class MainWindow(QMainWindow):
         self._refresh_camera_hub()
 
     def _on_start_multi_camera_session_requested(self):
-        # engine.multi_camera_session.MultiCameraSessionController + the new
-        # multi-camera Live Session page exist but aren't wired up here yet -
-        # a later, separate step (see docs/superpowers's multi-camera design
-        # doc's suggested implementation order). Report that honestly
-        # instead of silently doing nothing when the button is clicked.
-        self.camera_hub_page.status_label.setText(
-            "Multi-camera Live Session isn't wired up yet - coming in a later step."
-        )
+        # Not reachable via the real hub with zero cameras (Start is
+        # disabled - see CameraHubPage._can_start), but guard defensively
+        # rather than switch to an empty page if something else calls this.
+        if not self._cameras:
+            return
+        cameras = [
+            {"camera_id": camera_id, "label": camera["label"],
+             "is_master": (camera_id == self._master_camera_id), "config": camera["config"]}
+            for camera_id, camera in self._cameras.items()
+        ]
+        self.multi_camera_live_session_page.set_cameras(self.ctx, cameras)
+        self.stack.setCurrentWidget(self.multi_camera_live_session_page)
 
     def _current_device_name(self):
         # Cached from DeviceSelectPage.device_chosen's payload (see
