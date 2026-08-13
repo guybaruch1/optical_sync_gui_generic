@@ -7,6 +7,7 @@ matplotlib.use("Agg")
 from domain.plot_export import (
     export_session_plot, _build_figure, _to_plot_value,
     _figure_width, _MIN_FIGURE_WIDTH, _MAX_FIGURE_WIDTH,
+    export_cross_camera_plot,
 )
 
 
@@ -72,6 +73,65 @@ def test_figure_width_grows_with_row_count():
 
 def test_figure_width_caps_for_very_long_runs():
     assert _figure_width(1_000_000) == _MAX_FIGURE_WIDTH
+
+
+# --- export_cross_camera_plot: one line per (slave_camera_id,
+# stream_identity) pair, same NaN-for-excluded convention as the intra-camera
+# plot, sourced from the exact rows engine.cross_camera_reconciler produces. ---
+
+def _cross_row(pair_index, slave_camera_id="cam2", stream_identity="infrared1",
+                pairing_gap_us=-10.0, excluded=False):
+    return {
+        "pair_index": pair_index, "master_camera_id": "cam1", "slave_camera_id": slave_camera_id,
+        "stream_identity": stream_identity,
+        "pairing_gap_us": pairing_gap_us, "pairing_gap_us_excluded": excluded,
+    }
+
+
+def test_export_cross_camera_plot_writes_a_file(tmp_path):
+    rows = [_cross_row(0), _cross_row(1, pairing_gap_us=-12.0)]
+    path = str(tmp_path / "cross_camera_sync_plot.png")
+
+    export_cross_camera_plot(rows, path)
+
+    assert os.path.exists(path)
+    assert os.path.getsize(path) > 0
+
+
+def test_export_cross_camera_plot_handles_empty_rows(tmp_path):
+    path = str(tmp_path / "cross_camera_sync_plot.png")
+
+    export_cross_camera_plot([], path)
+
+    assert os.path.exists(path)
+
+
+def test_export_cross_camera_plot_draws_one_line_per_pair():
+    rows = [
+        _cross_row(0, slave_camera_id="cam2", stream_identity="infrared1", pairing_gap_us=-10.0),
+        _cross_row(1, slave_camera_id="cam2", stream_identity="infrared1", pairing_gap_us=-11.0),
+        _cross_row(0, slave_camera_id="cam3", stream_identity="color", pairing_gap_us=5.0),
+    ]
+
+    import matplotlib.pyplot as plt
+    from domain.plot_export import _build_cross_camera_figure
+    fig = _build_cross_camera_figure(rows)
+    lines = fig.axes[0].get_lines()
+
+    assert len(lines) == 2
+    plt.close(fig)
+
+
+def test_export_cross_camera_plot_nans_out_excluded_values():
+    rows = [_cross_row(0, pairing_gap_us=99999.0, excluded=True)]
+
+    import matplotlib.pyplot as plt
+    from domain.plot_export import _build_cross_camera_figure
+    fig = _build_cross_camera_figure(rows)
+    line = fig.axes[0].get_lines()[0]
+
+    assert math.isnan(line.get_ydata()[0])
+    plt.close(fig)
 
 
 def test_frame_drop_axis_splits_by_stream_as_mirrored_spikes():

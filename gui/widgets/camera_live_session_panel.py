@@ -20,13 +20,13 @@ own logic - see that file's module docstring for the full rationale behind
 each piece (row_ready-vs-stats_ready cadence split, NaN-for-excluded
 convention, combined side-by-side periodic snapshots, etc.), unchanged here.
 
-Known v1 simplification (see docs/superpowers's multi-camera design doc's
-suggested implementation order - this is step 5's scope, step 6's job to
-improve): each panel still mints its OWN independent output/
-live_session_<timestamp>/ folder via prepare_for_run(), exactly like
-LiveSessionPage's single-camera _begin_new_run_output() always has - NOT
-yet the nicer shared-parent-folder-with-per-camera-subfolders layout the
-design doc describes for the finished feature."""
+prepare_for_run() takes an already-decided output_dir rather than minting
+its own (unlike LiveSessionPage's single-camera _begin_new_run_output(),
+which built a fresh output/live_session_<timestamp>/ folder itself) - the
+multi-camera page mints ONE shared run folder plus one
+domain.run_output.create_camera_subdir() per camera, so every configured
+camera's files land together under one run instead of scattered across
+independent top-level folders."""
 
 import os
 
@@ -44,7 +44,6 @@ from domain.csv_export import export_session_csvs, export_series_csv
 from domain.plot_export import export_session_plot
 from domain.realsense_utils import draw_led_state_overlay, crop_to_roi, combine_side_by_side
 from domain.running_stats import RunningStats
-from domain.run_output import create_run_dir
 
 
 def _build_copy_icon(color="#555555", size=18):
@@ -278,24 +277,30 @@ class CameraLiveSessionPanel(QWidget):
         self.drop_plot.set_series_visible("stream_a_frame_drops", checked)
         self.drop_plot.set_series_visible("stream_b_frame_drops", checked)
 
-    def prepare_for_run(self, output_root, kept_csv_filename, dropped_csv_filename,
+    def prepare_for_run(self, output_dir, kept_csv_filename, dropped_csv_filename,
                          stream_a_xy, stream_b_xy, stream_a_roi, stream_b_roi,
-                         snapshot_every_n_pairs, max_snapshots, switch_time_ms, run_output_suffix=None):
-        """Mints THIS camera's own fresh output/live_session_<timestamp>/
-        folder (see module docstring's "known v1 simplification"), resets
-        every plot/counter/running-stat exactly like LiveSessionPage's own
-        start_session() reset block used to (minus anything
+                         snapshot_every_n_pairs, max_snapshots, switch_time_ms):
+        """Takes an ALREADY-DECIDED output_dir - the caller (the
+        multi-camera orchestrating page) mints one shared run folder plus
+        one subfolder per camera (domain.run_output's create_run_dir/
+        create_camera_subdir) and hands this camera its own subfolder, so
+        every configured camera's files land together under one run
+        instead of each camera minting its own independent top-level
+        output/live_session_<timestamp>/ folder (this widget's own earlier,
+        simpler behavior - see git history if that's ever needed again).
+        Resets every plot/counter/running-stat exactly like LiveSessionPage's
+        own start_session() reset block used to (minus anything
         SessionEngineThread-related, now built by the caller instead), and
-        shows the run's switch time. Returns the output_dir, so the caller
-        can pass it straight into that camera's own SessionEngineThread
-        construction."""
+        shows the run's switch time. Returns output_dir unchanged, so the
+        caller can pass the exact same value into that camera's own
+        SessionEngineThread construction (output_dir=...)."""
         self._context = dict(
             stream_a_xy=stream_a_xy, stream_b_xy=stream_b_xy,
             stream_a_roi=stream_a_roi, stream_b_roi=stream_b_roi,
             snapshot_every_n_pairs=snapshot_every_n_pairs, max_snapshots=max_snapshots,
             kept_csv_filename=kept_csv_filename, dropped_csv_filename=dropped_csv_filename,
         )
-        output_dir = create_run_dir(output_root, "live_session", suffix=run_output_suffix)
+        os.makedirs(output_dir, exist_ok=True)  # defensive - the caller normally already created this
         self._context["output_dir"] = output_dir
         self._context["kept_csv_path"] = os.path.join(output_dir, kept_csv_filename)
         self._context["dropped_csv_path"] = os.path.join(output_dir, dropped_csv_filename)

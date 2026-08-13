@@ -44,6 +44,7 @@ import matplotlib.pyplot as plt
 from domain.plot_theme import (
     SURFACE, GRIDLINE, MUTED_TEXT,
     PAIRING_GAP_COLOR, POSITION_GAP_COLOR, STREAM_A_DROP_COLOR, STREAM_B_DROP_COLOR,
+    CROSS_CAMERA_COLORS,
 )
 
 # Width grows with run length so a long session's line has room to breathe
@@ -69,7 +70,13 @@ def _style_axis(ax):
     ax.yaxis.label.set_color(MUTED_TEXT)
     for spine in ax.spines.values():
         spine.set_color(GRIDLINE)
-    ax.legend(facecolor=SURFACE, edgecolor=GRIDLINE, labelcolor=MUTED_TEXT)
+    # Guarded: an axis with zero labeled lines (e.g. export_cross_camera_
+    # plot's empty-rows case, where no groups exist to plot() at all) would
+    # otherwise raise a "No artists with labels found" UserWarning on every
+    # such call - every existing caller always has labeled lines, so this
+    # is a no-op for them.
+    if ax.get_legend_handles_labels()[0]:
+        ax.legend(facecolor=SURFACE, edgecolor=GRIDLINE, labelcolor=MUTED_TEXT)
 
 
 def _build_figure(rows):
@@ -125,3 +132,41 @@ def export_session_plot(rows, path):
 
 def _to_plot_value(value, excluded):
     return value if (value is not None and not excluded) else float("nan")
+
+
+def _build_cross_camera_figure(cross_rows):
+    """Same NaN-for-excluded convention as _build_figure above, but one line
+    per (slave_camera_id, stream_identity) pair rather than a fixed 3-axis
+    layout - engine.cross_camera_reconciler's own pair_index is a synthetic,
+    shared-across-all-pairs counter (not comparable to any one camera's own
+    pair_index), so it's used here only as this plot's own x-axis, not
+    cross-referenced against per-camera CSVs. Split out from
+    export_cross_camera_plot so tests can inspect the plotted line data
+    directly, same reason _build_figure is split from export_session_plot."""
+    groups = {}
+    for row in cross_rows:
+        key = (row["slave_camera_id"], row["stream_identity"])
+        groups.setdefault(key, []).append(row)
+
+    fig, ax = plt.subplots(figsize=(_figure_width(len(cross_rows)), 6))
+    fig.patch.set_facecolor(SURFACE)
+
+    for index, key in enumerate(sorted(groups.keys())):
+        pair_rows = groups[key]
+        pair_indices = [row["pair_index"] for row in pair_rows]
+        values = [_to_plot_value(row.get("pairing_gap_us"), row.get("pairing_gap_us_excluded"))
+                  for row in pair_rows]
+        color = CROSS_CAMERA_COLORS[index % len(CROSS_CAMERA_COLORS)]
+        ax.plot(pair_indices, values, label="{} {}".format(*key), color=color)
+
+    ax.set_xlabel("Pair index")
+    ax.set_ylabel("Cross-camera HW TS latency (us)")
+    _style_axis(ax)
+    fig.tight_layout()
+    return fig
+
+
+def export_cross_camera_plot(cross_rows, path):
+    fig = _build_cross_camera_figure(cross_rows)
+    fig.savefig(path, facecolor=SURFACE)
+    plt.close(fig)

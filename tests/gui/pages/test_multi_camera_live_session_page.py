@@ -123,6 +123,63 @@ def test_start_all_sessions_locks_toolbar_and_starts_every_thread(qapp, tmp_path
     assert fake_threads["SN2"].started
 
 
+# --- Output layout: ONE shared run folder, one subfolder per camera, plus
+# a combined cross_camera_sync.csv/plot written once the whole run finishes -
+# see domain/run_output.py's create_camera_subdir and domain/csv_export.py's
+# /domain/plot_export.py's export_cross_camera_* functions. ---
+
+def test_start_all_sessions_creates_one_shared_run_dir_with_per_camera_subfolders(qapp, tmp_path):
+    import os
+    page, fake_threads = _page_with_fake_threads()
+    page.set_cameras(object(), _two_cameras(tmp_path))
+
+    page.start_all_sessions()
+
+    cam1_dir = page._panels["cam1"]._context["output_dir"]
+    cam2_dir = page._panels["cam2"]._context["output_dir"]
+    assert os.path.dirname(cam1_dir) == os.path.dirname(cam2_dir) == page._run_dir
+    assert "cam1" in os.path.basename(cam1_dir)
+    assert "cam2" in os.path.basename(cam2_dir)
+
+
+def test_all_sessions_finished_writes_cross_camera_csv_and_plot(qapp, tmp_path):
+    import os
+    page, fake_threads = _page_with_fake_threads()
+    page.set_cameras(object(), _two_cameras(tmp_path))
+    page.start_all_sessions()
+
+    fake_threads["SN1"].row_ready.emit({
+        "pair_index": 1, "stream_a_ts_us": 1_000_000.0, "stream_b_ts_us": 1_000_000.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+    })
+    fake_threads["SN2"].row_ready.emit({
+        "pair_index": 1, "stream_a_ts_us": 1_000_010.0, "stream_b_ts_us": 1_000_010.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+    })
+    fake_threads["SN1"].session_finished.emit([])
+    fake_threads["SN1"].finished.emit()
+    fake_threads["SN2"].session_finished.emit([])
+    fake_threads["SN2"].finished.emit()
+
+    csv_path = os.path.join(page._run_dir, "cross_camera_sync.csv")
+    plot_path = os.path.join(page._run_dir, "cross_camera_sync_plot.png")
+    assert os.path.exists(csv_path)
+    assert os.path.exists(plot_path)
+    assert os.path.getsize(csv_path) > 0
+
+
+def test_all_sessions_finished_skips_cross_camera_export_with_one_camera(qapp, tmp_path):
+    import os
+    page, fake_threads = _page_with_fake_threads()
+    page.set_cameras(object(), _two_cameras(tmp_path)[:1])
+
+    page.start_all_sessions()
+    fake_threads["SN1"].session_finished.emit([])
+    fake_threads["SN1"].finished.emit()
+
+    assert not os.path.exists(os.path.join(page._run_dir, "cross_camera_sync.csv"))
+
+
 def test_camera_frame_ready_routes_to_the_right_panel(qapp, tmp_path):
     page, fake_threads = _page_with_fake_threads()
     page.set_cameras(object(), _two_cameras(tmp_path))

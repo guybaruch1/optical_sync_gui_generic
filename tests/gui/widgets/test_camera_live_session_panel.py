@@ -29,7 +29,7 @@ def test_set_camera_labels_sets_panel_titles(qapp):
 def _prepared_panel(qapp, tmp_path, **overrides):
     panel = CameraLiveSessionPanel("cam1")
     kwargs = dict(
-        output_root=str(tmp_path), kept_csv_filename="kept.csv", dropped_csv_filename="dropped.csv",
+        output_dir=str(tmp_path), kept_csv_filename="kept.csv", dropped_csv_filename="dropped.csv",
         stream_a_xy=np.array([(1, 1), (2, 2)]), stream_b_xy=np.array([(1, 1), (2, 2)]),
         stream_a_roi=(0, 0, 4, 4), stream_b_roi=(0, 0, 4, 4),
         snapshot_every_n_pairs=20, max_snapshots=2, switch_time_ms=1.0,
@@ -43,23 +43,25 @@ def _prepared_panel(qapp, tmp_path, **overrides):
     return panel
 
 
-# --- prepare_for_run: mints a fresh run folder, resets plots/counters/stats,
-# shows the switch-time value - same reset behavior as LiveSessionPage's own
-# start_session(), minus anything hardware/thread-related (that moved to the
-# new orchestrating page). ---
+# --- prepare_for_run: takes an ALREADY-DECIDED output_dir (the caller - the
+# new orchestrating page - mints one shared run folder plus one subfolder
+# per camera; this panel no longer mints its own folder at all, unlike
+# LiveSessionPage's original start_session()), resets plots/counters/stats,
+# shows the switch-time value. ---
 
-def test_prepare_for_run_creates_a_fresh_folder_and_sets_csv_paths(qapp, tmp_path):
+def test_prepare_for_run_sets_csv_paths_under_the_given_output_dir(qapp, tmp_path):
     panel = CameraLiveSessionPanel("cam1")
+    output_dir = str(tmp_path / "camera_cam1_D455")
 
-    output_dir = panel.prepare_for_run(
-        output_root=str(tmp_path), kept_csv_filename="kept.csv", dropped_csv_filename="dropped.csv",
+    returned_dir = panel.prepare_for_run(
+        output_dir=output_dir, kept_csv_filename="kept.csv", dropped_csv_filename="dropped.csv",
         stream_a_xy=np.array([(1, 1)]), stream_b_xy=np.array([(1, 1)]),
         stream_a_roi=(0, 0, 4, 4), stream_b_roi=(0, 0, 4, 4),
         snapshot_every_n_pairs=20, max_snapshots=2, switch_time_ms=3.0,
     )
 
-    assert os.path.isdir(output_dir)
-    assert os.path.dirname(output_dir) == str(tmp_path)
+    assert returned_dir == output_dir
+    assert os.path.isdir(output_dir)  # created defensively if it didn't already exist
     assert panel._context["kept_csv_path"] == os.path.join(output_dir, "kept.csv")
     assert panel._context["dropped_csv_path"] == os.path.join(output_dir, "dropped.csv")
     assert panel.stats_panel._value_labels["switch_time_ms"].text() == "3.0"
@@ -71,7 +73,7 @@ def test_prepare_for_run_resets_counters_and_plots(qapp, tmp_path):
     panel.pairing_plot.add_point("pairing_gap_us", 0, 1.0)
 
     panel.prepare_for_run(
-        output_root=str(tmp_path), kept_csv_filename="kept.csv", dropped_csv_filename="dropped.csv",
+        output_dir=str(tmp_path), kept_csv_filename="kept.csv", dropped_csv_filename="dropped.csv",
         stream_a_xy=np.array([(1, 1)]), stream_b_xy=np.array([(1, 1)]),
         stream_a_roi=(0, 0, 4, 4), stream_b_roi=(0, 0, 4, 4),
         snapshot_every_n_pairs=20, max_snapshots=2, switch_time_ms=1.0,
@@ -79,22 +81,6 @@ def test_prepare_for_run_resets_counters_and_plots(qapp, tmp_path):
 
     assert panel._stream_a_drop_count == 0
     assert panel.pairing_plot.get_series_data("pairing_gap_us") == ([], [])
-
-
-def test_two_prepare_for_run_calls_use_two_different_run_folders(qapp, tmp_path):
-    panel = CameraLiveSessionPanel("cam1")
-    kwargs = dict(
-        output_root=str(tmp_path), kept_csv_filename="kept.csv", dropped_csv_filename="dropped.csv",
-        stream_a_xy=np.array([(1, 1)]), stream_b_xy=np.array([(1, 1)]),
-        stream_a_roi=(0, 0, 4, 4), stream_b_roi=(0, 0, 4, 4),
-        snapshot_every_n_pairs=20, max_snapshots=2, switch_time_ms=1.0,
-    )
-    first = panel.prepare_for_run(**kwargs)
-    second = panel.prepare_for_run(**kwargs)
-
-    assert first != second
-    assert os.path.isdir(first)
-    assert os.path.isdir(second)
 
 
 # --- Ported directly from test_live_session_page.py: _maybe_save_periodic_

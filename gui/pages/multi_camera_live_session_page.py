@@ -28,12 +28,16 @@ to validate against, which isn't available yet - see the design doc's
 Known Risks. Only the software-side cross-camera reconciliation
 (HW-timestamp nearest-match, not genlock-dependent) runs for now.
 
-Known v1 simplification (also flagged in camera_live_session_panel.py):
-each camera mints its OWN independent output/live_session_<timestamp>/
-folder rather than one shared parent with per-camera subfolders + a
-cross_camera_sync.csv export - that's a later step's job (see the design
-doc's suggested implementation order, step 6), not built here. Cross-camera
-rows are shown live but not yet written to disk anywhere."""
+Output layout: ONE shared run folder (domain.run_output.create_run_dir,
+using the master camera's own output_root - every camera's settings.yaml-
+derived output_root should be identical in practice), one per-camera
+subfolder underneath it (domain.run_output.create_camera_subdir), and a
+combined cross_camera_sync.csv/cross_camera_sync_plot.png written once
+every camera's session has finished (_on_all_sessions_finished) - skipped
+entirely for a single-camera run, where there's no cross-camera concept at
+all."""
+
+import os
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSpinBox, QTabWidget,
@@ -47,11 +51,10 @@ from engine.cross_camera_reconciler import build_cross_camera_pair_specs
 from engine.metrics import PairingGapMetric, PositionGapMetric
 from engine.test_session import TestSession, TestSessionConfig
 from engine.streams import stream_slug
-
-# dataviz-palette-adjacent colors, distinct from CameraLiveSessionPanel's own
-# pairing/position/drop series colors so a cross-camera series is visually
-# distinguishable from any one camera's own intra-camera chart.
-_CROSS_SERIES_COLORS = ("#9b59d0", "#d0a02f", "#2fb0b6", "#d0522f")
+from domain.run_output import create_run_dir, create_camera_subdir
+from domain.csv_export import export_cross_camera_csv
+from domain.plot_export import export_cross_camera_plot
+from domain.plot_theme import CROSS_CAMERA_COLORS
 
 
 class _IdentitySpec:
@@ -88,6 +91,8 @@ class MultiCameraLiveSessionPage(QWidget):
         self._panels = {}
         self._cross_pair_series_keys = {}  # (slave_camera_id, stream_identity) -> series_key
         self._controller = None
+        self._run_dir = None
+        self._cross_rows = []
 
         layout = QVBoxLayout(self)
 
@@ -187,7 +192,7 @@ class MultiCameraLiveSessionPage(QWidget):
         for index, spec in enumerate(pair_specs):
             series_key = "{}::{}".format(spec.slave_camera_id, spec.stream_identity)
             display_name = "{} {}".format(labels_by_id[spec.slave_camera_id], spec.stream_identity)
-            color = _CROSS_SERIES_COLORS[index % len(_CROSS_SERIES_COLORS)]
+            color = CROSS_CAMERA_COLORS[index % len(CROSS_CAMERA_COLORS)]
             self.cross_plot.add_series(series_key, color=color, display_name=display_name)
             self.cross_stats_panel.add_field(series_key, display_name)
             self._cross_pair_series_keys[(spec.slave_camera_id, spec.stream_identity)] = series_key
@@ -202,6 +207,18 @@ class MultiCameraLiveSessionPage(QWidget):
             return
         duration_s = self.duration_spinbox.value() or None
         display_stride = self.frame_sample_interval_spinbox.value()
+
+        # ONE shared run folder for the whole multi-camera run, one
+        # subfolder per camera underneath it - every configured camera's
+        # own files land together under one run instead of scattered
+        # across independent top-level output/live_session_<timestamp>/
+        # folders. output_root is read from the master's own config -
+        # every camera's own settings.yaml-derived output_root should be
+        # identical in practice (one app, one settings.yaml), same
+        # assumption pairing_gap_outlier_threshold_us below already makes.
+        master_config = next(c["config"] for c in self._cameras if c["is_master"])
+        self._run_dir = create_run_dir(master_config["output_root"], "live_session")
+        self._cross_rows = []
 
         camera_specs = []
         for camera in self._cameras:
@@ -225,8 +242,9 @@ class MultiCameraLiveSessionPage(QWidget):
             ))
             test_session.start()
 
+            camera_output_dir = create_camera_subdir(self._run_dir, camera_id, camera["label"])
             output_dir = panel.prepare_for_run(
-                output_root=config["output_root"], kept_csv_filename=config["kept_csv_filename"],
+                output_dir=camera_output_dir, kept_csv_filename=config["kept_csv_filename"],
                 dropped_csv_filename=config["dropped_csv_filename"],
                 stream_a_xy=config["stream_a_xy"], stream_b_xy=config["stream_b_xy"],
                 stream_a_roi=config["stream_a_roi"], stream_b_roi=config["stream_b_roi"],
@@ -257,7 +275,6 @@ class MultiCameraLiveSessionPage(QWidget):
                 thread_kwargs=thread_kwargs,
             ))
 
-        master_config = next(c["config"] for c in self._cameras if c["is_master"])
         controller_kwargs = dict(
             pairing_gap_outlier_threshold_us=master_config["pairing_gap_outlier_threshold_us"],
         )
@@ -316,6 +333,7 @@ class MultiCameraLiveSessionPage(QWidget):
             panel.on_error(message)
 
     def _on_cross_pair_ready(self, cross_row):
+        self._cross_rows.append(cross_row)
         series_key = self._cross_pair_series_keys.get(
             (cross_row["slave_camera_id"], cross_row["stream_identity"])
         )
@@ -337,3 +355,11 @@ class MultiCameraLiveSessionPage(QWidget):
         self.stop_button.setEnabled(False)
         self.duration_spinbox.setEnabled(True)
         self.frame_sample_interval_spinbox.setEnabled(True)
+
+        # Only when a cross-camera comparison actually exists (>=2 cameras,
+        # >=1 shared stream identity) - with a single camera there's no
+        # cross-camera concept at all, and writing an empty-but-valid
+        # cross_camera_sync.csv would just be confusing clutter.
+        if self._cross_pair_series_keys:
+            export_cross_camera_csv(self._cross_rows, os.path.join(self._run_dir, "cross_camera_sync.csv"))
+            export_cross_camera_plot(self._cross_rows, os.path.join(self._run_dir, "cross_camera_sync_plot.png"))

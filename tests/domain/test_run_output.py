@@ -1,7 +1,7 @@
 import datetime
 import os
 
-from domain.run_output import create_run_dir, build_live_session_config_suffix
+from domain.run_output import create_run_dir, build_live_session_config_suffix, create_camera_subdir
 
 
 def test_create_run_dir_uses_kind_and_timestamp(tmp_path):
@@ -92,6 +92,46 @@ def test_build_live_session_config_suffix_manual_exposure_with_different_per_str
         display_stride=10, switch_time_ms=1.0,
     )
     assert suffix == "1280x720_30fps_200s_manualA100B8500_interval10_switch1ms"
+
+
+# --- create_camera_subdir: one per configured camera under a shared
+# multi-camera run's own parent folder (create_run_dir), so every camera's
+# CSVs/plots/snapshots stay together with the run they belong to instead of
+# scattered across independent top-level output/live_session_<timestamp>/
+# folders. ---
+
+def test_create_camera_subdir_creates_a_folder_under_the_run_dir(tmp_path):
+    run_dir = str(tmp_path / "live_session_2026-08-13_10-00-00")
+    os.makedirs(run_dir)
+
+    subdir = create_camera_subdir(run_dir, "camera_1", label="Intel RealSense D455")
+
+    assert os.path.isdir(subdir)
+    assert os.path.dirname(subdir) == run_dir
+    assert os.path.basename(subdir) == "camera_camera_1_Intel_RealSense_D455"
+
+
+def test_create_camera_subdir_without_a_label(tmp_path):
+    run_dir = str(tmp_path / "live_session_2026-08-13_10-00-00")
+    os.makedirs(run_dir)
+
+    subdir = create_camera_subdir(run_dir, "camera_2")
+
+    assert os.path.basename(subdir) == "camera_camera_2"
+
+
+def test_create_camera_subdir_is_idempotent_for_the_same_camera(tmp_path):
+    # Unlike create_run_dir's collision-numbering (meant for genuinely
+    # separate runs), re-calling for the SAME camera_id within one already-
+    # unique run_dir must return the same folder, not a numbered duplicate.
+    run_dir = str(tmp_path / "live_session_2026-08-13_10-00-00")
+    os.makedirs(run_dir)
+
+    first = create_camera_subdir(run_dir, "camera_1", label="D455")
+    second = create_camera_subdir(run_dir, "camera_1", label="D455")
+
+    assert first == second
+    assert os.path.isdir(first)
 
 
 def test_build_live_session_config_suffix_auto_exposure_and_unlimited_duration():
