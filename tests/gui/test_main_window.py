@@ -21,6 +21,13 @@ IR1 = {"sensor_index": 0, "stream_type": rs.stream.infrared, "stream_index": 1,
        "format": rs.format.y8, "width": 1280, "height": 720, "fps": 30}
 COLOR0 = {"sensor_index": 1, "stream_type": rs.stream.color, "stream_index": 0,
           "format": rs.format.bgr8, "width": 1280, "height": 720, "fps": 30}
+# Within the confirmed-safe resolution ceiling for a genlock SLAVE's own
+# color stream (see settings.yaml's camera.inter_cam_sync.max_slave_color_
+# resolution) - COLOR0's own 1280x720 exceeds it, which is deliberate for
+# tests that need to trigger gui.main_window._slave_genlock_color_
+# resolution_conflicts.
+COLOR0_SAFE = {"sensor_index": 1, "stream_type": rs.stream.color, "stream_index": 0,
+               "format": rs.format.bgr8, "width": 640, "height": 480, "fps": 30}
 
 
 def _ir_vs_rgb_test(name="IR vs RGB sync", width=1280, height=720, fps=30):
@@ -635,7 +642,9 @@ def test_start_multi_camera_session_requested_switches_to_the_new_page_with_came
 
 def test_start_multi_camera_session_requested_embeds_inter_cam_sync_value_for_master_and_slave(qapp, monkeypatch, tmp_path):
     settings = _full_settings({"Intel RealSense D455": [_ir_vs_rgb_test()]})
-    settings["camera"]["inter_cam_sync"] = {"Intel RealSense D455": {"master": 1, "slave": 2}}
+    settings["camera"]["inter_cam_sync"] = {
+        "Intel RealSense D455": {"master": 1, "slave": 2, "max_slave_color_resolution": {"width": 640, "height": 480}},
+    }
     window = _make_window(qapp, settings)
     monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [IR1, COLOR0])
     monkeypatch.setattr(main_window_module, "save_gui_state", lambda state: None)
@@ -646,9 +655,9 @@ def test_start_multi_camera_session_requested_embeds_inter_cam_sync_value_for_ma
         lambda *a, **k: ({"0": [1.0, 1.0, 300.0, 100.0, 200.0]}, {"0": [2.0, 2.0, 600.0, 200.0, 400.0]}),
     )
 
-    def _configure_one_camera(serial):
+    def _configure_one_camera(serial, color_pick=COLOR0):
         window._on_device_chosen(serial, "Intel RealSense D455")
-        window._on_config_chosen((IR1, COLOR0, {
+        window._on_config_chosen((IR1, color_pick, {
             "emitter_enabled": False, "auto_exposure": True, "exposure_a": None, "exposure_b": None,
         }))
         window.gui_state.stream_a_roi = [0, 0, 50, 50]
@@ -665,9 +674,9 @@ def test_start_multi_camera_session_requested_embeds_inter_cam_sync_value_for_ma
             window._on_tuning_done()
         return camera_id
 
-    master_id = _configure_one_camera("SN123")
+    master_id = _configure_one_camera("SN123")  # master's own color stream is unrestricted - COLOR0 (1280x720) is fine
     window._on_add_camera_requested()
-    slave_id = _configure_one_camera("SN456")
+    slave_id = _configure_one_camera("SN456", color_pick=COLOR0_SAFE)  # slave must stay within the confirmed cap
     assert window._master_camera_id == master_id  # first camera stays master
 
     window._on_start_multi_camera_session_requested()
@@ -692,3 +701,146 @@ def test_start_multi_camera_session_requested_leaves_inter_cam_sync_value_none_f
     page = window.multi_camera_live_session_page
     only_config = page._cameras[0]["config"]
     assert only_config["inter_cam_sync_value"] is None
+
+
+# --- Slave color-resolution guard: a genlock SLAVE's own color stream
+# genuinely hardware-synchronizes fine up to a confirmed resolution ceiling
+# (real hardware finding - see settings.yaml's camera.inter_cam_sync.
+# max_slave_color_resolution comment) but full resolution blocks BOTH
+# streams entirely. gui.main_window._slave_genlock_color_resolution_
+# conflicts blocks Start with a clear error rather than silently letting
+# the operator reproduce that hang. Master is never restricted - real
+# hardware confirmed RGB always works fine as master regardless of
+# resolution. ---
+
+def _two_camera_window_with_slave_color(qapp, monkeypatch, tmp_path, inter_cam_sync_entry, slave_color_pick):
+    settings = _full_settings({"Intel RealSense D455": [_ir_vs_rgb_test()]})
+    settings["camera"]["inter_cam_sync"] = {"Intel RealSense D455": inter_cam_sync_entry}
+    window = _make_window(qapp, settings)
+    monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [IR1, COLOR0])
+    monkeypatch.setattr(main_window_module, "save_gui_state", lambda state: None)
+    monkeypatch.setattr(window.roi_page, "set_context", lambda *a, **k: None)
+    monkeypatch.setattr(main_window_module, "ensure_output_dir", lambda settings: str(tmp_path))
+    monkeypatch.setattr(
+        main_window_module, "load_led_positions",
+        lambda *a, **k: ({"0": [1.0, 1.0, 300.0, 100.0, 200.0]}, {"0": [2.0, 2.0, 600.0, 200.0, 400.0]}),
+    )
+
+    def _configure_one_camera(serial, color_pick):
+        window._on_device_chosen(serial, "Intel RealSense D455")
+        window._on_config_chosen((IR1, color_pick, {
+            "emitter_enabled": False, "auto_exposure": True, "exposure_a": None, "exposure_b": None,
+        }))
+        window.gui_state.stream_a_roi = [0, 0, 50, 50]
+        window.gui_state.stream_b_roi = [0, 0, 50, 50]
+        window.calibration_page.last_calibration_result = dict(
+            image_a_on=np.full((50, 50), 50, dtype=np.uint8), image_a_off=np.full((50, 50), 50, dtype=np.uint8),
+            image_b_on=np.full((50, 50), 50, dtype=np.uint8), image_b_off=np.full((50, 50), 50, dtype=np.uint8),
+            stream_a_otsu_threshold=127, stream_b_otsu_threshold=127,
+            min_blob_area=5, row_gap_px=15, neighborhood_size=5,
+        )
+        with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+            window._on_calibration_done()
+            window._on_tuning_done()
+
+    _configure_one_camera("SN123", COLOR0)  # master - unrestricted, full resolution
+    window._on_add_camera_requested()
+    _configure_one_camera("SN456", slave_color_pick)  # slave - the one under test
+    return window
+
+
+def test_start_multi_camera_session_requested_blocks_when_slave_color_exceeds_confirmed_resolution_cap(qapp, monkeypatch, tmp_path):
+    window = _two_camera_window_with_slave_color(
+        qapp, monkeypatch, tmp_path,
+        inter_cam_sync_entry={"master": 1, "slave": 2, "max_slave_color_resolution": {"width": 640, "height": 480}},
+        slave_color_pick=COLOR0,  # 1280x720 - exceeds the 640x480 cap
+    )
+    calls = _capture_critical(monkeypatch)
+
+    window._on_start_multi_camera_session_requested()
+
+    assert len(calls) == 1
+    assert window.stack.currentWidget() is window.camera_hub_page
+
+
+def test_start_multi_camera_session_requested_allows_slave_color_within_confirmed_resolution_cap(qapp, monkeypatch, tmp_path):
+    window = _two_camera_window_with_slave_color(
+        qapp, monkeypatch, tmp_path,
+        inter_cam_sync_entry={"master": 1, "slave": 2, "max_slave_color_resolution": {"width": 640, "height": 480}},
+        slave_color_pick=COLOR0_SAFE,  # 640x480 - within the cap
+    )
+    calls = _capture_critical(monkeypatch)
+
+    window._on_start_multi_camera_session_requested()
+
+    assert calls == []
+    assert window.stack.currentWidget() is window.multi_camera_live_session_page
+
+
+def test_start_multi_camera_session_requested_blocks_when_camera_model_has_no_confirmed_resolution_cap_at_all(qapp, monkeypatch, tmp_path):
+    # Genlock master/slave values ARE confirmed for this model, but the
+    # color-resolution ceiling itself isn't - unconfirmed means don't
+    # guess it's safe, even at a resolution that would pass if it WERE
+    # confirmed.
+    window = _two_camera_window_with_slave_color(
+        qapp, monkeypatch, tmp_path,
+        inter_cam_sync_entry={"master": 1, "slave": 2},  # no max_slave_color_resolution key
+        slave_color_pick=COLOR0_SAFE,
+    )
+    calls = _capture_critical(monkeypatch)
+
+    window._on_start_multi_camera_session_requested()
+
+    assert len(calls) == 1
+    assert window.stack.currentWidget() is window.camera_hub_page
+
+
+def test_start_multi_camera_session_requested_never_checks_a_camera_whose_genlock_is_skipped_entirely(qapp, monkeypatch, tmp_path):
+    # The slave's OWN device model has no camera.inter_cam_sync entry at
+    # all (resolve_inter_cam_sync_value already returns None for it), so
+    # genlock is never applied to it - no external trigger, no bandwidth
+    # constraint, regardless of its color resolution.
+    settings = _full_settings({
+        "Intel RealSense D455": [_ir_vs_rgb_test()],
+        "Unconfirmed Camera Model": [_ir_vs_rgb_test()],
+    })
+    settings["camera"]["inter_cam_sync"] = {
+        "Intel RealSense D455": {"master": 1, "slave": 2, "max_slave_color_resolution": {"width": 640, "height": 480}},
+        # "Unconfirmed Camera Model" deliberately has no entry at all.
+    }
+    window = _make_window(qapp, settings)
+    monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [IR1, COLOR0])
+    monkeypatch.setattr(main_window_module, "save_gui_state", lambda state: None)
+    monkeypatch.setattr(window.roi_page, "set_context", lambda *a, **k: None)
+    monkeypatch.setattr(main_window_module, "ensure_output_dir", lambda settings: str(tmp_path))
+    monkeypatch.setattr(
+        main_window_module, "load_led_positions",
+        lambda *a, **k: ({"0": [1.0, 1.0, 300.0, 100.0, 200.0]}, {"0": [2.0, 2.0, 600.0, 200.0, 400.0]}),
+    )
+
+    def _configure_one_camera(serial, device_name):
+        window._on_device_chosen(serial, device_name)
+        window._on_config_chosen((IR1, COLOR0, {  # full 1280x720 color - would conflict if genlock applied
+            "emitter_enabled": False, "auto_exposure": True, "exposure_a": None, "exposure_b": None,
+        }))
+        window.gui_state.stream_a_roi = [0, 0, 50, 50]
+        window.gui_state.stream_b_roi = [0, 0, 50, 50]
+        window.calibration_page.last_calibration_result = dict(
+            image_a_on=np.full((50, 50), 50, dtype=np.uint8), image_a_off=np.full((50, 50), 50, dtype=np.uint8),
+            image_b_on=np.full((50, 50), 50, dtype=np.uint8), image_b_off=np.full((50, 50), 50, dtype=np.uint8),
+            stream_a_otsu_threshold=127, stream_b_otsu_threshold=127,
+            min_blob_area=5, row_gap_px=15, neighborhood_size=5,
+        )
+        with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+            window._on_calibration_done()
+            window._on_tuning_done()
+
+    _configure_one_camera("SN123", "Intel RealSense D455")  # master
+    window._on_add_camera_requested()
+    _configure_one_camera("SN456", "Unconfirmed Camera Model")  # slave, genlock skipped entirely
+    calls = _capture_critical(monkeypatch)
+
+    window._on_start_multi_camera_session_requested()
+
+    assert calls == []
+    assert window.stack.currentWidget() is window.multi_camera_live_session_page

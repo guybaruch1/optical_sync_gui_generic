@@ -90,18 +90,27 @@ camera:
   # (tools/genlock_diag/diag_genlock_quality_test.py) - not copied from
   # public docs: matching frame counts and a tight, physically-plausible
   # ~10us-scale offset between master and slave over a 20s recording.
-  # Cross-camera comparison itself is infrared-only regardless (see
-  # engine/cross_camera_reconciler.py) - the slave's color sensor cannot
-  # stream at all while genlocked, confirmed the same way. A camera model
-  # with no entry here safely skips genlock entirely for a multi-camera
-  # run (engine.streams.resolve_inter_cam_sync_value returns None) rather
-  # than guessing a possibly-wrong value for an unconfirmed model/firmware -
-  # do not add an entry for a camera model whose scheme hasn't been
-  # confirmed on real hardware.
+  # A camera model with no entry here safely skips genlock entirely for a
+  # multi-camera run (engine.streams.resolve_inter_cam_sync_value returns
+  # None) rather than guessing a possibly-wrong value for an unconfirmed
+  # model/firmware - do not add an entry for a camera model whose scheme
+  # hasn't been confirmed on real hardware.
+  #
+  # max_slave_color_resolution: a genlock SLAVE's own color/RGB stream
+  # genuinely hardware-synchronizes fine (confirmed with the SAME rigorous
+  # quality test - frame-count parity + tight offset stability, not just
+  # "frames flow") but ONLY up to this resolution - full 1280x720@30 color
+  # blocks BOTH streams entirely, a real USB-bandwidth ceiling, not a
+  # hardware/firmware limitation (see tools/genlock_diag/diag_slave_color_
+  # bandwidth_sweep.py). gui/main_window.py's
+  # _slave_genlock_color_resolution_conflicts blocks Start with a clear
+  # error, rather than guessing, for any slave camera whose OWN color
+  # stream exceeds this - or whose camera model has no entry here at all.
   inter_cam_sync:
     "RealSense D455":
       master: 1
       slave: 2
+      max_slave_color_resolution: {width: 640, height: 480}
 
 calibration:
   # Frames to let each stream settle on before treating a frame as "good".

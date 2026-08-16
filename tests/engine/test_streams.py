@@ -11,7 +11,7 @@ from engine.streams import (
     set_emitter_enabled, set_manual_exposure, stream_slug,
     parse_camera_tests_config, resolve_camera_tests,
     set_inter_cam_sync_mode, INTER_CAM_SYNC_MASTER, INTER_CAM_SYNC_SLAVE,
-    resolve_inter_cam_sync_value,
+    resolve_inter_cam_sync_value, resolve_max_slave_color_resolution,
 )
 
 
@@ -680,6 +680,39 @@ def test_resolve_inter_cam_sync_value_returns_none_for_an_unconfigured_camera_mo
 
 def test_resolve_inter_cam_sync_value_returns_none_when_section_is_empty():
     assert resolve_inter_cam_sync_value({}, "RealSense D455", is_master=True) is None
+
+
+# --- resolve_max_slave_color_resolution: the confirmed-safe color-stream
+# resolution ceiling for a camera acting as a genlock SLAVE is a per-
+# CAMERA-MODEL property too (real hardware finding: full 1280x720@30 color
+# blocks BOTH streams entirely once genlocked - a USB bandwidth ceiling,
+# not a hardware/firmware block - see tools/genlock_diag/diag_genlock_
+# quality_test.py), so it's looked up from the same settings.yaml
+# camera.inter_cam_sync entry rather than assumed. An unconfirmed camera
+# model (or a confirmed one with no resolution ceiling recorded yet)
+# returns None - the caller must treat that as "block, don't guess a safe
+# resolution.\""" ---
+
+def test_resolve_max_slave_color_resolution_returns_the_confirmed_tuple():
+    settings = {"RealSense D455": {"master": 1, "slave": 2, "max_slave_color_resolution": {"width": 640, "height": 480}}}
+    assert resolve_max_slave_color_resolution(settings, "RealSense D455") == (640, 480)
+
+
+def test_resolve_max_slave_color_resolution_returns_none_for_an_unconfigured_camera_model():
+    settings = {"RealSense D455": {"master": 1, "slave": 2, "max_slave_color_resolution": {"width": 640, "height": 480}}}
+    assert resolve_max_slave_color_resolution(settings, "RealSense D585 Prototype") is None
+
+
+def test_resolve_max_slave_color_resolution_returns_none_when_entry_has_no_resolution_cap():
+    # A camera model with confirmed master/slave values but no confirmed
+    # resolution ceiling yet - unconfirmed means don't guess, not "assume
+    # any resolution is fine".
+    settings = {"RealSense D455": {"master": 1, "slave": 2}}
+    assert resolve_max_slave_color_resolution(settings, "RealSense D455") is None
+
+
+def test_resolve_max_slave_color_resolution_returns_none_when_section_is_empty():
+    assert resolve_max_slave_color_resolution({}, "RealSense D455") is None
 
 
 def test_set_manual_exposure_sets_exposure_and_disables_auto():

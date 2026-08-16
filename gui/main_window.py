@@ -28,6 +28,7 @@ CameraLiveSessionPanel, one per configured camera on the new page).
 """
 
 import numpy as np
+import pyrealsense2 as rs
 from PySide6.QtWidgets import QMainWindow, QStackedWidget, QMessageBox
 
 from gui.pages.device_select_page import DeviceSelectPage
@@ -41,10 +42,55 @@ from state.gui_state import GuiState, save_gui_state
 from engine.streams import (
     list_video_stream_options, stream_slug,
     parse_camera_tests_config, resolve_camera_tests,
-    resolve_inter_cam_sync_value,
+    resolve_inter_cam_sync_value, resolve_max_slave_color_resolution,
 )
 from domain.calibration import load_led_positions
 from settings import ensure_output_dir
+
+
+def _slave_genlock_color_resolution_conflicts(cameras, inter_cam_sync_settings):
+    """Returns a list of human-readable conflict strings, one per camera
+    whose own color stream (if any) can't safely run while that camera
+    acts as a genlock SLAVE - either it exceeds the confirmed-safe
+    resolution, or this camera model has no confirmed cap at all yet (real
+    hardware finding: full 1280x720@30 color blocks BOTH streams entirely
+    once genlocked - a USB bandwidth ceiling, not a hardware/firmware
+    block - see tools/genlock_diag/diag_slave_color_bandwidth_sweep.py).
+    Only checked for a camera that is NOT master and whose inter_cam_sync_
+    value is not None - a camera whose genlock is skipped entirely
+    (unconfirmed master/slave scheme) never hits this bandwidth
+    constraint, since it just runs free-running with no external trigger
+    involved at all."""
+    conflicts = []
+    for camera in cameras:
+        if camera["is_master"] or camera["config"]["inter_cam_sync_value"] is None:
+            continue
+        color_pick = next(
+            (pick for pick in (camera["config"]["pick_a"], camera["config"]["pick_b"])
+             if pick["stream_type"] == rs.stream.color),
+            None,
+        )
+        if color_pick is None:
+            continue
+        max_resolution = resolve_max_slave_color_resolution(inter_cam_sync_settings, camera["label"])
+        if max_resolution is None:
+            conflicts.append(
+                "{}: color stream at {}x{} - this camera model's safe color resolution as a "
+                "genlock slave has not been confirmed yet (no max_slave_color_resolution in "
+                "settings.yaml's camera.inter_cam_sync entry).".format(
+                    camera["label"], color_pick["width"], color_pick["height"],
+                )
+            )
+            continue
+        max_width, max_height = max_resolution
+        if color_pick["width"] > max_width or color_pick["height"] > max_height:
+            conflicts.append(
+                "{}: color stream at {}x{} exceeds the confirmed safe resolution ({}x{}) for a "
+                "genlock slave - full resolution blocks BOTH streams entirely.".format(
+                    camera["label"], color_pick["width"], color_pick["height"], max_width, max_height,
+                )
+            )
+    return conflicts
 
 
 class MainWindow(QMainWindow):
@@ -501,6 +547,17 @@ class MainWindow(QMainWindow):
              }}
             for camera_id, camera in self._cameras.items()
         ]
+        conflicts = _slave_genlock_color_resolution_conflicts(cameras, inter_cam_sync_settings)
+        if conflicts:
+            QMessageBox.critical(
+                self, "Slave camera color resolution too high for genlock",
+                "The following camera(s) can't safely run their configured color stream "
+                "while acting as a genlock slave:\n\n{}\n\nLower that stream's resolution "
+                "in Stream Config, or make this camera the master instead.".format(
+                    "\n".join(conflicts)
+                ),
+            )
+            return
         self.multi_camera_live_session_page.set_cameras(self.ctx, cameras)
         self.stack.setCurrentWidget(self.multi_camera_live_session_page)
 

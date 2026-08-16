@@ -593,6 +593,24 @@ def resolve_inter_cam_sync_value(inter_cam_sync_settings, camera_name, is_master
     return entry["master"] if is_master else entry["slave"]
 
 
+def resolve_max_slave_color_resolution(inter_cam_sync_settings, camera_name):
+    """Returns (width, height) - the confirmed max color-stream resolution
+    this camera MODEL can safely use while acting as a genlock SLAVE,
+    without hitting the real USB-bandwidth ceiling found on real hardware
+    (full 1280x720@30 color blocks BOTH streams entirely once genlocked;
+    640x480@30 was rigorously confirmed - frame-count parity + tight
+    index-lockstep offset stability, not just "frames flow" - see
+    tools/genlock_diag/diag_genlock_quality_test.py). Returns None if this
+    camera model has no confirmed cap at all - same "unconfirmed means
+    don't guess" convention as resolve_inter_cam_sync_value; the caller
+    must treat None as "block, not allow.\""""
+    entry = inter_cam_sync_settings.get(camera_name)
+    if entry is None or "max_slave_color_resolution" not in entry:
+        return None
+    resolution = entry["max_slave_color_resolution"]
+    return resolution["width"], resolution["height"]
+
+
 def set_manual_exposure(sensor, exposure):
     """Manual mode touches EXPOSURE ONLY - gain is deliberately never read
     or written here. See enable_auto_exposure's docstring for why: an
