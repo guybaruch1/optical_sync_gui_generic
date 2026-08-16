@@ -41,6 +41,7 @@ from state.gui_state import GuiState, save_gui_state
 from engine.streams import (
     list_video_stream_options, stream_slug,
     parse_camera_tests_config, resolve_camera_tests,
+    resolve_inter_cam_sync_value,
 )
 from domain.calibration import load_led_positions
 from settings import ensure_output_dir
@@ -482,9 +483,22 @@ class MainWindow(QMainWindow):
         # rather than switch to an empty page if something else calls this.
         if not self._cameras:
             return
+        # Genlock role resolution happens fresh HERE, at Start-time, not
+        # earlier - the master assignment can change at any point in the hub
+        # (Set as Master, remove-the-master promotion) up until the operator
+        # actually starts the run, so re-resolving off self._master_camera_id
+        # every Start is what keeps this correct rather than stale.
+        inter_cam_sync_settings = self.settings["camera"].get("inter_cam_sync", {})
         cameras = [
             {"camera_id": camera_id, "label": camera["label"],
-             "is_master": (camera_id == self._master_camera_id), "config": camera["config"]}
+             "is_master": (camera_id == self._master_camera_id),
+             "config": {
+                 **camera["config"],
+                 "inter_cam_sync_value": resolve_inter_cam_sync_value(
+                     inter_cam_sync_settings, camera["label"],
+                     is_master=(camera_id == self._master_camera_id),
+                 ),
+             }}
             for camera_id, camera in self._cameras.items()
         ]
         self.multi_camera_live_session_page.set_cameras(self.ctx, cameras)
