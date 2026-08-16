@@ -66,6 +66,7 @@ import pyrealsense2 as rs
 
 from engine.streams import (
     list_devices, find_device_by_serial, ContinuousCapture,
+    list_video_stream_options_from_device,
     set_inter_cam_sync_mode, INTER_CAM_SYNC_DEFAULT, INTER_CAM_SYNC_MASTER, INTER_CAM_SYNC_SLAVE,
 )
 
@@ -92,6 +93,43 @@ def _resolve_two_serials(ctx, serial_a, serial_b):
     for d in devices:
         print("  {} ({})".format(d.name, d.serial))
     return devices[0].serial, devices[1].serial
+
+
+def report_device_info(label, device):
+    """Prints the USB connection type/physical port and whether this
+    device's own reported stream profiles actually include what this script
+    is about to request (IR_PICK/COLOR_PICK, plus the depth stream
+    ContinuousCapture co-enables by default for IR/RGB sync - see
+    engine.streams.ContinuousCapture._depth_sync_stream). Pure evidence-
+    gathering, no fallback/retry - this project's own established lesson
+    (see CLAUDE.md's "IR/RGB sync depends on stream OPEN order" section) is
+    that a silent probe-then-fallback for a resolve failure can mask real
+    hardware behavior; if a requested combination genuinely can't resolve,
+    that needs to reach the operator as a real, informative error, not be
+    silently substituted."""
+    usb_type = device.get_info(rs.camera_info.usb_type_descriptor) if device.supports(rs.camera_info.usb_type_descriptor) else "unknown"
+    physical_port = device.get_info(rs.camera_info.physical_port) if device.supports(rs.camera_info.physical_port) else "unknown"
+    print("\n{} - USB type: {} - physical port: {}".format(label, usb_type, physical_port))
+    # CLAUDE.md's own bandwidth note: z16 depth at 1280x720@30 (~55MB/s) on
+    # top of IR (~28MB/s) and bgr8 color (~83MB/s) needs USB3 - a device on
+    # USB2 (~60MB/s ceiling) cannot resolve that combination at all, which
+    # is exactly the "Couldn't resolve requests" pyrealsense2 raises.
+    if usb_type not in ("unknown",) and not usb_type.startswith("3."):
+        print("  NOTE: not a USB3 connection - the IR+color+depth combination this "
+              "script requests (~166MB/s) may exceed what this port can carry.")
+
+    available = list_video_stream_options_from_device(device)
+    for wanted_label, wanted in (("IR1 (y8)", IR_PICK), ("Color (bgr8)", COLOR_PICK)):
+        match = any(
+            opt["stream_type"] == wanted["stream_type"] and opt["stream_index"] == wanted["stream_index"]
+            and opt["width"] == wanted["width"] and opt["height"] == wanted["height"]
+            and opt["fps"] == wanted["fps"] and opt["format"] == wanted["format"]
+            for opt in available
+        )
+        print("  {} at {}x{}@{}: {}".format(
+            wanted_label, wanted["width"], wanted["height"], wanted["fps"],
+            "available" if match else "NOT reported by this device",
+        ))
 
 
 def report_sensor_support(label, device):
@@ -305,6 +343,8 @@ def main():
     print("Device A: {} ({})".format(name_a, serial_a))
     print("Device B: {} ({})".format(name_b, serial_b))
 
+    report_device_info("Device A", device_a)
+    report_device_info("Device B", device_b)
     report_sensor_support("Device A", device_a)
     report_sensor_support("Device B", device_b)
 
