@@ -376,12 +376,12 @@ Explicitly unmodified (verified by tracing consumers in both design passes):
 **Status as of this writing: steps 1-6 implemented, PLUS real hardware
 genlock now wired and validated (master=1/slave=2, confirmed via
 `tools/genlock_diag/diag_genlock_quality_test.py` on two real D455s -
-matching frame counts, ~10us-scale stable offset) and cross-camera
-comparison restricted to infrared-only (a slave's color sensor cannot
-stream at all while genlocked - confirmed on real hardware and
-independently corroborated by Intel's own librealsense GitHub issues).
-544 tests pass. Step 7 remains, genuinely blocked without further
-hardware access.**
+matching frame counts, ~10us-scale stable offset) — including cross-camera
+RGB-vs-RGB, once a real bandwidth ceiling (not a hardware block) is
+respected: a slave's own color stream must stay at ≤640x480, enforced by
+a `gui/main_window.py` guard that blocks Start with a clear message
+otherwise. 550 tests pass. Step 7 remains, genuinely blocked without
+further hardware access.**
 
 1. ✅ `set_inter_cam_sync_mode` + unit tests against a fake sensor. Writing
    these tests caught a wrong assumption in this plan's own original
@@ -421,8 +421,8 @@ hardware access.**
    one shared run folder + one subfolder per camera end to end, plus a
    combined `cross_camera_sync.csv`/`cross_camera_sync_plot.png` written
    once every camera's session finishes.
-6.5. ✅ **Real hardware genlock, validated and wired.** Extensive
-   real-hardware investigation (see `tools/genlock_diag/*.py` - a
+6.5. ✅ **Real hardware genlock, validated and wired — including RGB.**
+   Extensive real-hardware investigation (see `tools/genlock_diag/*.py` - a
    diagnostic-first sweep in the same spirit as the dual-panel arm-sequence
    work) established: `master=1`/`slave=2` (the already-defined
    `INTER_CAM_SYNC_MASTER`/`INTER_CAM_SYNC_SLAVE` constants) genuinely
@@ -432,38 +432,49 @@ hardware access.**
    turned out to be a red herring: that mode is a withdrawn, unsupported
    experimental Intel feature with a known, independently-reported
    frame-rate-halving bug, confirmed via Intel's own librealsense GitHub
-   discussion. Separately confirmed, three independent ways, that a
-   genlock slave's color/RGB sensor cannot produce a single frame while
-   its Stereo Module is in ANY externally-triggered sync mode — corroborated
-   by Intel's own GitHub issues (`librealsense#7502`). Given this,
-   cross-camera comparison (`engine/cross_camera_reconciler.py`'s
-   `build_cross_camera_pair_specs`) is now infrared-only by design — never
-   pairs a shared "color" identity, since a slave would never produce real
-   data for it. `engine/streams.py`'s `resolve_inter_cam_sync_value` looks
-   up the confirmed raw values from a new `settings.yaml`
+   discussion.
+
+   An intermediate finding — that a genlock slave's color/RGB sensor could
+   never produce a single frame at all — turned out to ALSO be wrong,
+   corrected via further real-hardware testing
+   (`diag_slave_color_bandwidth_sweep.py`, then the rigorous
+   `diag_genlock_quality_test.py --with-color`): it's a real USB-bandwidth
+   ceiling at full 1280x720@30 color, not a hardware/firmware block.
+   640x480@30 color was rigorously confirmed (same frame-count-parity +
+   index-lockstep-offset-stability methodology already proven for IR,
+   ~10us stdev) to genuinely hardware-synchronize, both intra-camera and
+   cross-camera. `engine/cross_camera_reconciler.py`'s
+   `build_cross_camera_pair_specs` pairs ANY shared identity again (IR or
+   color) — the earlier infrared-only filter was removed once this was
+   understood. Instead, `gui/main_window.py`'s
+   `_slave_genlock_color_resolution_conflicts` blocks Start with a clear
+   error if a slave camera's own color stream exceeds the confirmed
+   resolution ceiling (`settings.yaml`'s new
+   `camera.inter_cam_sync.<model>.max_slave_color_resolution`) — or if that
+   ceiling hasn't been confirmed at all for this camera model yet
+   (unconfirmed means don't guess, not "assume it's fine"). Master is
+   never restricted - RGB always worked fine as master regardless of
+   resolution.
+
+   `engine/streams.py`'s `resolve_inter_cam_sync_value`/`resolve_max_slave_
+   color_resolution` look up the confirmed values from `settings.yaml`'s
    `camera.inter_cam_sync` section (keyed by exact device name, only
-   "RealSense D455" populated so far - deliberately no entry for
-   unconfirmed models), resolved fresh at Start-time by `gui/main_window.py`
-   and threaded through `gui/pages/multi_camera_live_session_page.py` into
-   each camera's own `CameraSessionSpec`. A camera's own INTRA-camera test
-   (e.g. "IR vs RGB") is completely unaffected - only the CROSS-camera
-   comparison is IR-only. Deferred, per explicit operator decision: any
-   validation/warning for a slave camera whose own test involves RGB (that
-   combination is simply not prevented yet - up to the operator to avoid it
-   for now).
+   "RealSense D455" populated so far), resolved fresh at Start-time by
+   `gui/main_window.py` and threaded through `gui/pages/multi_camera_live_
+   session_page.py` into each camera's own `CameraSessionSpec`.
 7. ⬜ Dual-panel port generalization — last, and only with real-hardware
    diagnostic-sweep validation before trusting it, per the project's own
    established practice. Genuinely blocked without the physical rig.
 
 **What this means practically right now:** the app is fully runnable
 end-to-end for a multi-camera sync test (up to 3 cameras, software-side
-cross-camera HW TS Latency reconciliation restricted to infrared-only,
-real validated hardware genlock for confirmed camera models,
-at-most-one-dual-panel-camera enforced, one organized run folder per
-multi-camera session with a combined cross-camera CSV/plot). That's a
-complete, real, hardware-validated multi-camera sync test for IR-vs-IR
-cross-camera comparison. Step 7 (dual-panel generalization) and any
-RGB-slave-conflict validation remain open, explicitly deferred.
+cross-camera HW TS Latency reconciliation for BOTH IR-vs-IR and
+RGB-vs-RGB, real validated hardware genlock for confirmed camera models,
+a resolution guard preventing the one real footgun this investigation
+found, at-most-one-dual-panel-camera enforced, one organized run folder
+per multi-camera session with a combined cross-camera CSV/plot). That's a
+complete, real, hardware-validated multi-camera sync test. Step 7
+(dual-panel generalization) remains open.
 
 ## Verification
 
