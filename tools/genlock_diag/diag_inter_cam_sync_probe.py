@@ -153,8 +153,8 @@ def report_sensor_support(label, device):
         print("  WARNING: no sensor on this device supports inter_cam_sync_mode at all.")
 
 
-def _capture_samples_thread(serial, stop_event, samples_out, samples_lock, errors_out):
-    capture = ContinuousCapture(serial, IR_PICK, COLOR_PICK)
+def _capture_samples_thread(serial, stop_event, samples_out, samples_lock, errors_out, enable_depth_sync):
+    capture = ContinuousCapture(serial, IR_PICK, COLOR_PICK, enable_depth_for_ir_sync=enable_depth_sync)
     try:
         capture.start()
         for _image_a, _image_b, ts_a, ts_b, _num_a, _num_b in capture.frames_with_diagnostics():
@@ -169,7 +169,7 @@ def _capture_samples_thread(serial, stop_event, samples_out, samples_lock, error
         capture.stop()
 
 
-def measure_cross_device(serial_a, serial_b, duration_s, warmup_s, label, start_stagger_s=2.0):
+def measure_cross_device(serial_a, serial_b, duration_s, warmup_s, label, start_stagger_s=2.0, enable_depth_sync=False):
     """Opens both devices' own ContinuousCapture concurrently on background
     threads, discards a warmup_s settle window, then records for duration_s.
     Returns the two devices' raw (wall_time, ir_ts_us, color_ts_us) sample
@@ -182,7 +182,19 @@ def measure_cross_device(serial_a, serial_b, duration_s, warmup_s, label, start_
     camera_start_stagger_s) to disrupt each other's device enumeration if
     both open their rs.pipeline() at nearly the same moment. Real-hardware
     evidence this matters here specifically: an earlier run of this script
-    with zero stagger hit device B's pipeline.start() failing outright."""
+    with zero stagger hit device B's pipeline.start() failing outright.
+
+    enable_depth_sync defaults to False HERE, unlike ContinuousCapture's own
+    default - that setting exists to fix a device's OWN internal IR-vs-RGB
+    ordering (see CLAUDE.md's "IR/RGB sync depends on stream OPEN order"
+    section), which this script never measures at all: it only compares IR-
+    to-IR and color-to-color ACROSS the two devices, never IR-vs-color
+    within one. Leaving it at ContinuousCapture's own True default would
+    needlessly add a ~55MB/s z16 depth stream on EACH device (on top of
+    ~111MB/s of IR+color already) for a relationship nothing here reads -
+    real-hardware evidence this matters: a run with it left on hit "Frame
+    didn't arrive within 5000" for device B specifically, after both devices
+    had already confirmed USB3 connections and available profiles."""
     print("\n{}: recording {:.1f}s (after {:.1f}s warmup)...".format(label, duration_s, warmup_s))
     stop_event_a, stop_event_b = threading.Event(), threading.Event()
     samples_a, samples_b = [], []
@@ -190,10 +202,12 @@ def measure_cross_device(serial_a, serial_b, duration_s, warmup_s, label, start_
     errors_a, errors_b = [], []
 
     thread_a = threading.Thread(
-        target=_capture_samples_thread, args=(serial_a, stop_event_a, samples_a, lock_a, errors_a),
+        target=_capture_samples_thread,
+        args=(serial_a, stop_event_a, samples_a, lock_a, errors_a, enable_depth_sync),
     )
     thread_b = threading.Thread(
-        target=_capture_samples_thread, args=(serial_b, stop_event_b, samples_b, lock_b, errors_b),
+        target=_capture_samples_thread,
+        args=(serial_b, stop_event_b, samples_b, lock_b, errors_b, enable_depth_sync),
     )
     thread_a.start()
     if start_stagger_s > 0:
@@ -211,6 +225,16 @@ def measure_cross_device(serial_a, serial_b, duration_s, warmup_s, label, start_
     stop_event_b.set()
     thread_a.join(timeout=10.0)
     thread_b.join(timeout=10.0)
+
+    # Report how many samples each device actually got BEFORE the error
+    # check - even on failure, this tells the next debugging step something
+    # real ("A got 200, B got 0" is a very different signature than "A got
+    # 3, B got 0"), rather than the exception message alone.
+    with lock_a:
+        partial_a = len(samples_a)
+    with lock_b:
+        partial_b = len(samples_b)
+    print("  (samples recorded before stop: A={} B={})".format(partial_a, partial_b))
 
     if errors_a or errors_b:
         raise RuntimeError("Capture failed - device A errors: {} - device B errors: {}".format(errors_a, errors_b))
@@ -332,6 +356,7 @@ def main():
     parser.add_argument("--slices", type=int, default=5, help="Number of contiguous sub-windows the synced measurement is split into for the stability check.")
     parser.add_argument("--max-gap-s", type=float, default=0.05, help="Max wall-clock gap (seconds) allowed for a cross-device frame match - unmatched samples are dropped, never forced.")
     parser.add_argument("--start-stagger-s", type=float, default=2.0, help="Delay before opening device B's own pipeline, after device A's - two cameras sharing a USB hub/controller can disrupt each other's enumeration if opened at nearly the same moment (see engine/multi_camera_session.py's own camera_start_stagger_s).")
+    parser.add_argument("--enable-depth-sync", action="store_true", default=False, help="Co-enable each device's own depth stream (ContinuousCapture's enable_depth_for_ir_sync). Off by default here - this script never measures the intra-device IR-vs-color relationship that setting exists to fix, only cross-device IR-to-IR and color-to-color, so it's pure unneeded USB bandwidth for this measurement.")
     args = parser.parse_args()
 
     ctx = rs.context()
@@ -350,7 +375,8 @@ def main():
 
     print("\n=== Step 1: UNSYNCED baseline (inter_cam_sync_mode untouched) ===")
     samples_a, samples_b = measure_cross_device(
-        serial_a, serial_b, args.duration_s, args.warmup_s, "Unsynced", args.start_stagger_s,
+        serial_a, serial_b, args.duration_s, args.warmup_s, "Unsynced",
+        args.start_stagger_s, args.enable_depth_sync,
     )
     unsynced_ir_offsets, unsynced_color_offsets = nearest_match_offsets(samples_a, samples_b, args.max_gap_s)
     unsynced_ir = summarize_offsets(unsynced_ir_offsets)
@@ -366,7 +392,8 @@ def main():
     try:
         print("\n=== Step 3: SYNCED measurement ===")
         samples_a, samples_b = measure_cross_device(
-            serial_a, serial_b, args.duration_s, args.warmup_s, "Synced", args.start_stagger_s,
+            serial_a, serial_b, args.duration_s, args.warmup_s, "Synced",
+            args.start_stagger_s, args.enable_depth_sync,
         )
         synced_ir_offsets, synced_color_offsets = nearest_match_offsets(samples_a, samples_b, args.max_gap_s)
         synced_ir = summarize_offsets(synced_ir_offsets)
