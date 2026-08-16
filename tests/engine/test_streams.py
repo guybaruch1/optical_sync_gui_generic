@@ -1,5 +1,6 @@
 import threading
 import time
+from unittest.mock import patch
 
 import pytest
 import pyrealsense2 as rs
@@ -995,3 +996,39 @@ def test_continuous_capture_never_changes_which_pick_is_stream_a():
     capture._depth_sync_stream()
     assert capture.pick_a is pick_a
     assert capture.pick_b is pick_b
+
+
+# --- ContinuousCapture.stop() must be safe to call after start() itself
+# raised - confirmed as a REAL bug via real hardware (tools/genlock_diag's
+# probe hit "RuntimeError: stop() cannot be called before start()" from a
+# cleanup finally block, after one of two concurrently-opened D455s' own
+# pipeline.start() failed). Root cause: start() assigned self._pipeline =
+# rs.pipeline() BEFORE the config was actually started on it, so a
+# never-started pipeline object was left behind for stop()'s existing
+# "if self._pipeline is not None" guard to (wrongly) treat as stoppable.
+# This isn't just the diagnostic script's problem - engine/session_engine.py's
+# SessionEngineThread.run() has the exact same "assign self._capture, then
+# call .start(), then unconditionally .stop() in finally" shape, so a failed
+# start() there would hit this too, masking the real error with this
+# secondary one. Doesn't need real hardware to test - only a fake
+# rs.pipeline() whose start() raises, mirroring the real SDK's own behavior
+# of refusing stop() on a pipeline that was never started. ---
+
+class _FakePipelineThatFailsToStart:
+    def start(self, config):
+        raise RuntimeError("Couldn't resolve requests")
+
+    def stop(self):
+        # Mirrors the real pyrealsense2 SDK's own behavior: calling stop() on
+        # a pipeline whose start() never succeeded raises, it doesn't no-op.
+        raise RuntimeError("stop() cannot be called before start()")
+
+
+def test_continuous_capture_stop_is_safe_after_start_raises():
+    capture = ContinuousCapture("SN1", _ir_pick(), _color_pick(), enable_depth_for_ir_sync=False)
+
+    with patch("engine.streams.rs.pipeline", return_value=_FakePipelineThatFailsToStart()):
+        with pytest.raises(RuntimeError, match="Couldn't resolve requests"):
+            capture.start()
+
+    capture.stop()  # must not raise - nothing was ever successfully started

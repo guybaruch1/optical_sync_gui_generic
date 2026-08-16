@@ -689,8 +689,18 @@ class ContinuousCapture:
         # real error instead of a silent, wrong fallback.
         self.depth_sync_active = self._depth_sync_stream() is not None
         config = self._build_config()
-        self._pipeline = rs.pipeline()
-        self._pipeline.start(config)
+        # Only assign self._pipeline AFTER pipeline.start(config) actually
+        # succeeds - confirmed as a real bug via real hardware (two D455s
+        # opened concurrently, one's pipeline.start() failed): assigning
+        # self._pipeline = rs.pipeline() before the call that can fail left
+        # a constructed-but-never-started pipeline behind for stop()'s own
+        # "if self._pipeline is not None" guard to (wrongly) treat as
+        # stoppable, and pyrealsense2 itself raises "stop() cannot be called
+        # before start()" for that. If start(config) raises, self._pipeline
+        # stays None (its __init__ default), so stop() correctly no-ops.
+        pipeline = rs.pipeline()
+        pipeline.start(config)
+        self._pipeline = pipeline
 
     def _get_frame(self, frameset, pick):
         if pick["stream_type"] == rs.stream.infrared:

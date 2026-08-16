@@ -131,12 +131,20 @@ def _capture_samples_thread(serial, stop_event, samples_out, samples_lock, error
         capture.stop()
 
 
-def measure_cross_device(serial_a, serial_b, duration_s, warmup_s, label):
+def measure_cross_device(serial_a, serial_b, duration_s, warmup_s, label, start_stagger_s=2.0):
     """Opens both devices' own ContinuousCapture concurrently on background
     threads, discards a warmup_s settle window, then records for duration_s.
     Returns the two devices' raw (wall_time, ir_ts_us, color_ts_us) sample
     lists, un-matched - nearest_match_offsets does the actual cross-device
-    pairing."""
+    pairing.
+
+    start_stagger_s delays thread B's own pipeline.start() relative to
+    thread A's - two D455s sharing a USB hub/controller have already been
+    confirmed (this exact project, engine/multi_camera_session.py's own
+    camera_start_stagger_s) to disrupt each other's device enumeration if
+    both open their rs.pipeline() at nearly the same moment. Real-hardware
+    evidence this matters here specifically: an earlier run of this script
+    with zero stagger hit device B's pipeline.start() failing outright."""
     print("\n{}: recording {:.1f}s (after {:.1f}s warmup)...".format(label, duration_s, warmup_s))
     stop_event_a, stop_event_b = threading.Event(), threading.Event()
     samples_a, samples_b = [], []
@@ -150,6 +158,8 @@ def measure_cross_device(serial_a, serial_b, duration_s, warmup_s, label):
         target=_capture_samples_thread, args=(serial_b, stop_event_b, samples_b, lock_b, errors_b),
     )
     thread_a.start()
+    if start_stagger_s > 0:
+        time.sleep(start_stagger_s)
     thread_b.start()
 
     time.sleep(warmup_s)
@@ -283,6 +293,7 @@ def main():
     parser.add_argument("--warmup-s", type=float, default=2.0, help="Settle time discarded before each recording starts.")
     parser.add_argument("--slices", type=int, default=5, help="Number of contiguous sub-windows the synced measurement is split into for the stability check.")
     parser.add_argument("--max-gap-s", type=float, default=0.05, help="Max wall-clock gap (seconds) allowed for a cross-device frame match - unmatched samples are dropped, never forced.")
+    parser.add_argument("--start-stagger-s", type=float, default=2.0, help="Delay before opening device B's own pipeline, after device A's - two cameras sharing a USB hub/controller can disrupt each other's enumeration if opened at nearly the same moment (see engine/multi_camera_session.py's own camera_start_stagger_s).")
     args = parser.parse_args()
 
     ctx = rs.context()
@@ -298,7 +309,9 @@ def main():
     report_sensor_support("Device B", device_b)
 
     print("\n=== Step 1: UNSYNCED baseline (inter_cam_sync_mode untouched) ===")
-    samples_a, samples_b = measure_cross_device(serial_a, serial_b, args.duration_s, args.warmup_s, "Unsynced")
+    samples_a, samples_b = measure_cross_device(
+        serial_a, serial_b, args.duration_s, args.warmup_s, "Unsynced", args.start_stagger_s,
+    )
     unsynced_ir_offsets, unsynced_color_offsets = nearest_match_offsets(samples_a, samples_b, args.max_gap_s)
     unsynced_ir = summarize_offsets(unsynced_ir_offsets)
     unsynced_color = summarize_offsets(unsynced_color_offsets)
@@ -312,7 +325,9 @@ def main():
 
     try:
         print("\n=== Step 3: SYNCED measurement ===")
-        samples_a, samples_b = measure_cross_device(serial_a, serial_b, args.duration_s, args.warmup_s, "Synced")
+        samples_a, samples_b = measure_cross_device(
+            serial_a, serial_b, args.duration_s, args.warmup_s, "Synced", args.start_stagger_s,
+        )
         synced_ir_offsets, synced_color_offsets = nearest_match_offsets(samples_a, samples_b, args.max_gap_s)
         synced_ir = summarize_offsets(synced_ir_offsets)
         synced_color = summarize_offsets(synced_color_offsets)
