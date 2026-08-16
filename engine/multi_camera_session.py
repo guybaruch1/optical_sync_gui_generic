@@ -29,7 +29,7 @@ from PySide6.QtCore import QObject, Signal
 
 from engine.cross_camera_reconciler import CrossCameraReconciler, build_cross_camera_pair_specs
 from engine.session_engine import SessionEngineThread
-from engine.streams import find_device_by_serial, set_inter_cam_sync_mode
+from engine.streams import find_device_by_serial, set_inter_cam_sync_mode, INTER_CAM_SYNC_DEFAULT
 
 
 @dataclass
@@ -118,6 +118,14 @@ class MultiCameraSessionController(QObject):
 
         self._threads = {}
         self._finished_rows_by_camera = {}
+        # Specs whose genlock role was ACTUALLY applied this attempt (never a
+        # spec with inter_cam_sync_value None - nothing was ever written to
+        # that camera, so nothing needs undoing). Populated by start_all's own
+        # role-assignment loop, consumed by _reset_genlock_roles - see that
+        # method's docstring for why a role must never be left lingering on a
+        # real device past this controller's own use of it.
+        self._applied_genlock_specs = []
+        self._ctx = None
 
     @property
     def threads(self):
@@ -156,22 +164,30 @@ class MultiCameraSessionController(QObject):
                 )
             )
 
+        self._ctx = ctx
         for spec in self._camera_specs:
             if spec.hardware_reset_before_start:
                 device = self._device_lookup(ctx, spec.device_serial)
                 device.hardware_reset()
                 time.sleep(spec.hardware_reset_settle_s)
 
+        self._applied_genlock_specs = []
         ordered_specs = sorted(self._camera_specs, key=lambda spec: not spec.is_master)
         for spec in ordered_specs:
             if spec.inter_cam_sync_value is None:
                 continue
             device = self._device_lookup(ctx, spec.device_serial)
             if not self._sync_setter(device, spec.inter_cam_sync_value):
+                # An earlier camera in this same attempt may already have had
+                # its own role applied successfully - reset it back to
+                # default now rather than aborting with that role left
+                # lingering on a real device (see _reset_genlock_roles).
+                self._reset_genlock_roles()
                 raise RuntimeError(
                     "Camera {} does not support inter_cam_sync_mode - cannot "
                     "genlock this rig as configured".format(spec.camera_id)
                 )
+            self._applied_genlock_specs.append(spec)
 
         self._finished_rows_by_camera = {}
         for index, spec in enumerate(self._camera_specs):
@@ -233,7 +249,51 @@ class MultiCameraSessionController(QObject):
         # row list rather than KeyError-ing on a camera that never produced any.
         self._finished_rows_by_camera.setdefault(camera_id, [])
         if set(self._finished_rows_by_camera) == set(self._threads):
+            # Only NOW, once every camera thread's own hardware cleanup has
+            # genuinely finished (not merely stop_all() having been called -
+            # request_stop() is non-blocking) is it safe to touch these
+            # devices again - see _reset_genlock_roles's own docstring.
+            self._reset_genlock_roles()
             self.all_sessions_finished.emit(dict(self._finished_rows_by_camera))
+
+    def _reset_genlock_roles(self):
+        """Resets every spec THIS attempt actually applied a genlock role to
+        (self._applied_genlock_specs) back to INTER_CAM_SYNC_DEFAULT, via the
+        same injectable device_lookup/sync_setter start_all's own
+        role-assignment loop already uses - no new collaborator, so this
+        stays just as mockable as the existing role-assignment tests. A spec
+        whose inter_cam_sync_value was None is never in this list in the
+        first place (start_all's loop skips it before ever calling
+        sync_setter), so this deliberately never touches a camera nothing
+        was ever applied to.
+
+        Called from exactly two places: (a) start_all's own failure path, so
+        a role already applied to an earlier camera never lingers after a
+        later camera fails to apply its own; (b) _on_thread_finished, only
+        once every started camera thread's own Qt finished has genuinely
+        fired - never synchronously from stop_all() itself, since
+        request_stop() is non-blocking and the underlying rs.pipeline() may
+        still be mid-stop on another thread when stop_all() returns;
+        touching the same device concurrently with that teardown is exactly
+        the kind of race engine.dual_panel_control's _dual_panel_lock exists
+        to avoid elsewhere in this project. Leaving a real device stuck in
+        e.g. "slave" mode is the same class of risk CLAUDE.md already
+        documents for gain surviving across app restarts in camera firmware.
+
+        Best-effort: a single device_lookup/sync_setter failure is swallowed,
+        not raised, so it can't stop the REST of the applied specs from
+        being reset, and - when called from _on_thread_finished - can't
+        suppress all_sessions_finished firing. Whatever real error triggered
+        this reset (a failed start, or just a normal finish) has already
+        happened; losing the ability to report the run as finished on top of
+        that would only make recovery harder, not safer."""
+        for spec in self._applied_genlock_specs:
+            try:
+                device = self._device_lookup(self._ctx, spec.device_serial)
+                self._sync_setter(device, INTER_CAM_SYNC_DEFAULT)
+            except Exception:
+                continue
+        self._applied_genlock_specs = []
 
     def _on_session_finished_rows(self, camera_id, rows):
         self._finished_rows_by_camera[camera_id] = rows

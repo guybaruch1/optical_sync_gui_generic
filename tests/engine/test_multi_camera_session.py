@@ -12,6 +12,7 @@ import pytest
 from PySide6.QtCore import QObject, Signal
 
 from engine.multi_camera_session import CameraSessionSpec, MultiCameraSessionController
+from engine.streams import INTER_CAM_SYNC_DEFAULT
 
 
 class _FakeSessionEngineThread(QObject):
@@ -127,6 +128,62 @@ def test_start_all_raises_and_starts_nothing_when_a_device_fails_genlock():
 
     assert controller.threads == {}
     assert all(not t.started for t in fake_threads.values())
+
+
+# --- Reset-to-default: a genlock role already applied to an earlier camera
+# must never linger after a LATER camera fails to apply its own - otherwise a
+# real device is left stuck as e.g. "slave", which can hang the next time it's
+# used standalone (the same "value persists in camera firmware across app
+# restarts" risk CLAUDE.md already documents for gain). ---
+
+def test_start_all_resets_any_already_applied_genlock_role_when_a_later_camera_fails():
+    sync_setter = MagicMock(side_effect=[True, False])
+    master_device = MagicMock()
+    master_device.serial = "master_serial"
+    slave_device = MagicMock()
+    slave_device.serial = "slave_serial"
+
+    def device_lookup(ctx, serial):
+        return master_device if serial == "master_serial" else slave_device
+
+    controller, _ = _controller(
+        [_spec("cam1", True, device_serial="master_serial"),
+         _spec("cam2", False, device_serial="slave_serial")],
+        sync_setter=sync_setter, device_lookup=device_lookup,
+    )
+
+    with pytest.raises(RuntimeError):
+        controller.start_all(ctx=object())
+
+    reset_calls = [call for call in sync_setter.call_args_list if call.args[1] == INTER_CAM_SYNC_DEFAULT]
+    assert len(reset_calls) == 1
+    assert reset_calls[0].args[0] is master_device  # the one that had actually succeeded
+
+
+def test_start_all_never_resets_a_camera_whose_genlock_value_was_none_when_a_later_camera_fails():
+    sync_setter = MagicMock(return_value=False)
+    none_device = MagicMock()
+    none_device.serial = "none_serial"
+    fails_device = MagicMock()
+    fails_device.serial = "fails_serial"
+
+    def device_lookup(ctx, serial):
+        return none_device if serial == "none_serial" else fails_device
+
+    controller, _ = _controller(
+        [_spec("cam1", True, inter_cam_sync_value=None, device_serial="none_serial"),
+         _spec("cam2", False, device_serial="fails_serial")],
+        sync_setter=sync_setter, device_lookup=device_lookup,
+    )
+
+    with pytest.raises(RuntimeError):
+        controller.start_all(ctx=object())
+
+    # Only the non-None spec's device was ever passed to sync_setter at all -
+    # the None spec's device never appears, not even for a reset attempt.
+    called_devices = {call.args[0] for call in sync_setter.call_args_list}
+    assert none_device not in called_devices
+    assert fails_device in called_devices
 
 
 def test_start_all_resets_hardware_before_any_genlock_role_is_applied():
@@ -399,3 +456,67 @@ def test_all_sessions_finished_waits_for_every_thread():
     fake_threads["s2"].session_finished.emit([{"pair_index": 2}])
     fake_threads["s2"].finished.emit()
     assert finished_payloads == [{"cam1": [{"pair_index": 1}], "cam2": [{"pair_index": 2}]}]
+
+
+# --- Reset-to-default on finish: once every started camera thread has
+# genuinely finished (not merely stop_all() being called - request_stop() is
+# non-blocking, so a camera's rs.pipeline() may still be mid-teardown on its
+# own thread), every genlock role this run actually applied gets reset back
+# to INTER_CAM_SYNC_DEFAULT - so a camera never sits stuck as "slave" the next
+# time it's used standalone. ---
+
+def test_genlock_roles_are_reset_to_default_once_every_camera_thread_has_finished():
+    sync_setter = MagicMock(return_value=True)
+    device_a, device_b = MagicMock(), MagicMock()
+
+    def device_lookup(ctx, serial):
+        return device_a if serial == "s1" else device_b
+
+    controller, fake_threads = _controller(
+        [_spec("cam1", True, device_serial="s1"), _spec("cam2", False, device_serial="s2")],
+        sync_setter=sync_setter, device_lookup=device_lookup,
+    )
+    controller.start_all(ctx=object())
+    sync_setter.reset_mock()  # only care about post-finish calls from here on
+
+    fake_threads["s1"].finished.emit()
+    assert sync_setter.call_count == 0  # cam2 hasn't finished yet - too early to reset
+
+    fake_threads["s2"].finished.emit()
+
+    reset_calls = [call for call in sync_setter.call_args_list if call.args[1] == INTER_CAM_SYNC_DEFAULT]
+    reset_devices = {call.args[0] for call in reset_calls}
+    assert reset_devices == {device_a, device_b}
+
+
+def test_genlock_reset_never_touches_a_camera_whose_genlock_value_was_none_on_finish():
+    sync_setter = MagicMock(return_value=True)
+    controller, fake_threads = _controller(
+        [_spec("cam1", True, inter_cam_sync_value=None, device_serial="s1")], sync_setter=sync_setter,
+    )
+    controller.start_all(ctx=object())
+    sync_setter.assert_not_called()  # existing behavior: nothing applied at start
+
+    fake_threads["s1"].finished.emit()
+
+    sync_setter.assert_not_called()  # new behavior: nothing to reset either
+
+
+def test_all_sessions_finished_still_emits_even_if_resetting_a_genlock_role_raises():
+    sync_setter = MagicMock(side_effect=[True, True, RuntimeError("device unplugged"), True])
+    controller, fake_threads = _controller(
+        [_spec("cam1", True, device_serial="s1"), _spec("cam2", False, device_serial="s2")],
+        sync_setter=sync_setter,
+    )
+    controller.start_all(ctx=object())
+    finished_payloads = []
+    controller.all_sessions_finished.connect(finished_payloads.append)
+
+    fake_threads["s1"].finished.emit()
+    fake_threads["s2"].finished.emit()
+
+    # 2 role-assignment calls at start + 2 reset calls at finish, even though
+    # the first reset call raised - one bad device can't block resetting the
+    # rest, or suppress all_sessions_finished firing.
+    assert sync_setter.call_count == 4
+    assert len(finished_payloads) == 1
