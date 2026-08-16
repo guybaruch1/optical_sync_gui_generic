@@ -19,14 +19,22 @@ not built here). LED switch time is NOT a toolbar control here at all -
 each camera already tuned its own switch_time_ms on its own Threshold
 Tuning page; that per-camera value is used as-is.
 
-Genlock (master/slave role assignment) is NOT attempted yet -
-CameraSessionSpec.inter_cam_sync_value is deliberately None for every
-camera. Picking the correct raw value per camera model/generation (D400 vs
-D500-series use different value schemes - see engine.streams.
-set_inter_cam_sync_mode's own docstring) needs real multi-camera hardware
-to validate against, which isn't available yet - see the design doc's
-Known Risks. Only the software-side cross-camera reconciliation
-(HW-timestamp nearest-match, not genlock-dependent) runs for now.
+Genlock (master/slave role assignment): CameraSessionSpec.inter_cam_sync_value
+is read straight off each camera's OWN config dict (config.get(
+"inter_cam_sync_value")) - this page does not resolve or guess it. That
+value is decided upstream, fresh at Start-time, by gui/main_window.py's
+_on_start_multi_camera_session_requested via engine.streams.
+resolve_inter_cam_sync_value against settings.yaml's camera.inter_cam_sync
+section (keyed by exact device name - D400 vs D500-series use different
+raw value schemes on the same rs.option.inter_cam_sync_mode option, see
+set_inter_cam_sync_mode's own docstring). A camera model with no entry
+there resolves to None here too - genlock is skipped for that camera
+rather than guessing a possibly-wrong value - and MultiCameraSessionController
+is what actually applies a non-None value to the real device before
+starting that camera's thread (see engine/multi_camera_session.py).
+Cross-camera comparison itself stays infrared-only regardless of genlock
+(see engine/cross_camera_reconciler.py) - a genlock slave's color sensor
+cannot stream at all while genlocked, confirmed on real hardware.
 
 Output layout: ONE shared run folder (domain.run_output.create_run_dir,
 using the master camera's own output_root - every camera's settings.yaml-
@@ -274,7 +282,7 @@ class MultiCameraLiveSessionPage(QWidget):
 
             camera_specs.append(CameraSessionSpec(
                 camera_id=camera_id, is_master=camera["is_master"],
-                inter_cam_sync_value=None,  # see module docstring
+                inter_cam_sync_value=config.get("inter_cam_sync_value"),
                 stream_identities=_stream_identities(config),
                 device_serial=config["device_serial"],
                 hardware_reset_before_start=config["hardware_reset_before_start"],

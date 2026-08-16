@@ -373,10 +373,15 @@ Explicitly unmodified (verified by tracing consumers in both design passes):
 
 ## Suggested implementation order
 
-**Status as of this writing: steps 1-6 implemented and committed on
-`worktree-multi-camera-sync` (pushed to origin). 523 tests pass (424
-baseline + 99 new). Step 7 remains, genuinely blocked without the physical
-rig.**
+**Status as of this writing: steps 1-6 implemented, PLUS real hardware
+genlock now wired and validated (master=1/slave=2, confirmed via
+`tools/genlock_diag/diag_genlock_quality_test.py` on two real D455s -
+matching frame counts, ~10us-scale stable offset) and cross-camera
+comparison restricted to infrared-only (a slave's color sensor cannot
+stream at all while genlocked - confirmed on real hardware and
+independently corroborated by Intel's own librealsense GitHub issues).
+544 tests pass. Step 7 remains, genuinely blocked without further
+hardware access.**
 
 1. ✅ `set_inter_cam_sync_mode` + unit tests against a fake sensor. Writing
    these tests caught a wrong assumption in this plan's own original
@@ -400,13 +405,11 @@ rig.**
    from `LiveSessionPage` (untouched, still fully covered by its own
    tests), `MultiCameraLiveSessionPage` (tabs + cross-camera panel) built
    and wired for real into the hub's "Start Multi-Camera Live Session".
-   Two v1 simplifications landed here, documented in that page's own
-   module docstring: (a) genlock role assignment is NOT attempted yet —
-   every `CameraSessionSpec.inter_cam_sync_value` is `None`, since picking
-   the correct raw value per camera generation needs real hardware to
-   validate (only the software-side reconciliation runs); (b) each camera
-   still mints its own independent output folder rather than the nicer
-   shared-parent-plus-subfolders layout step 6 describes.
+   One v1 simplification originally landed here (each camera still mints
+   its own independent output folder) was resolved by step 6 below.
+   Genlock role assignment — originally deferred here pending real
+   hardware — is now wired (see the genlock/infrared-only status note
+   above and step 6.5 below).
 6. ✅ Output file changes. `domain/run_output.py`'s `create_camera_subdir`
    + `domain/csv_export.py`'s `export_cross_camera_csv` +
    `domain/plot_export.py`'s `export_cross_camera_plot` +
@@ -418,18 +421,49 @@ rig.**
    one shared run folder + one subfolder per camera end to end, plus a
    combined `cross_camera_sync.csv`/`cross_camera_sync_plot.png` written
    once every camera's session finishes.
+6.5. ✅ **Real hardware genlock, validated and wired.** Extensive
+   real-hardware investigation (see `tools/genlock_diag/*.py` - a
+   diagnostic-first sweep in the same spirit as the dual-panel arm-sequence
+   work) established: `master=1`/`slave=2` (the already-defined
+   `INTER_CAM_SYNC_MASTER`/`INTER_CAM_SYNC_SLAVE` constants) genuinely
+   synchronizes two D455s' infrared streams — confirmed via matching frame
+   counts and a tight, physically-plausible ~10us-scale offset over a 20s
+   recording. A detour through `inter_cam_sync_mode=4` ("Genlock" mode)
+   turned out to be a red herring: that mode is a withdrawn, unsupported
+   experimental Intel feature with a known, independently-reported
+   frame-rate-halving bug, confirmed via Intel's own librealsense GitHub
+   discussion. Separately confirmed, three independent ways, that a
+   genlock slave's color/RGB sensor cannot produce a single frame while
+   its Stereo Module is in ANY externally-triggered sync mode — corroborated
+   by Intel's own GitHub issues (`librealsense#7502`). Given this,
+   cross-camera comparison (`engine/cross_camera_reconciler.py`'s
+   `build_cross_camera_pair_specs`) is now infrared-only by design — never
+   pairs a shared "color" identity, since a slave would never produce real
+   data for it. `engine/streams.py`'s `resolve_inter_cam_sync_value` looks
+   up the confirmed raw values from a new `settings.yaml`
+   `camera.inter_cam_sync` section (keyed by exact device name, only
+   "RealSense D455" populated so far - deliberately no entry for
+   unconfirmed models), resolved fresh at Start-time by `gui/main_window.py`
+   and threaded through `gui/pages/multi_camera_live_session_page.py` into
+   each camera's own `CameraSessionSpec`. A camera's own INTRA-camera test
+   (e.g. "IR vs RGB") is completely unaffected - only the CROSS-camera
+   comparison is IR-only. Deferred, per explicit operator decision: any
+   validation/warning for a slave camera whose own test involves RGB (that
+   combination is simply not prevented yet - up to the operator to avoid it
+   for now).
 7. ⬜ Dual-panel port generalization — last, and only with real-hardware
    diagnostic-sweep validation before trusting it, per the project's own
    established practice. Genuinely blocked without the physical rig.
 
 **What this means practically right now:** the app is fully runnable
 end-to-end for a multi-camera sync test (up to 3 cameras, software-side
-cross-camera HW TS Latency reconciliation, at-most-one-dual-panel-camera
-enforced, one organized run folder per multi-camera session with a
-combined cross-camera CSV/plot) — with genlock not yet engaged (each
-camera's sensors run on their own independent clock; cross-camera timing
-reflects that, not true hardware-synced capture). That's step 7's job, and
-it needs the physical rig to do safely.
+cross-camera HW TS Latency reconciliation restricted to infrared-only,
+real validated hardware genlock for confirmed camera models,
+at-most-one-dual-panel-camera enforced, one organized run folder per
+multi-camera session with a combined cross-camera CSV/plot). That's a
+complete, real, hardware-validated multi-camera sync test for IR-vs-IR
+cross-camera comparison. Step 7 (dual-panel generalization) and any
+RGB-slave-conflict validation remain open, explicitly deferred.
 
 ## Verification
 
