@@ -236,6 +236,11 @@ def test_matching_rows_produce_a_cross_camera_plot_point(qapp, tmp_path):
     page.set_cameras(object(), _two_cameras(tmp_path))
     page.start_all_sessions()
 
+    # First pair is the reconciler's own calibration pair (see
+    # engine.cross_camera_reconciler.CrossCameraReconciler's docstring -
+    # genlock stabilizes phase/rate between two devices, not their absolute
+    # HW-timestamp epoch, so the first-ever match learns that constant
+    # offset rather than measuring anything yet) - always reports 0.0.
     fake_threads["SN1"].row_ready.emit({
         "pair_index": 1, "stream_a_ts_us": 1_000_000.0, "stream_b_ts_us": 1_000_000.0,
         "stream_a_frame_drop": False, "stream_b_frame_drop": False,
@@ -245,12 +250,23 @@ def test_matching_rows_produce_a_cross_camera_plot_point(qapp, tmp_path):
         "stream_a_frame_drop": False, "stream_b_frame_drop": False,
     })
 
+    # Second pair, after calibration (offset learned: 10) - reports the
+    # genuine residual (-5), not the raw absolute difference.
+    fake_threads["SN1"].row_ready.emit({
+        "pair_index": 2, "stream_a_ts_us": 1_100_000.0, "stream_b_ts_us": 1_100_000.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+    })
+    fake_threads["SN2"].row_ready.emit({
+        "pair_index": 2, "stream_a_ts_us": 1_100_015.0, "stream_b_ts_us": 1_100_015.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+    })
+
     # pair_index here is the reconciler's own synthetic counter (shared
     # across every configured pair, not tied to either camera's own
     # pair_index) - only the actual gap value is asserted on.
     series_key = page._cross_pair_series_keys[("cam2", "infrared1")]
     _, ys = page.cross_plot.get_series_data(series_key)
-    assert ys == [-10.0]
+    assert ys == [0.0, -5.0]
 
 
 def test_all_sessions_finished_reenables_start(qapp, tmp_path):

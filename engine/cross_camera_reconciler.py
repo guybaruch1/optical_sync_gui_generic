@@ -106,13 +106,15 @@ class _PendingBuffer:
             self._items.pop(0)
 
     def pop_nearest(self, ts_us, max_gap_us):
-        """Removes and returns the buffered row nearest ts_us, if within
-        max_gap_us - or None, leaving the buffer untouched, if the nearest
-        candidate is still too far away (or the buffer is empty). Explicit
-        exclusion rather than a forced/misleading match, matching this
-        project's established convention (outlier thresholds, frame-drop
-        flags, warmup exclusion) of never silently connecting unrelated
-        data."""
+        """Removes and returns (matched_ts_us, row) for the buffered entry
+        nearest ts_us, if within max_gap_us - or None, leaving the buffer
+        untouched, if the nearest candidate is still too far away (or the
+        buffer is empty). Explicit exclusion rather than a forced/misleading
+        match, matching this project's established convention (outlier
+        thresholds, frame-drop flags, warmup exclusion) of never silently
+        connecting unrelated data. Returns the matched ts_us too (not just
+        the row) so CrossCameraReconciler can learn a pair's constant
+        calibration offset from it - see that class's own docstring."""
         if not self._items:
             return None
         best_index = min(range(len(self._items)), key=lambda i: abs(self._items[i][0] - ts_us))
@@ -120,14 +122,48 @@ class _PendingBuffer:
         if abs(best_ts - ts_us) > max_gap_us:
             return None
         del self._items[best_index]
-        return best_row
+        return best_ts, best_row
 
 
 class CrossCameraReconciler:
     """Called with every camera's row_ready row, from every configured
     camera (master and slaves alike) - buffering is symmetric, since the
     two AcquisitionLoops run on independent threads at independent
-    cadences, either side's row can legitimately arrive first."""
+    cadences, either side's row can legitimately arrive first.
+
+    Real-hardware finding (this project's own multi-camera genlock
+    investigation - see tools/genlock_diag/diag_genlock_quality_test.py):
+    genlock stabilizes the PHASE/RATE between two devices' independent HW
+    clocks (~10us jitter once genuinely locked) but does NOT align their
+    absolute starting epochs - each device's own frame_timestamp counter
+    resets near zero at its own pipeline.start() call, so two genuinely-
+    genlocked devices' raw timestamps still differ by an arbitrary, but
+    perfectly STABLE, constant offset (measured on real hardware: anywhere
+    from ~2.6s to ~13.3s across different runs, varying with how long each
+    pipeline actually took to start relative to the other). A fixed
+    max_match_gap_us (default 50ms) could never bridge that on its own -
+    the true corresponding pair is always orders of magnitude further away
+    than any window small enough to also reject genuinely wrong pairs.
+
+    So each pair CALIBRATES this constant offset once, from whichever
+    correspondence it can establish first (an unbounded nearest-match - no
+    window size could safely assume the offset's scale ahead of time), then
+    matches and reports every later row relative to that learned baseline
+    with the normal tight window. The first matched pair for a given
+    identity IS the calibration - it always reports pairing_gap_us == 0.0
+    by construction (it defines the baseline, it doesn't measure anything
+    yet); every pair after that reports the genuine residual (how much the
+    two devices' clocks have diverged since calibration), which is what
+    this metric actually means. Without this correction, PairingGapMetric's
+    own unmodified outlier-exclusion (built for INTRA-camera sub-millisecond
+    gaps) would flag every cross-camera row as an outlier anyway, given the
+    raw multi-second difference - so this isn't just a matching fix, it's
+    required for the metric to report anything meaningful at all.
+
+    Calibrated once per reconciler lifetime (i.e. once per Live Session
+    run), not periodically re-verified - real data showed the offset stays
+    effectively perfectly stable for a full 20s recording once established;
+    add recalibration later only if real hardware ever shows drift."""
 
     def __init__(self, pair_specs, buffer_seconds=1.0, max_match_gap_us=50_000.0, fps_hint=30.0):
         self._pair_specs = pair_specs
@@ -143,6 +179,10 @@ class CrossCameraReconciler:
         self._master_buffers = [_PendingBuffer(buffer_len) for _ in pair_specs]
         self._slave_buffers = [_PendingBuffer(buffer_len) for _ in pair_specs]
 
+        # Per-spec learned calibration offset (slave_ts - master_ts at the
+        # moment of calibration) - None until that spec's first match.
+        self._offset_us = [None] * len(pair_specs)
+
         self._specs_by_camera = {}
         for index, spec in enumerate(pair_specs):
             self._specs_by_camera.setdefault(spec.master_camera_id, []).append((index, spec, "master"))
@@ -156,35 +196,65 @@ class CrossCameraReconciler:
                     row, ts_role=spec.master_row_role,
                     own_buffer=self._master_buffers[index],
                     other_buffer=self._slave_buffers[index],
-                    build=lambda match: self._build_cross_row(spec, row, match),
+                    index=index, is_master_side=True,
+                    build=lambda match, offset_us: self._build_cross_row(spec, row, match, offset_us),
                 )
             else:
                 cross_row = self._ingest_side(
                     row, ts_role=spec.slave_row_role,
                     own_buffer=self._slave_buffers[index],
                     other_buffer=self._master_buffers[index],
-                    build=lambda match: self._build_cross_row(spec, match, row),
+                    index=index, is_master_side=False,
+                    build=lambda match, offset_us: self._build_cross_row(spec, match, row, offset_us),
                 )
             if cross_row is not None:
                 cross_rows.append(cross_row)
         return cross_rows
 
-    def _ingest_side(self, row, ts_role, own_buffer, other_buffer, build):
+    def _ingest_side(self, row, ts_role, own_buffer, other_buffer, index, is_master_side, build):
         ts_us = row.get(f"{ts_role}_ts_us")
         if ts_us is None:
             return None
-        match = other_buffer.pop_nearest(ts_us, self._max_match_gap_us)
-        if match is not None:
-            return build(match)
-        own_buffer.push(ts_us, row)
-        return None
 
-    def _build_cross_row(self, spec, master_row, slave_row):
+        offset_us = self._offset_us[index]
+        if offset_us is None:
+            # Not yet calibrated for this pair - accept the CLOSEST
+            # available candidate regardless of distance (see class
+            # docstring: the real constant offset can be arbitrarily large,
+            # so no window size is safe to assume ahead of time). This
+            # match establishes the pair's baseline; every later match uses
+            # the normal tight window instead.
+            match = other_buffer.pop_nearest(ts_us, float("inf"))
+            if match is None:
+                own_buffer.push(ts_us, row)
+                return None
+            matched_ts, matched_row = match
+            offset_us = (ts_us - matched_ts) if not is_master_side else (matched_ts - ts_us)
+            self._offset_us[index] = offset_us
+            return build(matched_row, offset_us)
+
+        # Already calibrated - shift the query into the OTHER side's own
+        # raw timestamp space before searching, using the real tight window.
+        query_ts = (ts_us + offset_us) if is_master_side else (ts_us - offset_us)
+        match = other_buffer.pop_nearest(query_ts, self._max_match_gap_us)
+        if match is None:
+            own_buffer.push(ts_us, row)
+            return None
+        _, matched_row = match
+        return build(matched_row, offset_us)
+
+    def _build_cross_row(self, spec, master_row, slave_row, offset_us):
         self._pair_counter += 1
+        master_ts_us = master_row[f"{spec.master_row_role}_ts_us"]
+        slave_ts_us = slave_row[f"{spec.slave_row_role}_ts_us"]
         sample = FramePairSample(
             pair_index=self._pair_counter,
-            stream_a_ts_us=master_row[f"{spec.master_row_role}_ts_us"],
-            stream_b_ts_us=slave_row[f"{spec.slave_row_role}_ts_us"],
+            # Offset-corrected: removes the arbitrary, per-pipeline-session
+            # constant learned at calibration, so PairingGapMetric's own
+            # unmodified gap = stream_a_ts_us - stream_b_ts_us math reports
+            # the genuine residual latency - see class docstring.
+            stream_a_ts_us=master_ts_us,
+            stream_b_ts_us=slave_ts_us - offset_us,
             stream_a_frame_drop=master_row.get(f"{spec.master_row_role}_frame_drop", False),
             stream_b_frame_drop=slave_row.get(f"{spec.slave_row_role}_frame_drop", False),
         )
@@ -196,8 +266,8 @@ class CrossCameraReconciler:
             "stream_identity": spec.stream_identity,
             "master_pair_index": master_row.get("pair_index"),
             "slave_pair_index": slave_row.get("pair_index"),
-            "master_ts_us": sample.stream_a_ts_us,
-            "slave_ts_us": sample.stream_b_ts_us,
+            "master_ts_us": master_ts_us,  # RAW, unadjusted - for CSV/debugging transparency
+            "slave_ts_us": slave_ts_us,    # RAW, unadjusted
             result.name: result.value,
             f"{result.name}_excluded": result.excluded,
             f"{result.name}_exclude_reason": result.exclude_reason,

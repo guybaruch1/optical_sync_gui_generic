@@ -377,13 +377,20 @@ def test_matching_rows_from_master_and_slave_emit_cross_pair_ready():
     cross_rows = []
     controller.cross_pair_ready.connect(cross_rows.append)
 
+    # First pair is the reconciler's own calibration pair (see
+    # engine.cross_camera_reconciler.CrossCameraReconciler's docstring) -
+    # always reports 0.0. Second pair, after calibration (offset learned:
+    # 10), reports the genuine residual (-5).
     fake_threads["s1"].row_ready.emit({"pair_index": 1, "stream_a_ts_us": 1_000_000.0, "stream_a_frame_drop": False})
     fake_threads["s2"].row_ready.emit({"pair_index": 2, "stream_a_ts_us": 1_000_010.0, "stream_a_frame_drop": False})
+    fake_threads["s1"].row_ready.emit({"pair_index": 3, "stream_a_ts_us": 1_100_000.0, "stream_a_frame_drop": False})
+    fake_threads["s2"].row_ready.emit({"pair_index": 4, "stream_a_ts_us": 1_100_015.0, "stream_a_frame_drop": False})
 
-    assert len(cross_rows) == 1
+    assert len(cross_rows) == 2
     assert cross_rows[0]["master_camera_id"] == "cam1"
     assert cross_rows[0]["slave_camera_id"] == "cam2"
-    assert cross_rows[0]["pairing_gap_us"] == -10.0
+    assert cross_rows[0]["pairing_gap_us"] == 0.0
+    assert cross_rows[1]["pairing_gap_us"] == -5.0
 
 
 def test_single_camera_run_never_emits_cross_camera_signals():
@@ -406,12 +413,17 @@ def test_cross_stats_ready_emits_latest_cross_rows_on_any_camera_stats_tick():
     cross_stats = []
     controller.cross_stats_ready.connect(cross_stats.append)
 
+    # First pair calibrates (reports 0.0); second pair reports the genuine
+    # residual (-5) once calibrated - see engine.cross_camera_reconciler.
+    # CrossCameraReconciler's docstring.
     fake_threads["s1"].row_ready.emit({"pair_index": 1, "stream_a_ts_us": 1_000_000.0, "stream_a_frame_drop": False})
     fake_threads["s2"].row_ready.emit({"pair_index": 2, "stream_a_ts_us": 1_000_010.0, "stream_a_frame_drop": False})
+    fake_threads["s1"].row_ready.emit({"pair_index": 3, "stream_a_ts_us": 1_100_000.0, "stream_a_frame_drop": False})
+    fake_threads["s2"].row_ready.emit({"pair_index": 4, "stream_a_ts_us": 1_100_015.0, "stream_a_frame_drop": False})
     fake_threads["s1"].stats_ready.emit({"pair_index": 1})
 
     assert len(cross_stats) == 1
-    assert cross_stats[0][("cam2", "infrared1")]["pairing_gap_us"] == -10.0
+    assert cross_stats[0][("cam2", "infrared1")]["pairing_gap_us"] == -5.0
 
 
 def test_cross_stats_ready_never_fires_before_any_cross_row_exists():
