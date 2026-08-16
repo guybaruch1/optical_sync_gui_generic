@@ -54,12 +54,15 @@ def build_cross_camera_pair_specs(camera_specs, outlier_threshold_us):
     error, not a silent partial run" convention (see e.g. main_window.py's
     settings.yaml validation).
 
-    Only ever pairs INFRARED stream identities, never "color" - confirmed
-    via real-hardware testing that a genlock slave's color/RGB sensor
-    cannot produce a single frame while genlocked, so a cross-camera pair
-    built from a shared "color" identity would never receive real slave
-    data. A camera's own intra-camera test (e.g. "IR vs RGB") is completely
-    unaffected by this - only the CROSS-camera comparison is IR-only."""
+    Pairs ANY shared stream identity, infrared or color - a genlock slave's
+    color/RGB stream genuinely hardware-synchronizes fine as long as its
+    resolution stays within the confirmed-safe ceiling for that camera
+    model (a real USB-bandwidth limit, not a hardware/firmware block - see
+    tools/genlock_diag/diag_genlock_quality_test.py). Enforcing that
+    resolution ceiling is gui/main_window.py's job
+    (_slave_genlock_color_resolution_conflicts), not this function's -
+    this module only reconciles whatever streams the operator configured,
+    it doesn't second-guess whether they're safe."""
     masters = [spec for spec in camera_specs if spec.is_master]
     if len(masters) != 1:
         raise ValueError(
@@ -72,18 +75,6 @@ def build_cross_camera_pair_specs(camera_specs, outlier_threshold_us):
         if slave is master:
             continue
         shared_identities = set(master.stream_identities.values()) & set(slave.stream_identities.values())
-        # Infrared-only, never "color" (or anything else) - confirmed via
-        # real-hardware testing (this project's own multi-camera genlock
-        # investigation) that a genlock SLAVE's color/RGB sensor cannot
-        # produce a single frame while its Stereo Module is in any
-        # externally-triggered sync mode. A cross-camera pair built from a
-        # shared "color" identity would therefore never receive real slave
-        # data - it would just be a permanently-empty or garbage series, not
-        # a meaningful metric. engine.streams.stream_slug guarantees every
-        # identity string starts with either "infrared" or "color" (the
-        # only two rs.stream members ever surfaced upstream), so this
-        # prefix check is reliable, not a heuristic.
-        shared_identities = {identity for identity in shared_identities if identity.startswith("infrared")}
         for identity in sorted(shared_identities):
             master_row_role = next(role for role, ident in master.stream_identities.items() if ident == identity)
             slave_row_role = next(role for role, ident in slave.stream_identities.items() if ident == identity)

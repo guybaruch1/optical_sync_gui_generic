@@ -101,13 +101,8 @@ def test_set_cameras_with_two_cameras_builds_one_cross_series_per_shared_identit
 
     page.set_cameras(object(), _two_cameras(tmp_path))
 
-    # infrared1 and color are both shared between both cameras' identical
-    # picks, but cross-camera pairing is infrared-only (confirmed via
-    # real-hardware testing that a genlock slave's color sensor can't
-    # produce frames at all - see engine.cross_camera_reconciler.
-    # build_cross_camera_pair_specs) - so only 1 series, not 2.
-    assert len(page._cross_pair_series_keys) == 1
-    assert ("cam2", "infrared1") in page._cross_pair_series_keys
+    # infrared1 and color are shared between both cameras' identical picks.
+    assert len(page._cross_pair_series_keys) == 2
 
 
 def test_set_cameras_with_one_camera_has_no_cross_series(qapp, tmp_path):
