@@ -43,8 +43,9 @@ pipelines to also include color, once IR-only looks good.
 Run from the repo root:
     python tools/genlock_diag/diag_genlock_quality_test.py
     python tools/genlock_diag/diag_genlock_quality_test.py --serial-master 123 --serial-slave 456
-    python tools/genlock_diag/diag_genlock_quality_test.py --slave-value 4 --duration-s 30
+    python tools/genlock_diag/diag_genlock_quality_test.py --duration-s 30
     python tools/genlock_diag/diag_genlock_quality_test.py --with-color
+    python tools/genlock_diag/diag_genlock_quality_test.py --with-color --color-width 1280 --color-height 720
 """
 
 import argparse
@@ -62,13 +63,18 @@ from engine.streams import (
     set_inter_cam_sync_mode, INTER_CAM_SYNC_DEFAULT, INTER_CAM_SYNC_MASTER,
 )
 
-# The only value confirmed (via tools/genlock_diag/diag_sweep_slave_value_test.py,
-# on this exact rig) to let BOTH IR and color stream at all as slave - the
-# publicly documented value 2 fully blocked color (and, combined with IR in
-# one pipeline, blocked IR too); this is a real-hardware finding, not a
-# public-docs assumption. Still needs the quality check this script runs -
-# "frames flow" was never proof of "frames are genuinely synchronized".
-DEFAULT_SLAVE_VALUE = 4
+# Confirmed via real-hardware testing (this project's own multi-camera
+# genlock investigation) to be the correct, Intel-supported slave value -
+# matching frame counts and a tight, physically-plausible ~10us-scale
+# offset over 20s. An earlier detour through value 4 ("Genlock" mode)
+# turned out to be a withdrawn, unsupported experimental Intel feature with
+# a known, unexplained frame-rate-halving bug - do not use it. Value 2's
+# own EARLIER apparent "blocks everything" result (tools/genlock_diag/
+# diag_sweep_slave_value_test.py) turned out to be a bandwidth artifact of
+# testing color at full 1280x720@30 (~83MB/s), not a genuine block of
+# value 2 itself - see diag_slave_color_bandwidth_sweep.py.
+DEFAULT_SLAVE_VALUE = 2
+DEFAULT_COLOR_WIDTH, DEFAULT_COLOR_HEIGHT, DEFAULT_COLOR_FPS = 640, 480, 30
 
 
 def _resolve_two_serials(serial_master, serial_slave):
@@ -87,16 +93,21 @@ def _resolve_two_serials(serial_master, serial_slave):
     return devices[0].serial, devices[1].serial
 
 
-def _build_config(serial, with_color):
+def _build_config(serial, with_color, color_width, color_height, color_fps):
     config = rs.config()
     config.enable_device(serial)
     config.enable_stream(rs.stream.infrared, 1, 1280, 720, rs.format.y8, 30)
     if with_color:
-        config.enable_stream(rs.stream.color, 0, 1280, 720, rs.format.bgr8, 30)
+        # Real-hardware finding (tools/genlock_diag/diag_slave_color_
+        # bandwidth_sweep.py): full 1280x720@30 color fails on a genlock
+        # SLAVE (bandwidth ceiling, not a hard trigger-domain block) - 848x480
+        # and below works. Defaults here match that confirmed-working point,
+        # not the full resolution used earlier in this investigation.
+        config.enable_stream(rs.stream.color, 0, color_width, color_height, rs.format.bgr8, color_fps)
     return config
 
 
-def _collect(serial, with_color, stop_event, samples_out, samples_lock, errors_out):
+def _collect(serial, with_color, color_width, color_height, color_fps, stop_event, samples_out, samples_lock, errors_out):
     """Appends (wall_time, ir_ts_us, color_ts_us_or_None) per frameset. Note:
     wall_time is ONLY used here to discard the warmup window and to report
     achieved fps - it is NOT used to match frames across devices (that's the
@@ -105,7 +116,7 @@ def _collect(serial, with_color, stop_event, samples_out, samples_lock, errors_o
     started = False
     metadata = rs.frame_metadata_value.frame_timestamp
     try:
-        pipeline.start(_build_config(serial, with_color))
+        pipeline.start(_build_config(serial, with_color, color_width, color_height, color_fps))
         started = True
         while not stop_event.is_set():
             frameset = pipeline.wait_for_frames(5000)
@@ -124,17 +135,21 @@ def _collect(serial, with_color, stop_event, samples_out, samples_lock, errors_o
             pipeline.stop()
 
 
-def measure(serial_master, serial_slave, duration_s, warmup_s, with_color, start_stagger_s):
+def measure(serial_master, serial_slave, duration_s, warmup_s, with_color, color_width, color_height, color_fps, start_stagger_s):
     stop_master, stop_slave = threading.Event(), threading.Event()
     samples_master, samples_slave = [], []
     lock_master, lock_slave = threading.Lock(), threading.Lock()
     errors_master, errors_slave = [], []
 
     thread_master = threading.Thread(
-        target=_collect, args=(serial_master, with_color, stop_master, samples_master, lock_master, errors_master),
+        target=_collect,
+        args=(serial_master, with_color, color_width, color_height, color_fps,
+              stop_master, samples_master, lock_master, errors_master),
     )
     thread_slave = threading.Thread(
-        target=_collect, args=(serial_slave, with_color, stop_slave, samples_slave, lock_slave, errors_slave),
+        target=_collect,
+        args=(serial_slave, with_color, color_width, color_height, color_fps,
+              stop_slave, samples_slave, lock_slave, errors_slave),
     )
     thread_master.start()
     if start_stagger_s > 0:
@@ -223,10 +238,12 @@ def report_lockstep_offset(samples_master, samples_slave, ts_index, label, num_s
         print("    -> NOISY but not clearly drifting - inconclusive on this window alone")
 
 
-def run_pass(label, serial_master, serial_slave, duration_s, warmup_s, with_color, start_stagger_s, num_slices):
+def run_pass(label, serial_master, serial_slave, duration_s, warmup_s, with_color,
+             color_width, color_height, color_fps, start_stagger_s, num_slices):
     print("\n=== {} ({:.1f}s, after {:.1f}s warmup) ===".format(label, duration_s, warmup_s))
     samples_master, samples_slave = measure(
-        serial_master, serial_slave, duration_s, warmup_s, with_color, start_stagger_s,
+        serial_master, serial_slave, duration_s, warmup_s, with_color,
+        color_width, color_height, color_fps, start_stagger_s,
     )
     parity_ok = report_frame_count_parity(samples_master, samples_slave, duration_s)
     report_own_interval_stats("Master IR", samples_master, 1)
@@ -251,6 +268,12 @@ def main():
     parser.add_argument("--slices", type=int, default=8)
     parser.add_argument("--with-color", action="store_true", default=False,
                          help="Also stream color on each device, in the same pipeline as IR.")
+    parser.add_argument("--color-width", type=int, default=DEFAULT_COLOR_WIDTH,
+                         help="Color stream width when --with-color is set. Full 1280x720 fails on a "
+                              "genlock slave (bandwidth ceiling, not a hard block) - default matches the "
+                              "confirmed-working point from diag_slave_color_bandwidth_sweep.py.")
+    parser.add_argument("--color-height", type=int, default=DEFAULT_COLOR_HEIGHT)
+    parser.add_argument("--color-fps", type=int, default=DEFAULT_COLOR_FPS)
     args = parser.parse_args()
 
     serial_master, serial_slave = _resolve_two_serials(args.serial_master, args.serial_slave)
@@ -262,7 +285,8 @@ def main():
 
     unsynced_parity = run_pass(
         "UNSYNCED baseline", serial_master, serial_slave,
-        args.duration_s, args.warmup_s, args.with_color, args.start_stagger_s, args.slices,
+        args.duration_s, args.warmup_s, args.with_color,
+        args.color_width, args.color_height, args.color_fps, args.start_stagger_s, args.slices,
     )
 
     print("\nApplying genlock roles: master={} (device master) / slave={} (device slave)".format(
@@ -280,7 +304,8 @@ def main():
     try:
         synced_parity = run_pass(
             "SYNCED", serial_master, serial_slave,
-            args.duration_s, args.warmup_s, args.with_color, args.start_stagger_s, args.slices,
+            args.duration_s, args.warmup_s, args.with_color,
+            args.color_width, args.color_height, args.color_fps, args.start_stagger_s, args.slices,
         )
     finally:
         set_inter_cam_sync_mode(device_master, INTER_CAM_SYNC_DEFAULT)
