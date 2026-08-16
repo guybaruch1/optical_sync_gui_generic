@@ -374,10 +374,9 @@ Explicitly unmodified (verified by tracing consumers in both design passes):
 ## Suggested implementation order
 
 **Status as of this writing: steps 1-6 implemented and committed on
-`worktree-multi-camera-sync` (pushed to origin), plus genlock wiring (the
-v1 simplification step 5 originally deferred) now landed on top - 536 tests
-pass (424 baseline + 112 new). Step 7 remains, genuinely blocked without
-the physical rig.**
+`worktree-multi-camera-sync` (pushed to origin). 523 tests pass (424
+baseline + 99 new). Step 7 remains, genuinely blocked without the physical
+rig.**
 
 1. ✅ `set_inter_cam_sync_mode` + unit tests against a fake sensor. Writing
    these tests caught a wrong assumption in this plan's own original
@@ -401,10 +400,12 @@ the physical rig.**
    from `LiveSessionPage` (untouched, still fully covered by its own
    tests), `MultiCameraLiveSessionPage` (tabs + cross-camera panel) built
    and wired for real into the hub's "Start Multi-Camera Live Session".
-   Two v1 simplifications landed here, since superseded (see below):
-   (a) genlock role assignment was NOT attempted yet — every
-   `CameraSessionSpec.inter_cam_sync_value` was `None`; (b) each camera
-   still minted its own independent output folder rather than the nicer
+   Two v1 simplifications landed here, documented in that page's own
+   module docstring: (a) genlock role assignment is NOT attempted yet —
+   every `CameraSessionSpec.inter_cam_sync_value` is `None`, since picking
+   the correct raw value per camera generation needs real hardware to
+   validate (only the software-side reconciliation runs); (b) each camera
+   still mints its own independent output folder rather than the nicer
    shared-parent-plus-subfolders layout step 6 describes.
 6. ✅ Output file changes. `domain/run_output.py`'s `create_camera_subdir`
    + `domain/csv_export.py`'s `export_cross_camera_csv` +
@@ -417,23 +418,6 @@ the physical rig.**
    one shared run folder + one subfolder per camera end to end, plus a
    combined `cross_camera_sync.csv`/`cross_camera_sync_plot.png` written
    once every camera's session finishes.
-6.5. ✅ **Genlock wiring** (real hardware confirmed connected via the sync
-   cable between two D455s, per the operator - not yet confirmed to
-   actually genlock, see below). `engine/streams.py` gained
-   `resolve_inter_cam_sync_value(inter_cam_sync_settings, camera_name,
-   is_master)` — looks up the raw per-camera-model master/slave value from
-   a new `settings.yaml` `camera.inter_cam_sync` section (keyed by exact
-   device name, same convention as `camera.stream_options`), returning
-   `None` (skip genlock) for any camera model with no entry rather than
-   guessing. `gui/main_window.py`'s `_on_start_multi_camera_session_requested`
-   now resolves this fresh at Start-time (using whichever camera is
-   CURRENTLY master) and embeds it into each camera's own config dict as
-   `inter_cam_sync_value`; `gui/pages/multi_camera_live_session_page.py`'s
-   `start_all_sessions()` now reads `config.get("inter_cam_sync_value")`
-   instead of hardcoding `None`. `MultiCameraSessionController.start_all`'s
-   own role-assignment loop (built in step 3, previously dormant since
-   every value was `None`) now actually applies genlock roles to real
-   devices whenever a camera resolves to a non-`None` value.
 7. ⬜ Dual-panel port generalization — last, and only with real-hardware
    diagnostic-sweep validation before trusting it, per the project's own
    established practice. Genuinely blocked without the physical rig.
@@ -442,17 +426,10 @@ the physical rig.**
 end-to-end for a multi-camera sync test (up to 3 cameras, software-side
 cross-camera HW TS Latency reconciliation, at-most-one-dual-panel-camera
 enforced, one organized run folder per multi-camera session with a
-combined cross-camera CSV/plot), and genlock role assignment is now wired
-for camera models with a configured `camera.inter_cam_sync` entry (only
-"RealSense D455" so far, master=1/slave=2 - a D400-series guess consistent
-with the SDK's documented scheme, not yet confirmed on this project's own
-rig). **Still needs real-hardware validation** per this doc's own "Known
-risks" section above (items 1-3): does applying these values actually
-produce a shared clock between the two D455s (does cross-camera
-`pairing_gap_us` come out small and stable, not the ~5.1-minute offset
-measured before this fix), and does the assumed depth/stereo sensor
-actually carry the option on this hardware. That validation is the
-immediate next step, on the operator's real rig.
+combined cross-camera CSV/plot) — with genlock not yet engaged (each
+camera's sensors run on their own independent clock; cross-camera timing
+reflects that, not true hardware-synced capture). That's step 7's job, and
+it needs the physical rig to do safely.
 
 ## Verification
 

@@ -10,7 +10,6 @@ from engine.streams import (
     set_emitter_enabled, set_manual_exposure, stream_slug,
     parse_camera_tests_config, resolve_camera_tests,
     set_inter_cam_sync_mode, INTER_CAM_SYNC_MASTER, INTER_CAM_SYNC_SLAVE,
-    resolve_inter_cam_sync_value,
 )
 
 
@@ -648,40 +647,6 @@ def test_set_inter_cam_sync_mode_returns_false_when_no_sensor_supports_it():
     device = _FakeSensorDevice([FakeOptionSensor(supported_options=set())])
 
     assert set_inter_cam_sync_mode(device, INTER_CAM_SYNC_SLAVE) is False
-
-
-# --- resolve_inter_cam_sync_value: which RAW value a camera's master/slave
-# role maps to is a per-CAMERA-MODEL property (D400-series and D500-series
-# use different value schemes on the same rs.option.inter_cam_sync_mode -
-# see set_inter_cam_sync_mode's own docstring), so it's looked up from
-# settings.yaml's camera.inter_cam_sync section (keyed by exact device
-# name, same convention as camera.stream_options) rather than guessed in
-# code. A camera model with no entry safely skips genlock entirely (returns
-# None) rather than applying a possibly-wrong value for an unconfirmed
-# model/firmware - e.g. D500-series' own rs.d500_intercam_sync_mode enum
-# has no plain "slave" value at all, so blindly reusing D400's scheme
-# would silently misconfigure it. ---
-
-def test_resolve_inter_cam_sync_value_returns_master_value_for_the_master_camera():
-    settings = {"RealSense D455": {"master": 1, "slave": 2}}
-
-    assert resolve_inter_cam_sync_value(settings, "RealSense D455", is_master=True) == 1
-
-
-def test_resolve_inter_cam_sync_value_returns_slave_value_for_a_slave_camera():
-    settings = {"RealSense D455": {"master": 1, "slave": 2}}
-
-    assert resolve_inter_cam_sync_value(settings, "RealSense D455", is_master=False) == 2
-
-
-def test_resolve_inter_cam_sync_value_returns_none_for_an_unconfigured_camera_model():
-    settings = {"RealSense D455": {"master": 1, "slave": 2}}
-
-    assert resolve_inter_cam_sync_value(settings, "RealSense D585 Prototype", is_master=True) is None
-
-
-def test_resolve_inter_cam_sync_value_returns_none_when_section_is_empty():
-    assert resolve_inter_cam_sync_value({}, "RealSense D455", is_master=True) is None
 
 
 def test_set_manual_exposure_sets_exposure_and_disables_auto():

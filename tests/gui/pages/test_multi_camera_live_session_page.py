@@ -127,41 +127,6 @@ def test_start_all_sessions_locks_toolbar_and_starts_every_thread(qapp, tmp_path
     assert fake_threads["SN2"].started
 
 
-# --- Genlock: each camera's OWN config-embedded inter_cam_sync_value
-# (resolved by gui/main_window.py at Start-time, keyed by camera model/role
-# via engine.streams.resolve_inter_cam_sync_value) rides through unchanged
-# into that camera's own CameraSessionSpec - this page never re-derives or
-# guesses it, only reads what MainWindow already decided. ---
-
-def test_start_all_sessions_carries_each_cameras_own_inter_cam_sync_value_into_its_spec(qapp, tmp_path):
-    page, _ = _page_with_fake_threads()
-    cameras = _two_cameras(tmp_path)
-    cameras[0]["config"]["inter_cam_sync_value"] = 1  # master
-    cameras[1]["config"]["inter_cam_sync_value"] = 2  # slave
-    page.set_cameras(object(), cameras)
-
-    page.start_all_sessions()
-
-    specs_by_camera_id = {spec.camera_id: spec for spec in page._controller._camera_specs}
-    assert specs_by_camera_id["cam1"].inter_cam_sync_value == 1
-    assert specs_by_camera_id["cam2"].inter_cam_sync_value == 2
-
-
-def test_start_all_sessions_defaults_inter_cam_sync_value_to_none_when_config_omits_it(qapp, tmp_path):
-    # _camera_config() (this test file's own helper) doesn't set
-    # inter_cam_sync_value at all - matches a real camera model with no
-    # settings.yaml camera.inter_cam_sync entry (MainWindow leaves it None
-    # in that case too - see resolve_inter_cam_sync_value's own docstring).
-    page, _ = _page_with_fake_threads()
-    page.set_cameras(object(), _two_cameras(tmp_path))
-
-    page.start_all_sessions()
-
-    specs_by_camera_id = {spec.camera_id: spec for spec in page._controller._camera_specs}
-    assert specs_by_camera_id["cam1"].inter_cam_sync_value is None
-    assert specs_by_camera_id["cam2"].inter_cam_sync_value is None
-
-
 # --- Output layout: ONE shared run folder, one subfolder per camera, plus
 # a combined cross_camera_sync.csv/plot written once the whole run finishes -
 # see domain/run_output.py's create_camera_subdir and domain/csv_export.py's

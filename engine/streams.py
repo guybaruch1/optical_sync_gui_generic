@@ -574,25 +574,6 @@ def set_inter_cam_sync_mode(device, mode):
     return False
 
 
-def resolve_inter_cam_sync_value(inter_cam_sync_settings, camera_name, is_master):
-    """Looks up the raw inter_cam_sync_mode value for THIS camera's role
-    (master/slave) from settings.yaml's camera.inter_cam_sync section
-    (keyed by exact device name, same convention as camera.stream_options) -
-    NOT hardcoded here, because which raw value means what is a per-CAMERA-
-    MODEL property (see set_inter_cam_sync_mode's own docstring: D400-series
-    and D500-series use different value schemes on the same option - D500's
-    own rs.d500_intercam_sync_mode enum doesn't even have a plain "slave"
-    value, so blindly reusing D400's scheme for an unconfirmed model would
-    silently misconfigure it). Returns None - skip genlock entirely for
-    this camera - if camera_name has no entry, a safe default rather than
-    guessing a possibly-wrong value for a model/firmware nobody has
-    confirmed the right values for yet."""
-    entry = inter_cam_sync_settings.get(camera_name)
-    if entry is None:
-        return None
-    return entry["master"] if is_master else entry["slave"]
-
-
 def set_manual_exposure(sensor, exposure):
     """Manual mode touches EXPOSURE ONLY - gain is deliberately never read
     or written here. See enable_auto_exposure's docstring for why: an
