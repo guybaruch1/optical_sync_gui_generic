@@ -172,12 +172,43 @@ def test_build_specs_one_master_two_slaves_shared_identities():
 
     specs = build_cross_camera_pair_specs([master, slave1, slave2], outlier_threshold_us=100_000)
 
-    assert len(specs) == 4  # 2 slaves x 2 shared identities
+    # 2 slaves x 1 shared identity each - "color" is shared too but never
+    # produces a pair (see test_build_specs_never_builds_a_pair_for_a_color_
+    # identity_even_if_shared below for why: confirmed via real-hardware
+    # testing that a genlock slave's color sensor cannot produce frames at
+    # all, so a cross-camera color pair would never receive real slave data).
+    assert len(specs) == 2
     pairs = {(s.slave_camera_id, s.stream_identity) for s in specs}
-    assert pairs == {("cam2", "infrared1"), ("cam2", "color"), ("cam3", "infrared1"), ("cam3", "color")}
+    assert pairs == {("cam2", "infrared1"), ("cam3", "infrared1")}
     for s in specs:
         assert s.master_camera_id == "cam1"
-        assert s.master_row_role == "stream_a" if s.stream_identity == "infrared1" else s.master_row_role == "stream_b"
+        assert s.master_row_role == "stream_a"
+
+
+def test_build_specs_never_builds_a_pair_for_a_color_identity_even_if_shared():
+    master = _CamSpec("cam1", is_master=True,
+                       stream_identities={"stream_a": "infrared1", "stream_b": "color"})
+    slave = _CamSpec("cam2", is_master=False,
+                      stream_identities={"stream_a": "infrared1", "stream_b": "color"})
+
+    specs = build_cross_camera_pair_specs([master, slave], outlier_threshold_us=100_000)
+
+    assert all(s.stream_identity != "color" for s in specs)
+    assert all(s.stream_identity.startswith("infrared") for s in specs)
+
+
+def test_build_specs_pairs_every_shared_infrared_identity_not_just_one():
+    # Proves the fix filters by prefix, not by hardcoding a single literal -
+    # a camera with two IR sensors sharing both with the master still gets
+    # both paired.
+    master = _CamSpec("cam1", is_master=True,
+                       stream_identities={"stream_a": "infrared1", "stream_b": "infrared2"})
+    slave = _CamSpec("cam2", is_master=False,
+                      stream_identities={"stream_a": "infrared1", "stream_b": "infrared2"})
+
+    specs = build_cross_camera_pair_specs([master, slave], outlier_threshold_us=100_000)
+
+    assert {s.stream_identity for s in specs} == {"infrared1", "infrared2"}
 
 
 def test_build_specs_skips_identity_the_slave_does_not_have():
@@ -231,10 +262,13 @@ def test_build_specs_raises_when_more_than_one_master_designated():
 
 
 def test_build_specs_gives_each_pair_its_own_pairing_gap_metric_instance():
+    # Two shared INFRARED identities (not infrared+color - color never
+    # produces a pair at all, see the tests above) so this still exercises
+    # 2 real specs.
     master = _CamSpec("cam1", is_master=True,
-                       stream_identities={"stream_a": "infrared1", "stream_b": "color"})
+                       stream_identities={"stream_a": "infrared1", "stream_b": "infrared2"})
     slave = _CamSpec("cam2", is_master=False,
-                      stream_identities={"stream_a": "infrared1", "stream_b": "color"})
+                      stream_identities={"stream_a": "infrared1", "stream_b": "infrared2"})
 
     specs = build_cross_camera_pair_specs([master, slave], outlier_threshold_us=100_000)
 
