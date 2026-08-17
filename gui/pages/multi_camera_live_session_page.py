@@ -188,11 +188,12 @@ class MultiCameraLiveSessionPage(QWidget):
         self._rebuild_cross_camera_section(cameras)
         self.tabs.addTab(self._cross_tab_widget, "Cross-Camera Sync")
 
+        roles = _camera_roles(cameras)
         for camera in cameras:
             panel = CameraLiveSessionPanel(camera["camera_id"])
             config = camera["config"]
             panel.set_camera_labels(camera["label"], config["stream_a_label"], config["stream_b_label"])
-            tab_label = camera["label"] + (" [MASTER]" if camera["is_master"] else "")
+            tab_label = "{} [{}]".format(camera["label"], roles[camera["camera_id"]]["tag"])
             self.tabs.addTab(panel, tab_label)
             self._panels[camera["camera_id"]] = panel
 

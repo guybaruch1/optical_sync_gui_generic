@@ -126,6 +126,16 @@ def test_set_cameras_builds_one_tab_per_camera(qapp, tmp_path):
     assert "cam2" in page._panels
 
 
+def test_set_cameras_tags_every_tab_with_its_role(qapp, tmp_path):
+    page, _ = _page_with_fake_threads()
+
+    page.set_cameras(object(), _two_cameras(tmp_path))
+
+    # Tab 0 is Cross-Camera Sync, tab 1 is cam1 (master), tab 2 is cam2 (slave 1).
+    assert page.tabs.tabText(1) == "D455 A [MASTER]"
+    assert page.tabs.tabText(2) == "D455 B [SLAVE 1]"
+
+
 def test_set_cameras_with_two_cameras_builds_one_cross_series_per_shared_identity(qapp, tmp_path):
     page, _ = _page_with_fake_threads()
 
