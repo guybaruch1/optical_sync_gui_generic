@@ -80,11 +80,13 @@ def test_figure_width_caps_for_very_long_runs():
 # plot, sourced from the exact rows engine.cross_camera_reconciler produces. ---
 
 def _cross_row(pair_index, slave_camera_id="cam2", stream_identity="infrared1",
-                pairing_gap_us=-10.0, excluded=False):
+                pairing_gap_us=-10.0, excluded=False,
+                position_gap_ms=1.0, position_gap_ms_excluded=False):
     return {
         "pair_index": pair_index, "master_camera_id": "cam1", "slave_camera_id": slave_camera_id,
         "stream_identity": stream_identity,
         "pairing_gap_us": pairing_gap_us, "pairing_gap_us_excluded": excluded,
+        "position_gap_ms": position_gap_ms, "position_gap_ms_excluded": position_gap_ms_excluded,
     }
 
 
@@ -129,6 +131,34 @@ def test_export_cross_camera_plot_nans_out_excluded_values():
     from domain.plot_export import _build_cross_camera_figure
     fig = _build_cross_camera_figure(rows)
     line = fig.axes[0].get_lines()[0]
+
+    assert math.isnan(line.get_ydata()[0])
+    plt.close(fig)
+
+
+def test_export_cross_camera_plot_draws_position_gap_on_second_axis():
+    rows = [
+        _cross_row(0, slave_camera_id="cam2", stream_identity="infrared1"),
+        _cross_row(1, slave_camera_id="cam2", stream_identity="infrared1"),
+        _cross_row(0, slave_camera_id="cam3", stream_identity="color"),
+    ]
+
+    import matplotlib.pyplot as plt
+    from domain.plot_export import _build_cross_camera_figure
+    fig = _build_cross_camera_figure(rows)
+    lines = fig.axes[1].get_lines()
+
+    assert len(lines) == 2
+    plt.close(fig)
+
+
+def test_export_cross_camera_plot_nans_out_excluded_position_gap_values():
+    rows = [_cross_row(0, position_gap_ms=99.0, position_gap_ms_excluded=True)]
+
+    import matplotlib.pyplot as plt
+    from domain.plot_export import _build_cross_camera_figure
+    fig = _build_cross_camera_figure(rows)
+    line = fig.axes[1].get_lines()[0]
 
     assert math.isnan(line.get_ydata()[0])
     plt.close(fig)

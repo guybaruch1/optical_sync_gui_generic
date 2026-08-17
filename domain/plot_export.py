@@ -135,33 +135,48 @@ def _to_plot_value(value, excluded):
 
 
 def _build_cross_camera_figure(cross_rows):
-    """Same NaN-for-excluded convention as _build_figure above, but one line
-    per (slave_camera_id, stream_identity) pair rather than a fixed 3-axis
-    layout - engine.cross_camera_reconciler's own pair_index is a synthetic,
-    shared-across-all-pairs counter (not comparable to any one camera's own
-    pair_index), so it's used here only as this plot's own x-axis, not
-    cross-referenced against per-camera CSVs. Split out from
-    export_cross_camera_plot so tests can inspect the plotted line data
-    directly, same reason _build_figure is split from export_session_plot."""
+    """Two stacked subplots (sharing one x-axis, "Pair index") - HW TS
+    Latency and Optical Sync each get their own y-axis, same "wildly
+    different scales" reasoning _build_figure's own 3-axis split already
+    uses for the intra-camera plot. Same NaN-for-excluded convention, one
+    line per (slave_camera_id, stream_identity) pair rather than a fixed
+    axis-per-metric layout - engine.cross_camera_reconciler's own
+    pair_index is a synthetic, shared-across-all-pairs counter (not
+    comparable to any one camera's own pair_index), so it's used here only
+    as this plot's own x-axis, not cross-referenced against per-camera
+    CSVs. Split out from export_cross_camera_plot so tests can inspect the
+    plotted line data directly, same reason _build_figure is split from
+    export_session_plot."""
     groups = {}
     for row in cross_rows:
         key = (row["slave_camera_id"], row["stream_identity"])
         groups.setdefault(key, []).append(row)
 
-    fig, ax = plt.subplots(figsize=(_figure_width(len(cross_rows)), 6))
+    fig, (pairing_ax, position_ax) = plt.subplots(
+        2, 1, figsize=(_figure_width(len(cross_rows)), _FIGURE_HEIGHT), sharex=True,
+    )
     fig.patch.set_facecolor(SURFACE)
 
     for index, key in enumerate(sorted(groups.keys())):
         pair_rows = groups[key]
         pair_indices = [row["pair_index"] for row in pair_rows]
-        values = [_to_plot_value(row.get("pairing_gap_us"), row.get("pairing_gap_us_excluded"))
-                  for row in pair_rows]
         color = CROSS_CAMERA_COLORS[index % len(CROSS_CAMERA_COLORS)]
-        ax.plot(pair_indices, values, label="{} {}".format(*key), color=color)
 
-    ax.set_xlabel("Pair index")
-    ax.set_ylabel("Cross-camera HW TS latency (us)")
-    _style_axis(ax)
+        pairing_values = [_to_plot_value(row.get("pairing_gap_us"), row.get("pairing_gap_us_excluded"))
+                           for row in pair_rows]
+        pairing_ax.plot(pair_indices, pairing_values, label="{} {}".format(*key), color=color)
+
+        position_values = [_to_plot_value(row.get("position_gap_ms"), row.get("position_gap_ms_excluded"))
+                            for row in pair_rows]
+        position_ax.plot(pair_indices, position_values, label="{} {}".format(*key), color=color)
+
+    pairing_ax.set_ylabel("Cross-camera HW TS latency (us)")
+    _style_axis(pairing_ax)
+
+    position_ax.set_ylabel("Cross-camera Optical Sync (ms)")
+    position_ax.set_xlabel("Pair index")
+    _style_axis(position_ax)
+
     fig.tight_layout()
     return fig
 
