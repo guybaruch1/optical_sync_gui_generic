@@ -285,107 +285,58 @@ def test_camera_frame_ready_routes_to_the_right_panel(qapp, tmp_path):
     assert page._panels["cam1"]._last_stream_a_image is None
 
 
-def test_cross_pair_ready_does_not_plot_directly(qapp, tmp_path):
-    # Efficiency fix: row_ready-cadence callbacks must stay O(1) (CLAUDE.md's
-    # documented row_ready/stats_ready split) - add_point only happens on the
-    # throttled stats_ready cadence, in _on_cross_stats_ready.
-    page, fake_threads = _page_with_fake_threads()
+def test_one_slave_shows_section_directly_with_no_inner_tabs(qapp, tmp_path):
+    page, _ = _page_with_fake_threads()
+
     page.set_cameras(object(), _two_cameras(tmp_path))
-    page.start_all_sessions()
-    series_key = page._cross_pair_series_keys[("cam2", "infrared1")]
 
-    fake_threads["SN1"].row_ready.emit({
-        "pair_index": 1, "stream_a_ts_us": 1_000_000.0, "stream_b_ts_us": 1_000_000.0,
-        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
-    })
-    fake_threads["SN2"].row_ready.emit({
-        "pair_index": 1, "stream_a_ts_us": 1_000_010.0, "stream_b_ts_us": 1_000_010.0,
-        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
-    })
-
-    assert page.cross_plot.get_series_data(series_key)[1] == []
-    # 2, not 1: _camera_config's two cameras share BOTH "infrared1" and
-    # "color" identities (see test_set_cameras_with_two_cameras_builds_one_
-    # cross_series_per_shared_identity), so one row_ready from each camera
-    # legitimately produces one cross_pair_ready per shared identity.
-    assert len(page._cross_rows) == 2
+    assert "cam2" in page._slave_sections
+    section = page._slave_sections["cam2"]
+    assert section["pairing_plot"] is not None
+    assert section["position_plot"] is not None
+    assert section["stats_panel"] is not None
+    # No inner QTabWidget anywhere under the cross-camera tab for exactly 1 slave.
+    from PySide6.QtWidgets import QTabWidget
+    inner_tabs = page._cross_tab_widget.findChildren(QTabWidget)
+    assert inner_tabs == []
 
 
-def test_matching_rows_plot_a_cross_camera_hw_ts_point_on_stats_ready(qapp, tmp_path):
-    page, fake_threads = _page_with_fake_threads()
+def test_two_slaves_get_an_inner_tab_each(qapp, tmp_path):
+    page, _ = _page_with_fake_threads()
+    cameras = _two_cameras(tmp_path)
+    cameras.append({"camera_id": "cam3", "label": "D455 C", "is_master": False,
+                     "config": _camera_config(tmp_path, device_serial="SN3")})
+
+    page.set_cameras(object(), cameras)
+
+    assert set(page._slave_sections.keys()) == {"cam2", "cam3"}
+    from PySide6.QtWidgets import QTabWidget
+    inner_tabs = page._cross_tab_widget.findChildren(QTabWidget)
+    assert len(inner_tabs) == 1
+    inner = inner_tabs[0]
+    assert inner.count() == 2
+    assert inner.tabText(0) == "Slave 1: D455 B"
+    assert inner.tabText(1) == "Slave 2: D455 C"
+
+
+def test_cross_pair_series_keys_are_bare_identity_strings(qapp, tmp_path):
+    page, _ = _page_with_fake_threads()
+
     page.set_cameras(object(), _two_cameras(tmp_path))
-    page.start_all_sessions()
 
-    # First pair is the reconciler's own calibration pair (see
-    # engine.cross_camera_reconciler.CrossCameraReconciler's docstring -
-    # genlock stabilizes phase/rate between two devices, not their absolute
-    # HW-timestamp epoch, so the first-ever match learns that constant
-    # offset rather than measuring anything yet) - always reports 0.0.
-    fake_threads["SN1"].row_ready.emit({
-        "pair_index": 1, "stream_a_ts_us": 1_000_000.0, "stream_b_ts_us": 1_000_000.0,
-        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
-    })
-    fake_threads["SN2"].row_ready.emit({
-        "pair_index": 1, "stream_a_ts_us": 1_000_010.0, "stream_b_ts_us": 1_000_010.0,
-        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
-    })
-    # Second pair, after calibration (offset learned: 10) - reports the
-    # genuine residual (-5), not the raw absolute difference.
-    fake_threads["SN1"].row_ready.emit({
-        "pair_index": 2, "stream_a_ts_us": 1_100_000.0, "stream_b_ts_us": 1_100_000.0,
-        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
-    })
-    fake_threads["SN2"].row_ready.emit({
-        "pair_index": 2, "stream_a_ts_us": 1_100_015.0, "stream_b_ts_us": 1_100_015.0,
-        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
-    })
-
-    # The plot point only appears once the throttled stats_ready cadence
-    # fires - mirrors piggybacking on any camera's own stats_ready
-    # (engine.multi_camera_session.MultiCameraSessionController._on_stats_ready).
-    fake_threads["SN1"].stats_ready.emit({"pair_index": 2})
-
-    series_key = page._cross_pair_series_keys[("cam2", "infrared1")]
-    _, ys = page.cross_plot.get_series_data(series_key)
-    assert ys == [-5.0]
+    assert page._cross_pair_series_keys[("cam2", "infrared1")] == "infrared1"
+    assert page._cross_pair_series_keys[("cam2", "color")] == "color"
 
 
-def test_matching_rows_plot_a_cross_camera_optical_sync_point_on_stats_ready(qapp, tmp_path):
-    page, fake_threads = _page_with_fake_threads()
+def test_cross_running_stats_registered_per_slave_identity_and_metric(qapp, tmp_path):
+    page, _ = _page_with_fake_threads()
+
     page.set_cameras(object(), _two_cameras(tmp_path))
-    page.start_all_sessions()
 
-    # Calibration pair - HW TS offset learned; LED indices equal (no
-    # assertion needed on this one).
-    fake_threads["SN1"].row_ready.emit({
-        "pair_index": 1, "stream_a_ts_us": 1_000_000.0, "stream_b_ts_us": 1_000_000.0,
-        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
-        "stream_a_last_led": 0, "position_gap_ms_excluded": False,
-    })
-    fake_threads["SN2"].row_ready.emit({
-        "pair_index": 1, "stream_a_ts_us": 1_000_010.0, "stream_b_ts_us": 1_000_010.0,
-        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
-        "stream_a_last_led": 0, "position_gap_ms_excluded": False,
-    })
-    # Second pair: master detects LED 1, slave detects LED 0. _camera_config's
-    # default num_leds=2, switch_time_ms=1.0 ->
-    # compute_position_gap(1, 0, 2) == 1, * 1.0 == 1.0ms.
-    fake_threads["SN1"].row_ready.emit({
-        "pair_index": 2, "stream_a_ts_us": 1_100_000.0, "stream_b_ts_us": 1_100_000.0,
-        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
-        "stream_a_last_led": 1, "position_gap_ms_excluded": False,
-    })
-    fake_threads["SN2"].row_ready.emit({
-        "pair_index": 2, "stream_a_ts_us": 1_100_015.0, "stream_b_ts_us": 1_100_015.0,
-        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
-        "stream_a_last_led": 0, "position_gap_ms_excluded": False,
-    })
-
-    fake_threads["SN1"].stats_ready.emit({"pair_index": 2})
-
-    series_key = page._cross_pair_series_keys[("cam2", "infrared1")]
-    _, ys = page.cross_position_plot.get_series_data(series_key)
-    assert ys == [1.0]
+    assert ("cam2", "infrared1", "pairing_gap_us") in page._cross_running_stats
+    assert ("cam2", "infrared1", "position_gap_ms") in page._cross_running_stats
+    assert ("cam2", "color", "pairing_gap_us") in page._cross_running_stats
+    assert ("cam2", "color", "position_gap_ms") in page._cross_running_stats
 
 
 def test_cross_camera_tab_is_first(qapp, tmp_path):

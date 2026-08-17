@@ -1,8 +1,10 @@
 """Wizard's actual multi-camera live-run page - a tab widget with one
-always-first "Cross-Camera Sync" tab (master vs. each slave's shared
-stream identities) followed by one CameraLiveSessionPanel tab per
-configured camera (each camera's own intra-camera view, unchanged from
-today's single-camera experience), all driven by ONE
+always-first "Cross-Camera Sync" tab (one section per slave camera, each
+with its own HW TS Latency + Optical Sync graphs and stats panel - shown
+directly for a single slave, or inside an inner tab widget once there are
+2) followed by one CameraLiveSessionPanel tab per configured camera (each
+camera's own intra-camera view, unchanged from today's single-camera
+experience), all driven by ONE
 engine.multi_camera_session.MultiCameraSessionController.
 
 Reached from gui/pages/camera_hub_page.py's "Start Multi-Camera Live
@@ -65,6 +67,7 @@ from domain.run_output import create_run_dir, create_camera_subdir
 from domain.csv_export import export_cross_camera_csv
 from domain.plot_export import export_cross_camera_plot
 from domain.plot_theme import CROSS_CAMERA_COLORS
+from domain.running_stats import RunningStats
 
 
 class _IdentitySpec:
@@ -165,10 +168,14 @@ class MultiCameraLiveSessionPage(QWidget):
 
         self._cross_tab_widget = QWidget()
         self._cross_tab_layout = QVBoxLayout(self._cross_tab_widget)
-        self.cross_plot = None
-        self.cross_stats_panel = None
-        self.cross_position_plot = None
-        self.cross_position_stats_panel = None
+        # slave_camera_id -> {"pairing_plot": LivePlot, "position_plot": LivePlot,
+        # "stats_panel": StatsPanel} - one full section's worth of widgets per slave.
+        self._slave_sections = {}
+        # (slave_camera_id, stream_identity, metric_name) -> RunningStats,
+        # metric_name is "pairing_gap_us" or "position_gap_ms" - accumulated
+        # unthrottled in _on_cross_pair_ready, pushed to the stats panel only
+        # on the throttled _on_cross_stats_ready tick.
+        self._cross_running_stats = {}
 
         self.status_label = QLabel("")
         layout.addWidget(self.status_label)
@@ -205,19 +212,8 @@ class MultiCameraLiveSessionPage(QWidget):
                 widget.deleteLater()
 
         self._cross_pair_series_keys = {}
-        self.cross_plot = LivePlot()
-        self.cross_plot.setLabel("left", "Cross-Camera HW TS Latency (us)")
-        self.cross_plot.setLabel("bottom", "Pair Index")
-        self.cross_stats_panel = StatsPanel()
-        self.cross_stats_panel.setFixedWidth(220)
-        self.cross_stats_panel.add_section_header("Cross-Camera HW TS Latency")
-
-        self.cross_position_plot = LivePlot()
-        self.cross_position_plot.setLabel("left", "Cross-Camera Optical Sync (ms)")
-        self.cross_position_plot.setLabel("bottom", "Pair Index")
-        self.cross_position_stats_panel = StatsPanel()
-        self.cross_position_stats_panel.setFixedWidth(220)
-        self.cross_position_stats_panel.add_section_header("Cross-Camera Optical Sync")
+        self._slave_sections = {}
+        self._cross_running_stats = {}
 
         self._cross_tab_layout.addWidget(QLabel("Cross-Camera Sync (master vs. each slave)"))
 
@@ -226,6 +222,10 @@ class MultiCameraLiveSessionPage(QWidget):
                 QLabel("Add a second camera to see cross-camera sync.")
             )
             return
+
+        roles = _camera_roles(cameras)
+        master_camera = next(c for c in cameras if c["is_master"])
+        master_display = roles[master_camera["camera_id"]]["display"]
 
         identity_specs = [
             _IdentitySpec(
@@ -247,26 +247,101 @@ class MultiCameraLiveSessionPage(QWidget):
             # exactly one), but guard defensively rather than crash the page.
             pair_specs = []
 
-        labels_by_id = {camera["camera_id"]: camera["label"] for camera in cameras}
-        for index, spec in enumerate(pair_specs):
-            series_key = "{}::{}".format(spec.slave_camera_id, spec.stream_identity)
-            display_name = "{} {}".format(labels_by_id[spec.slave_camera_id], spec.stream_identity)
+        # Grouped by slave, preserving each slave's own identity order -
+        # build_cross_camera_pair_specs already returns identities sorted
+        # per slave, so no re-sorting needed here.
+        specs_by_slave = {}
+        for spec in pair_specs:
+            specs_by_slave.setdefault(spec.slave_camera_id, []).append(spec)
+
+        slave_cameras = [camera for camera in cameras if not camera["is_master"]]
+
+        if len(slave_cameras) == 1:
+            slave = slave_cameras[0]
+            section_widget = self._build_slave_section(
+                slave, roles, master_display, specs_by_slave.get(slave["camera_id"], [])
+            )
+            self._cross_tab_layout.addWidget(section_widget)
+        else:
+            inner_tabs = QTabWidget()
+            for slave in slave_cameras:
+                section_widget = self._build_slave_section(
+                    slave, roles, master_display, specs_by_slave.get(slave["camera_id"], [])
+                )
+                tab_label = "{}: {}".format(roles[slave["camera_id"]]["tag"].title(), slave["label"])
+                inner_tabs.addTab(section_widget, tab_label)
+            self._cross_tab_layout.addWidget(inner_tabs)
+
+    def _build_slave_section(self, slave, roles, master_display, specs):
+        """One slave's worth of cross-camera UI: a header line, two stacked
+        graphs (HW TS Latency, Optical Sync), and one combined stats panel -
+        mirrors CameraLiveSessionPanel's own graphs_column + single
+        stats_panel layout exactly, scoped to this one slave's shared
+        identities. Registers this slave's series keys and RunningStats
+        instances into self._cross_pair_series_keys/self._cross_running_stats
+        as a side effect - _on_cross_pair_ready/_on_cross_stats_ready
+        (Task 4) read those to route incoming cross-rows here."""
+        slave_camera_id = slave["camera_id"]
+        slave_role = roles[slave_camera_id]
+
+        section_widget = QWidget()
+        section_layout = QVBoxLayout(section_widget)
+
+        header_text = "{}: {}  vs.  Master: {}".format(
+            slave_role["tag"].title(), slave_role["display"], master_display
+        )
+        section_layout.addWidget(QLabel(header_text))
+
+        pairing_plot = LivePlot()
+        pairing_plot.setLabel("left", "HW TS Latency (us)")
+        pairing_plot.setLabel("bottom", "Pair Index")
+
+        position_plot = LivePlot()
+        position_plot.setLabel("left", "Optical Sync (ms)")
+        position_plot.setLabel("bottom", "Pair Index")
+
+        stats_panel = StatsPanel()
+        stats_panel.setFixedWidth(220)
+        stats_panel.add_section_header("Live Data")
+        stats_panel.add_field("pair_index", "Pair Index")
+        for spec in specs:
+            identity = spec.stream_identity
+            stats_panel.add_field("{}_pairing_gap_us".format(identity), "{} HW TS Latency (us)".format(identity))
+            stats_panel.add_field("{}_position_gap_ms".format(identity), "{} Optical Sync (ms)".format(identity))
+        stats_panel.add_field("switch_time_ms", "LED Switch Time (ms)")
+        stats_panel.add_section_header("Stats")
+        stats_rows = []
+        for spec in specs:
+            identity = spec.stream_identity
+            stats_rows.append(("{}_hw_ts_latency".format(identity), "{} HW TS Latency".format(identity)))
+            stats_rows.append(("{}_optical_sync".format(identity), "{} Optical Sync".format(identity)))
+        stats_panel.add_stats_table(stats_rows)
+        if specs:
+            stats_panel.set_value("switch_time_ms", specs[0].switch_time_ms)
+
+        for index, spec in enumerate(specs):
+            identity = spec.stream_identity
             color = CROSS_CAMERA_COLORS[index % len(CROSS_CAMERA_COLORS)]
-            self.cross_plot.add_series(series_key, color=color, display_name=display_name)
-            self.cross_stats_panel.add_field(series_key, display_name)
-            self.cross_position_plot.add_series(series_key, color=color, display_name=display_name)
-            self.cross_position_stats_panel.add_field(series_key, display_name)
-            self._cross_pair_series_keys[(spec.slave_camera_id, spec.stream_identity)] = series_key
+            pairing_plot.add_series(identity, color=color, display_name=identity)
+            position_plot.add_series(identity, color=color, display_name=identity)
+            self._cross_pair_series_keys[(slave_camera_id, identity)] = identity
+            self._cross_running_stats[(slave_camera_id, identity, "pairing_gap_us")] = RunningStats()
+            self._cross_running_stats[(slave_camera_id, identity, "position_gap_ms")] = RunningStats()
 
-        pairing_row = QHBoxLayout()
-        pairing_row.addWidget(self.cross_plot, stretch=1)
-        pairing_row.addWidget(self.cross_stats_panel)
-        self._cross_tab_layout.addLayout(pairing_row)
+        self._slave_sections[slave_camera_id] = {
+            "pairing_plot": pairing_plot, "position_plot": position_plot, "stats_panel": stats_panel,
+        }
 
-        position_row = QHBoxLayout()
-        position_row.addWidget(self.cross_position_plot, stretch=1)
-        position_row.addWidget(self.cross_position_stats_panel)
-        self._cross_tab_layout.addLayout(position_row)
+        graphs_column = QVBoxLayout()
+        graphs_column.addWidget(pairing_plot, stretch=1)
+        graphs_column.addWidget(position_plot, stretch=1)
+
+        middle_row = QHBoxLayout()
+        middle_row.addLayout(graphs_column, stretch=1)
+        middle_row.addWidget(stats_panel)
+        section_layout.addLayout(middle_row)
+
+        return section_widget
 
     def start_all_sessions(self):
         if not self._cameras:
