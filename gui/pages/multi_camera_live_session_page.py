@@ -561,4 +561,19 @@ class MultiCameraLiveSessionPage(QWidget):
         # cross_camera_sync.csv would just be confusing clutter.
         if self._cross_pair_series_keys:
             export_cross_camera_csv(self._cross_rows, os.path.join(self._run_dir, "cross_camera_sync.csv"))
-            export_cross_camera_plot(self._cross_rows, os.path.join(self._run_dir, "cross_camera_sync_plot.png"))
+
+            roles = _camera_roles(self._cameras)
+            master_camera = next(c for c in self._cameras if c["is_master"])
+            master_display = roles[master_camera["camera_id"]]["display"]
+
+            slave_ids = sorted({row["slave_camera_id"] for row in self._cross_rows})
+            for slave_camera_id in slave_ids:
+                slave_role = roles[slave_camera_id]
+                rows_for_slave = [row for row in self._cross_rows if row["slave_camera_id"] == slave_camera_id]
+                title = "{}: {}  vs.  Master: {}".format(
+                    slave_role["tag"].title(), slave_role["display"], master_display
+                )
+                path = os.path.join(
+                    self._run_dir, "cross_camera_sync_plot_{}.png".format(slave_role["slug"])
+                )
+                export_cross_camera_plot(rows_for_slave, path, title)

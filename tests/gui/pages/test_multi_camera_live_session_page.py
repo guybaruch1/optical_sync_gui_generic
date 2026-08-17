@@ -235,7 +235,7 @@ def test_start_all_sessions_creates_one_shared_run_dir_with_per_camera_subfolder
     assert "cam2" in os.path.basename(cam2_dir)
 
 
-def test_all_sessions_finished_writes_cross_camera_csv_and_plot(qapp, tmp_path):
+def test_all_sessions_finished_writes_cross_camera_csv_and_one_plot_per_slave(qapp, tmp_path):
     import os
     page, fake_threads = _page_with_fake_threads()
     page.set_cameras(object(), _two_cameras(tmp_path))
@@ -255,10 +255,40 @@ def test_all_sessions_finished_writes_cross_camera_csv_and_plot(qapp, tmp_path):
     fake_threads["SN2"].finished.emit()
 
     csv_path = os.path.join(page._run_dir, "cross_camera_sync.csv")
-    plot_path = os.path.join(page._run_dir, "cross_camera_sync_plot.png")
+    plot_path = os.path.join(page._run_dir, "cross_camera_sync_plot_slave1.png")
     assert os.path.exists(csv_path)
     assert os.path.exists(plot_path)
     assert os.path.getsize(csv_path) > 0
+    assert os.path.getsize(plot_path) > 0
+
+
+def test_all_sessions_finished_writes_a_separate_plot_per_slave_with_three_cameras(qapp, tmp_path):
+    import os
+    page, fake_threads = _page_with_fake_threads()
+    cameras = _two_cameras(tmp_path)
+    cameras.append({"camera_id": "cam3", "label": "D455 C", "is_master": False,
+                     "config": _camera_config(tmp_path, device_serial="SN3")})
+    page.set_cameras(object(), cameras)
+    page.start_all_sessions()
+
+    fake_threads["SN1"].row_ready.emit({
+        "pair_index": 1, "stream_a_ts_us": 1_000_000.0, "stream_b_ts_us": 1_000_000.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+    })
+    fake_threads["SN2"].row_ready.emit({
+        "pair_index": 1, "stream_a_ts_us": 1_000_010.0, "stream_b_ts_us": 1_000_010.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+    })
+    fake_threads["SN3"].row_ready.emit({
+        "pair_index": 1, "stream_a_ts_us": 1_000_020.0, "stream_b_ts_us": 1_000_020.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+    })
+    for serial in ("SN1", "SN2", "SN3"):
+        fake_threads[serial].session_finished.emit([])
+        fake_threads[serial].finished.emit()
+
+    assert os.path.exists(os.path.join(page._run_dir, "cross_camera_sync_plot_slave1.png"))
+    assert os.path.exists(os.path.join(page._run_dir, "cross_camera_sync_plot_slave2.png"))
 
 
 def test_all_sessions_finished_skips_cross_camera_export_with_one_camera(qapp, tmp_path):
