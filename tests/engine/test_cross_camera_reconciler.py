@@ -278,7 +278,11 @@ def test_cross_position_gap_excluded_on_frame_drop():
     reconciler.ingest_row("cam1", _row(2, 1_100_000.0, last_led=1, frame_drop=True))
     cross_rows = reconciler.ingest_row("cam2", _row(2, 1_100_010.0, last_led=0))
 
-    assert cross_rows[0]["position_gap_ms"] is None
+    # frame_drop keeps the real computed value (mirrors PositionGapMetric's
+    # own frame_drop/warmup exclusions) - _spec()'s defaults are
+    # num_leds=10, switch_time_ms=1.0, so compute_position_gap(1, 0, 10)
+    # == 1 (no wraparound, 1 <= half of 10), * 1.0 == 1.0ms.
+    assert cross_rows[0]["position_gap_ms"] == 1.0
     assert cross_rows[0]["position_gap_ms_excluded"] is True
     assert cross_rows[0]["position_gap_ms_exclude_reason"] == "frame_drop"
 
@@ -300,6 +304,27 @@ def test_cross_position_gap_reuses_a_cameras_own_miss_exclusion():
     assert cross_rows[0]["position_gap_ms"] is None
     assert cross_rows[0]["position_gap_ms_excluded"] is True
     assert cross_rows[0]["position_gap_ms_exclude_reason"] == "miss"
+
+
+def test_cross_position_gap_reuses_a_cameras_own_warmup_exclusion_even_though_computable():
+    # Unlike frame_drop (which now keeps its computed value), warmup is
+    # reused from each camera's own intra-camera exclusion and still
+    # discards the value - an accepted, unchanged trade-off (LED indices
+    # are always resolved before PositionGapMetric's own warmup check
+    # fires, so this branch is reachable even when both LEDs ARE detected).
+    spec = _spec()
+    reconciler = CrossCameraReconciler([spec])
+    reconciler.ingest_row("cam1", _row(1, 1_000_000.0, last_led=0))
+    reconciler.ingest_row("cam2", _row(1, 1_000_010.0, last_led=0))
+
+    reconciler.ingest_row("cam1", _row(
+        2, 1_100_000.0, last_led=1, position_gap_ms_excluded=True, position_gap_ms_exclude_reason="warmup",
+    ))
+    cross_rows = reconciler.ingest_row("cam2", _row(2, 1_100_010.0, last_led=0))
+
+    assert cross_rows[0]["position_gap_ms"] is None
+    assert cross_rows[0]["position_gap_ms_excluded"] is True
+    assert cross_rows[0]["position_gap_ms_exclude_reason"] == "warmup"
 
 
 # --- build_cross_camera_pair_specs: pure spec-building from a rig's camera

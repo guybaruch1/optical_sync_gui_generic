@@ -293,32 +293,30 @@ class CrossCameraReconciler:
 def _compute_cross_position_gap(spec, master_row, slave_row, master_frame_drop, slave_frame_drop):
     """Cross-camera Optical Sync value for one already-matched pair - reuses
     the SAME matched (master_row, slave_row) the HW-timestamp reconciler
-    already found, no second matching pass. Mirrors PairingGapMetric's own
-    exclusion priority (frame drop first), then reuses each camera's OWN
+    already found, no second matching pass. LED-index availability is
+    checked first (a "miss" - no clear on-LED detected by one or both
+    cameras that frame - is the only case with no computable value at
+    all); once a value IS computable, frame drop is reported as the
+    exclusion reason with the value still attached (mirroring
+    engine.metrics.PositionGapMetric's own frame_drop/warmup exclusions,
+    which likewise keep a real value), then each camera's OWN
     already-computed intra-camera position_gap_ms_excluded/exclude_reason
-    for detection failures (no_led_data/miss/warmup) - no new detection
-    logic invented. Master's own num_leds/switch_time_ms (see
+    (no_led_data/miss/warmup) is reused as a final catch-all - no new
+    detection logic invented. Master's own num_leds/switch_time_ms (see
     CrossCameraPairSpec) are authoritative for the circular wraparound math
     and unit conversion - the slave's own configured values are never read
-    or validated here.
-
-    Falls back to excluding as "miss" if either side's row doesn't carry a
-    detected LED index at all (e.g. a hand-built row that predates this
-    field) - real production rows always carry position_gap_ms_excluded
-    consistently with their own f"{role}_last_led" key (both come from the
-    same engine.metrics.PositionGapMetric.update() call), so this path is
-    defensive, not a case real hardware rows are expected to hit."""
-    if master_frame_drop or slave_frame_drop:
-        return None, True, "frame_drop"
-    if master_row.get("position_gap_ms_excluded"):
-        return None, True, master_row.get("position_gap_ms_exclude_reason")
-    if slave_row.get("position_gap_ms_excluded"):
-        return None, True, slave_row.get("position_gap_ms_exclude_reason")
-
+    or validated here."""
     master_led = master_row.get(f"{spec.master_row_role}_last_led")
     slave_led = slave_row.get(f"{spec.slave_row_role}_last_led")
     if master_led is None or slave_led is None:
         return None, True, "miss"
 
-    diff = compute_position_gap(master_led, slave_led, spec.num_leds)
-    return diff * spec.switch_time_ms, False, None
+    gap_ms = compute_position_gap(master_led, slave_led, spec.num_leds) * spec.switch_time_ms
+
+    if master_frame_drop or slave_frame_drop:
+        return gap_ms, True, "frame_drop"
+    if master_row.get("position_gap_ms_excluded"):
+        return None, True, master_row.get("position_gap_ms_exclude_reason")
+    if slave_row.get("position_gap_ms_excluded"):
+        return None, True, slave_row.get("position_gap_ms_exclude_reason")
+    return gap_ms, False, None
