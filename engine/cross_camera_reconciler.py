@@ -18,7 +18,7 @@ dicts, same layering convention as engine.test_session/engine.metrics.
 
 from dataclasses import dataclass
 
-from engine.metrics import FramePairSample, PairingGapMetric
+from engine.metrics import FramePairSample, PairingGapMetric, compute_position_gap
 
 
 @dataclass
@@ -255,6 +255,8 @@ class CrossCameraReconciler:
         self._pair_counter += 1
         master_ts_us = master_row[f"{spec.master_row_role}_ts_us"]
         slave_ts_us = slave_row[f"{spec.slave_row_role}_ts_us"]
+        master_frame_drop = master_row.get(f"{spec.master_row_role}_frame_drop", False)
+        slave_frame_drop = slave_row.get(f"{spec.slave_row_role}_frame_drop", False)
         sample = FramePairSample(
             pair_index=self._pair_counter,
             # Offset-corrected: removes the arbitrary, per-pipeline-session
@@ -263,10 +265,13 @@ class CrossCameraReconciler:
             # the genuine residual latency - see class docstring.
             stream_a_ts_us=master_ts_us,
             stream_b_ts_us=slave_ts_us - offset_us,
-            stream_a_frame_drop=master_row.get(f"{spec.master_row_role}_frame_drop", False),
-            stream_b_frame_drop=slave_row.get(f"{spec.slave_row_role}_frame_drop", False),
+            stream_a_frame_drop=master_frame_drop,
+            stream_b_frame_drop=slave_frame_drop,
         )
         result = spec.pairing_gap_metric.update(sample)
+        position_gap_ms, position_gap_excluded, position_gap_exclude_reason = _compute_cross_position_gap(
+            spec, master_row, slave_row, master_frame_drop, slave_frame_drop,
+        )
         return {
             "pair_index": sample.pair_index,
             "master_camera_id": spec.master_camera_id,
@@ -279,4 +284,41 @@ class CrossCameraReconciler:
             result.name: result.value,
             f"{result.name}_excluded": result.excluded,
             f"{result.name}_exclude_reason": result.exclude_reason,
+            "position_gap_ms": position_gap_ms,
+            "position_gap_ms_excluded": position_gap_excluded,
+            "position_gap_ms_exclude_reason": position_gap_exclude_reason,
         }
+
+
+def _compute_cross_position_gap(spec, master_row, slave_row, master_frame_drop, slave_frame_drop):
+    """Cross-camera Optical Sync value for one already-matched pair - reuses
+    the SAME matched (master_row, slave_row) the HW-timestamp reconciler
+    already found, no second matching pass. Mirrors PairingGapMetric's own
+    exclusion priority (frame drop first), then reuses each camera's OWN
+    already-computed intra-camera position_gap_ms_excluded/exclude_reason
+    for detection failures (no_led_data/miss/warmup) - no new detection
+    logic invented. Master's own num_leds/switch_time_ms (see
+    CrossCameraPairSpec) are authoritative for the circular wraparound math
+    and unit conversion - the slave's own configured values are never read
+    or validated here.
+
+    Falls back to excluding as "miss" if either side's row doesn't carry a
+    detected LED index at all (e.g. a hand-built row that predates this
+    field) - real production rows always carry position_gap_ms_excluded
+    consistently with their own f"{role}_last_led" key (both come from the
+    same engine.metrics.PositionGapMetric.update() call), so this path is
+    defensive, not a case real hardware rows are expected to hit."""
+    if master_frame_drop or slave_frame_drop:
+        return None, True, "frame_drop"
+    if master_row.get("position_gap_ms_excluded"):
+        return None, True, master_row.get("position_gap_ms_exclude_reason")
+    if slave_row.get("position_gap_ms_excluded"):
+        return None, True, slave_row.get("position_gap_ms_exclude_reason")
+
+    master_led = master_row.get(f"{spec.master_row_role}_last_led")
+    slave_led = slave_row.get(f"{spec.slave_row_role}_last_led")
+    if master_led is None or slave_led is None:
+        return None, True, "miss"
+
+    diff = compute_position_gap(master_led, slave_led, spec.num_leds)
+    return diff * spec.switch_time_ms, False, None

@@ -41,12 +41,18 @@ def _spec(master_camera_id="cam1", slave_camera_id="cam2", stream_identity="infr
     )
 
 
-def _row(pair_index, ts_us, role="stream_a", frame_drop=False):
-    return {
+def _row(pair_index, ts_us, role="stream_a", frame_drop=False, last_led=None,
+         position_gap_ms_excluded=False, position_gap_ms_exclude_reason=None):
+    row = {
         "pair_index": pair_index,
         f"{role}_ts_us": ts_us,
         f"{role}_frame_drop": frame_drop,
+        "position_gap_ms_excluded": position_gap_ms_excluded,
+        "position_gap_ms_exclude_reason": position_gap_ms_exclude_reason,
     }
+    if last_led is not None:
+        row[f"{role}_last_led"] = last_led
+    return row
 
 
 # --- Real-hardware finding (this project's own multi-camera genlock
@@ -227,6 +233,73 @@ def test_matches_using_each_camera_own_row_role_when_master_is_stream_b():
 
     assert len(cross_rows) == 1
     assert cross_rows[0]["pairing_gap_us"] == 0.0  # first-ever pair for this spec - calibration
+
+
+# --- Cross-camera Optical Sync: reuses the SAME matched (master_row,
+# slave_row) pair the HW-timestamp reconciler already finds - no second
+# match, no new stateful metric. Mirrors PairingGapMetric's own exclusion
+# priority (frame drop first), then reuses each camera's own already-
+# computed position_gap_ms_excluded/exclude_reason for detection failures. ---
+
+def test_matched_pair_computes_cross_camera_position_gap():
+    spec = _spec(num_leds=4, switch_time_ms=2.0)
+    reconciler = CrossCameraReconciler([spec])
+
+    # Calibration pair (see class docstring) - HW TS offset learned here,
+    # not asserted on in this test.
+    reconciler.ingest_row("cam1", _row(1, 1_000_000.0, last_led=0))
+    cross_rows = reconciler.ingest_row("cam2", _row(1, 1_000_010.0, last_led=0))
+
+    assert cross_rows[0]["position_gap_ms"] == 0.0
+    assert cross_rows[0]["position_gap_ms_excluded"] is False
+    assert cross_rows[0]["position_gap_ms_exclude_reason"] is None
+
+
+def test_matched_pair_uses_masters_own_num_leds_and_switch_time_ms_for_wraparound():
+    spec = _spec(num_leds=4, switch_time_ms=2.0)
+    reconciler = CrossCameraReconciler([spec])
+    reconciler.ingest_row("cam1", _row(1, 1_000_000.0, last_led=0))
+    reconciler.ingest_row("cam2", _row(1, 1_000_010.0, last_led=0))
+
+    reconciler.ingest_row("cam1", _row(2, 1_100_000.0, last_led=3))
+    cross_rows = reconciler.ingest_row("cam2", _row(2, 1_100_010.0, last_led=0))
+
+    # compute_position_gap(3, 0, 4): diff=3 > half(2.0) -> diff -= 4 -> -1;
+    # -1 * switch_time_ms(2.0) == -2.0.
+    assert cross_rows[0]["position_gap_ms"] == -2.0
+
+
+def test_cross_position_gap_excluded_on_frame_drop():
+    spec = _spec()
+    reconciler = CrossCameraReconciler([spec])
+    reconciler.ingest_row("cam1", _row(1, 1_000_000.0, last_led=0))
+    reconciler.ingest_row("cam2", _row(1, 1_000_010.0, last_led=0))
+
+    reconciler.ingest_row("cam1", _row(2, 1_100_000.0, last_led=1, frame_drop=True))
+    cross_rows = reconciler.ingest_row("cam2", _row(2, 1_100_010.0, last_led=0))
+
+    assert cross_rows[0]["position_gap_ms"] is None
+    assert cross_rows[0]["position_gap_ms_excluded"] is True
+    assert cross_rows[0]["position_gap_ms_exclude_reason"] == "frame_drop"
+
+
+def test_cross_position_gap_reuses_a_cameras_own_miss_exclusion():
+    spec = _spec()
+    reconciler = CrossCameraReconciler([spec])
+    reconciler.ingest_row("cam1", _row(1, 1_000_000.0, last_led=0))
+    reconciler.ingest_row("cam2", _row(1, 1_000_010.0, last_led=0))
+
+    # Master's own intra-camera PositionGapMetric already excluded this row
+    # as a "miss" (e.g. no clear on-LED detected that frame) - reused
+    # verbatim, no new detection logic invented here.
+    reconciler.ingest_row("cam1", _row(
+        2, 1_100_000.0, last_led=None, position_gap_ms_excluded=True, position_gap_ms_exclude_reason="miss",
+    ))
+    cross_rows = reconciler.ingest_row("cam2", _row(2, 1_100_010.0, last_led=0))
+
+    assert cross_rows[0]["position_gap_ms"] is None
+    assert cross_rows[0]["position_gap_ms_excluded"] is True
+    assert cross_rows[0]["position_gap_ms_exclude_reason"] == "miss"
 
 
 # --- build_cross_camera_pair_specs: pure spec-building from a rig's camera
