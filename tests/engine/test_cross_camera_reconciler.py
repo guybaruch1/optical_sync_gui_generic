@@ -15,17 +15,20 @@ from engine.metrics import PairingGapMetric
 class _CamSpec:
     """Minimal duck-typed stand-in for engine.multi_camera_session's real
     CameraSessionSpec - build_cross_camera_pair_specs only ever reads these
-    three attributes, so tests don't need the full per-camera session
-    config (device_serial, session_engine_kwargs, etc.)."""
+    five attributes, so tests don't need the full per-camera session config
+    (device_serial, session_engine_kwargs, etc.)."""
 
-    def __init__(self, camera_id, is_master, stream_identities):
+    def __init__(self, camera_id, is_master, stream_identities, num_leds=10, switch_time_ms=1.0):
         self.camera_id = camera_id
         self.is_master = is_master
         self.stream_identities = stream_identities  # e.g. {"stream_a": "infrared1", "stream_b": "color"}
+        self.num_leds = num_leds
+        self.switch_time_ms = switch_time_ms
 
 
 def _spec(master_camera_id="cam1", slave_camera_id="cam2", stream_identity="infrared1",
-          master_row_role="stream_a", slave_row_role="stream_a", outlier_threshold_us=100_000):
+          master_row_role="stream_a", slave_row_role="stream_a", outlier_threshold_us=100_000,
+          num_leds=10, switch_time_ms=1.0):
     return CrossCameraPairSpec(
         master_camera_id=master_camera_id,
         slave_camera_id=slave_camera_id,
@@ -33,6 +36,8 @@ def _spec(master_camera_id="cam1", slave_camera_id="cam2", stream_identity="infr
         master_row_role=master_row_role,
         slave_row_role=slave_row_role,
         pairing_gap_metric=PairingGapMetric(outlier_threshold_us=outlier_threshold_us),
+        num_leds=num_leds,
+        switch_time_ms=switch_time_ms,
     )
 
 
@@ -306,3 +311,14 @@ def test_build_specs_gives_each_pair_its_own_pairing_gap_metric_instance():
     specs = build_cross_camera_pair_specs([master, slave], outlier_threshold_us=100_000)
 
     assert specs[0].pairing_gap_metric is not specs[1].pairing_gap_metric
+
+
+def test_build_cross_camera_pair_specs_uses_masters_num_leds_and_switch_time_ms():
+    master = _CamSpec("cam1", True, {"stream_a": "infrared1"}, num_leds=20, switch_time_ms=2.5)
+    slave = _CamSpec("cam2", False, {"stream_a": "infrared1"}, num_leds=999, switch_time_ms=999.0)
+
+    specs = build_cross_camera_pair_specs([master, slave], outlier_threshold_us=100_000)
+
+    assert len(specs) == 1
+    assert specs[0].num_leds == 20
+    assert specs[0].switch_time_ms == 2.5

@@ -34,6 +34,12 @@ class CrossCameraPairSpec:
     master_row_role: str  # "stream_a" or "stream_b" - which field on the MASTER's own row
     slave_row_role: str   # "stream_a" or "stream_b" - which field on the SLAVE's own row
     pairing_gap_metric: object  # engine.metrics.PairingGapMetric, one instance per pair
+    # Master's own num_leds/switch_time_ms - authoritative for the cross-camera
+    # Optical Sync circular wraparound math and unit conversion (same "master's
+    # config wins" reasoning already used elsewhere in this project). The
+    # slave's own configured values are never read here.
+    num_leds: int
+    switch_time_ms: float
 
 
 def build_cross_camera_pair_specs(camera_specs, outlier_threshold_us):
@@ -85,6 +91,8 @@ def build_cross_camera_pair_specs(camera_specs, outlier_threshold_us):
                 master_row_role=master_row_role,
                 slave_row_role=slave_row_role,
                 pairing_gap_metric=PairingGapMetric(outlier_threshold_us=outlier_threshold_us),
+                num_leds=master.num_leds,
+                switch_time_ms=master.switch_time_ms,
             ))
     return pair_specs
 
