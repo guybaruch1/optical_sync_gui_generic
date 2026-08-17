@@ -184,18 +184,26 @@ class PositionGapMetric(Metric):
         self.last_stream_b_on_mask = stream_b_on
         stream_a_last, _ = find_last_on_led(stream_a_on)
         stream_b_last, _ = find_last_on_led(stream_b_on)
+        # Detected on-LED index per stream (or None), threaded into row_ready
+        # via MetricResult.extra - an immutable per-row snapshot, safe to
+        # buffer/match later (unlike last_stream_a_on_mask above, a LIVE,
+        # mutable attribute already overwritten by later frames by the time a
+        # cross-camera reconciler match is found for a buffered row).
+        # Consumed by engine.cross_camera_reconciler's cross-camera Optical
+        # Sync computation.
+        extra = {"stream_a_last_led": stream_a_last, "stream_b_last_led": stream_b_last}
 
         if stream_a_last is None or stream_b_last is None:
-            return MetricResult(name=self.name, value=None, excluded=True, exclude_reason="miss")
+            return MetricResult(name=self.name, value=None, excluded=True, exclude_reason="miss", extra=extra)
 
         diff = compute_position_gap(stream_a_last, stream_b_last, self.num_leds)
         gap_ms = diff * self.switch_time_ms
 
         if sample.stream_a_frame_drop or sample.stream_b_frame_drop:
-            return MetricResult(name=self.name, value=gap_ms, excluded=True, exclude_reason="frame_drop")
+            return MetricResult(name=self.name, value=gap_ms, excluded=True, exclude_reason="frame_drop", extra=extra)
         if is_warmup:
-            return MetricResult(name=self.name, value=gap_ms, excluded=True, exclude_reason="warmup")
-        return MetricResult(name=self.name, value=gap_ms, excluded=False, exclude_reason=None)
+            return MetricResult(name=self.name, value=gap_ms, excluded=True, exclude_reason="warmup", extra=extra)
+        return MetricResult(name=self.name, value=gap_ms, excluded=False, exclude_reason=None, extra=extra)
 
 
 def is_position_gap_debug_outlier(row, threshold_ms):
