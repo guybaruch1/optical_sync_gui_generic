@@ -87,6 +87,30 @@ def _stream_identities(config):
     return {"stream_a": stream_slug(config["pick_a"]), "stream_b": stream_slug(config["pick_b"])}
 
 
+def _camera_roles(cameras):
+    """Computes each camera's master/slave-N role once, reused everywhere a
+    role/label/serial needs displaying (per-camera tabs, cross-camera
+    section headers, static-export titles/filenames) - so the numbering is
+    never computed two different ways. Slave numbering is assigned in the
+    order cameras appear in `cameras` (excluding master), the same order
+    the per-camera tabs already iterate in."""
+    roles = {}
+    slave_number = 0
+    for camera in cameras:
+        camera_id = camera["camera_id"]
+        display = "{} (SN {})".format(camera["label"], camera["config"]["device_serial"])
+        if camera["is_master"]:
+            roles[camera_id] = {"tag": "MASTER", "slug": "master", "display": display}
+        else:
+            slave_number += 1
+            roles[camera_id] = {
+                "tag": "SLAVE {}".format(slave_number),
+                "slug": "slave{}".format(slave_number),
+                "display": display,
+            }
+    return roles
+
+
 class MultiCameraLiveSessionPage(QWidget):
     def __init__(self, thread_factory=None, device_lookup=None, sync_setter=None,
                  camera_start_stagger_s=None, controller_factory=None, parent=None):

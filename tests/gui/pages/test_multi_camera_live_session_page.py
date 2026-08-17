@@ -66,6 +66,34 @@ def _two_cameras(tmp_path):
     ]
 
 
+def _two_cameras_with_three_cams(tmp_path):
+    """Three-camera variant for role/slug/display testing."""
+    return [
+        {"camera_id": "cam1", "label": "D455 A", "is_master": True,
+         "config": _camera_config(tmp_path, device_serial="SN1")},
+        {"camera_id": "cam2", "label": "D455 B", "is_master": False,
+         "config": _camera_config(tmp_path, device_serial="SN2")},
+        {"camera_id": "cam3", "label": "D455 C", "is_master": False,
+         "config": _camera_config(tmp_path, device_serial="SN3")},
+    ]
+
+
+def test_camera_roles_tags_master_and_numbers_slaves_in_order():
+    from gui.pages.multi_camera_live_session_page import _camera_roles
+
+    cameras = [
+        {"camera_id": "cam1", "label": "D455 A", "is_master": True, "config": {"device_serial": "SN1"}},
+        {"camera_id": "cam2", "label": "D455 B", "is_master": False, "config": {"device_serial": "SN2"}},
+        {"camera_id": "cam3", "label": "D455 C", "is_master": False, "config": {"device_serial": "SN3"}},
+    ]
+
+    roles = _camera_roles(cameras)
+
+    assert roles["cam1"] == {"tag": "MASTER", "slug": "master", "display": "D455 A (SN SN1)"}
+    assert roles["cam2"] == {"tag": "SLAVE 1", "slug": "slave1", "display": "D455 B (SN SN2)"}
+    assert roles["cam3"] == {"tag": "SLAVE 2", "slug": "slave2", "display": "D455 C (SN SN3)"}
+
+
 def _page_with_fake_threads():
     fake_threads = {}
 
