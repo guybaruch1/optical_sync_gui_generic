@@ -480,28 +480,74 @@ class MultiCameraLiveSessionPage(QWidget):
         # O(1) bookkeeping only - no add_point here. Fires unthrottled, once
         # per cross-camera match; plotting on this cadence caused a real GUI
         # freeze for the analogous intra-camera case (see CLAUDE.md's
-        # row_ready/stats_ready cadence split). Both graphs' add_point calls
-        # happen only in _on_cross_stats_ready, below.
+        # row_ready/stats_ready cadence split). Both graphs' add_point calls,
+        # and the actual stats-panel pushes, happen only in
+        # _on_cross_stats_ready, below - RunningStats.update() here is the
+        # one exception, matching CameraLiveSessionPanel.on_row_ready's own
+        # unthrottled accumulation (cheap, no plotting).
         self._cross_rows.append(cross_row)
 
+        key = (cross_row["slave_camera_id"], cross_row["stream_identity"])
+        pairing_stats = self._cross_running_stats.get(key + ("pairing_gap_us",))
+        if pairing_stats is not None and not cross_row.get("pairing_gap_us_excluded"):
+            pairing_stats.update(cross_row["pairing_gap_us"])
+        position_stats = self._cross_running_stats.get(key + ("position_gap_ms",))
+        if (position_stats is not None and cross_row.get("position_gap_ms") is not None
+                and not cross_row.get("position_gap_ms_excluded")):
+            position_stats.update(cross_row["position_gap_ms"])
+
     def _on_cross_stats_ready(self, latest_by_pair):
-        for key, series_key in self._cross_pair_series_keys.items():
-            row = latest_by_pair.get(key)
-            if row is None:
+        rows_by_slave = {}
+        for (slave_camera_id, identity), row in latest_by_pair.items():
+            rows_by_slave.setdefault(slave_camera_id, []).append((identity, row))
+
+        for slave_camera_id, identity_rows in rows_by_slave.items():
+            section = self._slave_sections.get(slave_camera_id)
+            if section is None:
                 continue
+            stats_panel = section["stats_panel"]
+            pairing_plot = section["pairing_plot"]
+            position_plot = section["position_plot"]
 
-            self.cross_stats_panel.set_value(series_key, row["pairing_gap_us"])
-            pairing_value = row["pairing_gap_us"]
-            if row.get("pairing_gap_us_excluded"):
-                pairing_value = float("nan")
-            self.cross_plot.add_point(series_key, row["pair_index"], pairing_value)
+            # A slave sharing multiple identities can have each identity's
+            # own match complete independently, landing different
+            # pair_index values in the same tick - show the most recently
+            # completed match across all of this slave's identities as the
+            # single "is this still updating" heartbeat.
+            stats_panel.set_value("pair_index", max(row["pair_index"] for _, row in identity_rows))
 
-            if row.get("position_gap_ms") is not None:
-                self.cross_position_stats_panel.set_value(series_key, row["position_gap_ms"])
-                position_value = row["position_gap_ms"]
-                if row.get("position_gap_ms_excluded"):
-                    position_value = float("nan")
-                self.cross_position_plot.add_point(series_key, row["pair_index"], position_value)
+            for identity, row in identity_rows:
+                series_key = self._cross_pair_series_keys.get((slave_camera_id, identity))
+                if series_key is None:
+                    continue
+
+                stats_panel.set_value("{}_pairing_gap_us".format(identity), row["pairing_gap_us"])
+                pairing_value = row["pairing_gap_us"]
+                if row.get("pairing_gap_us_excluded"):
+                    pairing_value = float("nan")
+                pairing_plot.add_point(series_key, row["pair_index"], pairing_value)
+
+                if row.get("position_gap_ms") is not None:
+                    stats_panel.set_value("{}_position_gap_ms".format(identity), row["position_gap_ms"])
+                    position_value = row["position_gap_ms"]
+                    if row.get("position_gap_ms_excluded"):
+                        position_value = float("nan")
+                    position_plot.add_point(series_key, row["pair_index"], position_value)
+
+                pairing_stats = self._cross_running_stats.get((slave_camera_id, identity, "pairing_gap_us"))
+                if pairing_stats is not None:
+                    self._push_running_stats(stats_panel, "{}_hw_ts_latency".format(identity), pairing_stats)
+                position_stats = self._cross_running_stats.get((slave_camera_id, identity, "position_gap_ms"))
+                if position_stats is not None:
+                    self._push_running_stats(stats_panel, "{}_optical_sync".format(identity), position_stats)
+
+    def _push_running_stats(self, stats_panel, key, stats):
+        if stats.count == 0:
+            return
+        stats_panel.set_value("{}_min".format(key), round(stats.min, 1))
+        stats_panel.set_value("{}_avg".format(key), round(stats.mean, 1))
+        stats_panel.set_value("{}_std".format(key), round(stats.std, 1))
+        stats_panel.set_value("{}_max".format(key), round(stats.max, 1))
 
     def _on_all_sessions_finished(self, rows_by_camera):
         self.start_button.setEnabled(True)

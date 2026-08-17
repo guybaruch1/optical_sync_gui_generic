@@ -369,3 +369,131 @@ def test_stop_all_sessions_requests_stop_on_the_controller(qapp, tmp_path):
     page.start_all_sessions()
 
     page.stop_all_sessions()  # must not raise even though fake threads don't track stop_requested
+
+
+def test_cross_pair_ready_does_not_plot_directly(qapp, tmp_path):
+    # Efficiency fix: row_ready-cadence callbacks must stay O(1) (CLAUDE.md's
+    # documented row_ready/stats_ready split) - add_point only happens on the
+    # throttled stats_ready cadence, in _on_cross_stats_ready.
+    page, fake_threads = _page_with_fake_threads()
+    page.set_cameras(object(), _two_cameras(tmp_path))
+    page.start_all_sessions()
+    pairing_plot = page._slave_sections["cam2"]["pairing_plot"]
+
+    fake_threads["SN1"].row_ready.emit({
+        "pair_index": 1, "stream_a_ts_us": 1_000_000.0, "stream_b_ts_us": 1_000_000.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+    })
+    fake_threads["SN2"].row_ready.emit({
+        "pair_index": 1, "stream_a_ts_us": 1_000_010.0, "stream_b_ts_us": 1_000_010.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+    })
+
+    assert pairing_plot.get_series_data("infrared1")[1] == []
+    # 2, not 1: _camera_config's two cameras share BOTH "infrared1" and
+    # "color" identities, so one row_ready from each camera legitimately
+    # produces one cross_pair_ready per shared identity.
+    assert len(page._cross_rows) == 2
+
+
+def test_matching_rows_plot_a_cross_camera_hw_ts_point_on_stats_ready(qapp, tmp_path):
+    page, fake_threads = _page_with_fake_threads()
+    page.set_cameras(object(), _two_cameras(tmp_path))
+    page.start_all_sessions()
+
+    # First pair is the reconciler's own calibration pair - always 0.0.
+    fake_threads["SN1"].row_ready.emit({
+        "pair_index": 1, "stream_a_ts_us": 1_000_000.0, "stream_b_ts_us": 1_000_000.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+    })
+    fake_threads["SN2"].row_ready.emit({
+        "pair_index": 1, "stream_a_ts_us": 1_000_010.0, "stream_b_ts_us": 1_000_010.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+    })
+    # Second pair, after calibration (offset learned: 10) - reports the
+    # genuine residual (-5), not the raw absolute difference.
+    fake_threads["SN1"].row_ready.emit({
+        "pair_index": 2, "stream_a_ts_us": 1_100_000.0, "stream_b_ts_us": 1_100_000.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+    })
+    fake_threads["SN2"].row_ready.emit({
+        "pair_index": 2, "stream_a_ts_us": 1_100_015.0, "stream_b_ts_us": 1_100_015.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+    })
+
+    fake_threads["SN1"].stats_ready.emit({"pair_index": 2})
+
+    pairing_plot = page._slave_sections["cam2"]["pairing_plot"]
+    _, ys = pairing_plot.get_series_data("infrared1")
+    assert ys == [-5.0]
+
+
+def test_matching_rows_plot_a_cross_camera_optical_sync_point_on_stats_ready(qapp, tmp_path):
+    page, fake_threads = _page_with_fake_threads()
+    page.set_cameras(object(), _two_cameras(tmp_path))
+    page.start_all_sessions()
+
+    fake_threads["SN1"].row_ready.emit({
+        "pair_index": 1, "stream_a_ts_us": 1_000_000.0, "stream_b_ts_us": 1_000_000.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+        "stream_a_last_led": 0, "position_gap_ms_excluded": False,
+    })
+    fake_threads["SN2"].row_ready.emit({
+        "pair_index": 1, "stream_a_ts_us": 1_000_010.0, "stream_b_ts_us": 1_000_010.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+        "stream_a_last_led": 0, "position_gap_ms_excluded": False,
+    })
+    # Second pair: master detects LED 1, slave detects LED 0. _camera_config's
+    # default num_leds=2, switch_time_ms=1.0 ->
+    # compute_position_gap(1, 0, 2) == 1, * 1.0 == 1.0ms.
+    fake_threads["SN1"].row_ready.emit({
+        "pair_index": 2, "stream_a_ts_us": 1_100_000.0, "stream_b_ts_us": 1_100_000.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+        "stream_a_last_led": 1, "position_gap_ms_excluded": False,
+    })
+    fake_threads["SN2"].row_ready.emit({
+        "pair_index": 2, "stream_a_ts_us": 1_100_015.0, "stream_b_ts_us": 1_100_015.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+        "stream_a_last_led": 0, "position_gap_ms_excluded": False,
+    })
+
+    fake_threads["SN1"].stats_ready.emit({"pair_index": 2})
+
+    position_plot = page._slave_sections["cam2"]["position_plot"]
+    _, ys = position_plot.get_series_data("infrared1")
+    assert ys == [1.0]
+
+
+def test_cross_stats_panel_shows_latest_pair_index_and_running_stats(qapp, tmp_path):
+    page, fake_threads = _page_with_fake_threads()
+    page.set_cameras(object(), _two_cameras(tmp_path))
+    page.start_all_sessions()
+
+    fake_threads["SN1"].row_ready.emit({
+        "pair_index": 1, "stream_a_ts_us": 1_000_000.0, "stream_b_ts_us": 1_000_000.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+    })
+    fake_threads["SN2"].row_ready.emit({
+        "pair_index": 1, "stream_a_ts_us": 1_000_010.0, "stream_b_ts_us": 1_000_010.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+    })
+    fake_threads["SN1"].row_ready.emit({
+        "pair_index": 2, "stream_a_ts_us": 1_100_000.0, "stream_b_ts_us": 1_100_000.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+    })
+    fake_threads["SN2"].row_ready.emit({
+        "pair_index": 2, "stream_a_ts_us": 1_100_015.0, "stream_b_ts_us": 1_100_015.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+    })
+
+    fake_threads["SN1"].stats_ready.emit({"pair_index": 2})
+
+    stats_panel = page._slave_sections["cam2"]["stats_panel"]
+    # "pair_index" is the reconciler's own synthetic counter - by the second
+    # stats_ready tick, both "infrared1" and "color" identities have each
+    # produced 2 cross-rows (4 total across both identities), so the max
+    # pair_index seen is 4 (the reconciler's _pair_counter increments once
+    # per cross-row it builds, across every pair-spec it owns).
+    assert stats_panel._value_labels["pair_index"].text() == "4"
+    assert stats_panel._value_labels["infrared1_hw_ts_latency_min"].text() != "-"
+    assert stats_panel._value_labels["infrared1_hw_ts_latency_avg"].text() != "-"
