@@ -44,10 +44,10 @@ Output layout: ONE shared run folder (domain.run_output.create_run_dir,
 using the master camera's own output_root - every camera's settings.yaml-
 derived output_root should be identical in practice), one per-camera
 subfolder underneath it (domain.run_output.create_camera_subdir), and a
-combined cross_camera_sync.csv/cross_camera_sync_plot.png written once
-every camera's session has finished (_on_all_sessions_finished) - skipped
-entirely for a single-camera run, where there's no cross-camera concept at
-all."""
+combined cross_camera_sync.csv plus one cross_camera_sync_plot_{slave-slug}.png
+per slave, all written once every camera's session has finished
+(_on_all_sessions_finished) - skipped entirely for a single-camera run,
+where there's no cross-camera concept at all."""
 
 import os
 
@@ -88,6 +88,15 @@ class _IdentitySpec:
 
 def _stream_identities(config):
     return {"stream_a": stream_slug(config["pick_a"]), "stream_b": stream_slug(config["pick_b"])}
+
+
+def _slave_vs_master_title(slave_role, master_display):
+    """Shared by the live cross-camera section header (_build_slave_section)
+    and the static-export plot title (_on_all_sessions_finished) - the
+    design spec requires these two to read identically, so both call this
+    one helper instead of each hand-writing its own .format(...) that could
+    silently drift apart."""
+    return "{}: {}  vs.  Master: {}".format(slave_role["tag"].title(), slave_role["display"], master_display)
 
 
 def _camera_roles(cameras):
@@ -224,7 +233,12 @@ class MultiCameraLiveSessionPage(QWidget):
             return
 
         roles = _camera_roles(cameras)
-        master_camera = next(c for c in cameras if c["is_master"])
+        master_camera = next((c for c in cameras if c["is_master"]), None)
+        if master_camera is None:
+            self._cross_tab_layout.addWidget(
+                QLabel("Designate a master camera to see cross-camera sync.")
+            )
+            return
         master_display = roles[master_camera["camera_id"]]["display"]
 
         identity_specs = [
@@ -287,9 +301,7 @@ class MultiCameraLiveSessionPage(QWidget):
         section_widget = QWidget()
         section_layout = QVBoxLayout(section_widget)
 
-        header_text = "{}: {}  vs.  Master: {}".format(
-            slave_role["tag"].title(), slave_role["display"], master_display
-        )
+        header_text = _slave_vs_master_title(slave_role, master_display)
         section_layout.addWidget(QLabel(header_text))
 
         pairing_plot = LivePlot()
@@ -343,6 +355,20 @@ class MultiCameraLiveSessionPage(QWidget):
 
         return section_widget
 
+    def _reset_cross_run_state(self):
+        """Mirrors CameraLiveSessionPanel.prepare_for_run's own per-run reset
+        of ITS plots/stats, for the cross-camera widgets: without this,
+        repeated Start-All clicks in the same page visit leave
+        self._cross_running_stats' min/avg/std/max permanently polluted by
+        every previous run's samples (min/max in particular never recover),
+        and the plots keep drawing the new run's points (pair_index
+        restarting from 1) on top of the previous run's leftover data."""
+        for section in self._slave_sections.values():
+            section["pairing_plot"].clear_data()
+            section["position_plot"].clear_data()
+        for key in self._cross_running_stats:
+            self._cross_running_stats[key] = RunningStats()
+
     def start_all_sessions(self):
         if not self._cameras:
             return
@@ -360,6 +386,7 @@ class MultiCameraLiveSessionPage(QWidget):
         master_config = next(c["config"] for c in self._cameras if c["is_master"])
         self._run_dir = create_run_dir(master_config["output_root"], "live_session")
         self._cross_rows = []
+        self._reset_cross_run_state()
 
         camera_specs = []
         for camera in self._cameras:
@@ -570,9 +597,7 @@ class MultiCameraLiveSessionPage(QWidget):
             for slave_camera_id in slave_ids:
                 slave_role = roles[slave_camera_id]
                 rows_for_slave = [row for row in self._cross_rows if row["slave_camera_id"] == slave_camera_id]
-                title = "{}: {}  vs.  Master: {}".format(
-                    slave_role["tag"].title(), slave_role["display"], master_display
-                )
+                title = _slave_vs_master_title(slave_role, master_display)
                 path = os.path.join(
                     self._run_dir, "cross_camera_sync_plot_{}.png".format(slave_role["slug"])
                 )

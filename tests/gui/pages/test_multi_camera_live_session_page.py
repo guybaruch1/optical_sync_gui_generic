@@ -494,6 +494,84 @@ def test_matching_rows_plot_a_cross_camera_optical_sync_point_on_stats_ready(qap
     assert ys == [1.0]
 
 
+def test_slave_vs_master_title_matches_between_header_and_export():
+    from gui.pages.multi_camera_live_session_page import _slave_vs_master_title
+
+    slave_role = {"tag": "SLAVE 1", "slug": "slave1", "display": "D455 B (SN SN2)"}
+    master_display = "D455 A (SN SN1)"
+
+    title = _slave_vs_master_title(slave_role, master_display)
+
+    assert title == "Slave 1: D455 B (SN SN2)  vs.  Master: D455 A (SN SN1)"
+
+
+def test_start_all_sessions_resets_running_stats_and_plots_on_a_second_run(qapp, tmp_path):
+    page, fake_threads = _page_with_fake_threads()
+    page.set_cameras(object(), _two_cameras(tmp_path))
+
+    page.start_all_sessions()
+
+    # Simulate "a previous run happened": pollute a RunningStats instance
+    # and add a plot point directly.
+    key = ("cam2", "infrared1", "pairing_gap_us")
+    page._cross_running_stats[key].update(123.0)
+    assert page._cross_running_stats[key].count != 0
+    pairing_plot = page._slave_sections["cam2"]["pairing_plot"]
+    pairing_plot.add_point("infrared1", 1, 5.0)
+    assert pairing_plot.get_series_data("infrared1")[1] != []
+
+    fake_threads["SN1"].session_finished.emit([])
+    fake_threads["SN1"].finished.emit()
+    fake_threads["SN2"].session_finished.emit([])
+    fake_threads["SN2"].finished.emit()
+
+    page.start_all_sessions()
+
+    assert page._cross_running_stats[key].count == 0
+    assert page._slave_sections["cam2"]["pairing_plot"].get_series_data("infrared1")[1] == []
+
+
+def test_cross_stats_ready_routes_only_to_the_exercised_slave_with_three_cameras(qapp, tmp_path):
+    # Every other test in this file that drives real row_ready/stats_ready
+    # data uses a 2-camera (1 master + 1 slave) setup, where mis-routing to
+    # the wrong slave is undetectable by construction. This one uses 3
+    # cameras (1 master + 2 slaves) and only ever exercises ONE of the two
+    # slaves, proving _on_cross_stats_ready routes to the CORRECT slave's
+    # widgets, not just some slave's.
+    page, fake_threads = _page_with_fake_threads()
+    cameras = _two_cameras(tmp_path)
+    cameras.append({"camera_id": "cam3", "label": "D455 C", "is_master": False,
+                     "config": _camera_config(tmp_path, device_serial="SN3")})
+    page.set_cameras(object(), cameras)
+    page.start_all_sessions()
+
+    # First pair is the reconciler's own calibration pair.
+    fake_threads["SN1"].row_ready.emit({
+        "pair_index": 1, "stream_a_ts_us": 1_000_000.0, "stream_b_ts_us": 1_000_000.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+    })
+    fake_threads["SN2"].row_ready.emit({
+        "pair_index": 1, "stream_a_ts_us": 1_000_010.0, "stream_b_ts_us": 1_000_010.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+    })
+    # Second pair - a real match for cam2 only. cam3/SN3 never emits anything.
+    fake_threads["SN1"].row_ready.emit({
+        "pair_index": 2, "stream_a_ts_us": 1_100_000.0, "stream_b_ts_us": 1_100_000.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+    })
+    fake_threads["SN2"].row_ready.emit({
+        "pair_index": 2, "stream_a_ts_us": 1_100_015.0, "stream_b_ts_us": 1_100_015.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+    })
+
+    fake_threads["SN1"].stats_ready.emit({"pair_index": 2})
+
+    exercised_ys = page._slave_sections["cam2"]["pairing_plot"].get_series_data("infrared1")[1]
+    unexercised_ys = page._slave_sections["cam3"]["pairing_plot"].get_series_data("infrared1")[1]
+    assert exercised_ys != []
+    assert unexercised_ys == []
+
+
 def test_cross_stats_panel_shows_latest_pair_index_and_running_stats(qapp, tmp_path):
     page, fake_threads = _page_with_fake_threads()
     page.set_cameras(object(), _two_cameras(tmp_path))
