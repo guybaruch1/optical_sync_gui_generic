@@ -4,12 +4,14 @@ produce the new cross-camera (master-vs-slave) HW TS Latency metric for a
 multi-camera sync test. See docs/superpowers's multi-camera design doc's
 "Design detail" section 1 for the full rationale."""
 
+import numpy as np
 import pytest
 
 from engine.cross_camera_reconciler import (
     CrossCameraPairSpec, CrossCameraReconciler, build_cross_camera_pair_specs,
 )
-from engine.metrics import PairingGapMetric
+from engine.metrics import FramePairSample, PairingGapMetric, PositionGapMetric
+from engine.test_session import TestSession, TestSessionConfig
 
 
 class _CamSpec:
@@ -420,3 +422,41 @@ def test_build_cross_camera_pair_specs_uses_masters_num_leds_and_switch_time_ms(
     assert len(specs) == 1
     assert specs[0].num_leds == 20
     assert specs[0].switch_time_ms == 2.5
+
+
+# --- Key-name binding: every test above hand-builds rows via _row(...,
+# last_led=...), duplicating the "{role}_last_led" key-name literal rather
+# than obtaining it from real production code. This test instead drives the
+# REAL engine.metrics.PositionGapMetric through a REAL engine.test_session.
+# TestSession (whose process_pair folds MetricResult.extra into the row) so
+# a future rename of PositionGapMetric's extra keys - or of what TestSession
+# folds into the row - would break this test loudly instead of leaving
+# _compute_cross_position_gap silently reporting "miss" forever. ---
+
+def test_real_position_gap_metric_key_names_connect_end_to_end_through_test_session():
+    threshold = np.full(4, 150.0)
+    metric = PositionGapMetric(
+        stream_a_threshold=threshold, stream_b_threshold=threshold, num_leds=4,
+        switch_time_ms=1.0, warmup_pairs_to_skip=0,
+    )
+    session = TestSession(TestSessionConfig(metrics=[metric]))
+    session.start()
+
+    row1 = session.process_pair(FramePairSample(
+        pair_index=0, stream_a_ts_us=1_000_000.0, stream_b_ts_us=1_000_000.0,
+        stream_a_bright=np.array([50.0, 50.0, 200.0, 50.0]),
+        stream_b_bright=np.array([50.0, 200.0, 50.0, 50.0]),
+    ))
+    row2 = session.process_pair(FramePairSample(
+        pair_index=1, stream_a_ts_us=1_000_050.0, stream_b_ts_us=1_000_050.0,
+        stream_a_bright=np.array([50.0, 50.0, 50.0, 200.0]),
+        stream_b_bright=np.array([200.0, 50.0, 50.0, 50.0]),
+    ))
+
+    spec = _spec(master_row_role="stream_a", slave_row_role="stream_a", num_leds=4, switch_time_ms=1.0)
+    reconciler = CrossCameraReconciler([spec])
+    assert reconciler.ingest_row("cam1", row1) == []  # buffered, awaiting the slave's row
+    cross_rows = reconciler.ingest_row("cam2", row2)
+
+    assert len(cross_rows) == 1
+    assert cross_rows[0]["position_gap_ms"] is not None

@@ -1,16 +1,20 @@
-"""Cross-camera (master-vs-slave) HW TS Latency reconciliation for the
-multi-camera sync test.
+"""Cross-camera (master-vs-slave) HW TS Latency AND Optical Sync
+reconciliation for the multi-camera sync test.
 
 Deliberately does NOT touch engine.session_engine/engine.test_session/
 engine.acquisition_loop - each configured camera keeps running its own
 existing, unmodified SessionEngineThread/TestSession/AcquisitionLoop,
 exactly as a single-camera run does today. This module only consumes the
 already-existing row_ready dict shape (engine.test_session.TestSession.
-process_pair's own row: "{role}_ts_us"/"{role}_frame_drop" keys) from
-however many cameras are running concurrently, and reuses
-engine.metrics.PairingGapMetric completely unmodified to compute the new
-cross-camera metric - see docs/superpowers's multi-camera design doc's
-"Design detail" section 1.
+process_pair's own row) from however many cameras are running
+concurrently: the "{role}_ts_us"/"{role}_frame_drop" keys drive the HW TS
+Latency metric (reusing engine.metrics.PairingGapMetric completely
+unmodified), and the "{role}_last_led"/"position_gap_ms_excluded"/
+"position_gap_ms_exclude_reason" keys - folded into each row by
+engine.metrics.PositionGapMetric's own MetricResult.extra - drive the
+second, Optical Sync metric (engine.metrics.compute_position_gap, reused
+on the SAME already-matched pair, no second matching pass) - see
+docs/superpowers's multi-camera design doc's "Design detail" section 1.
 
 No Qt, no pyrealsense2 - pure Python, fully unit-testable with fake row
 dicts, same layering convention as engine.test_session/engine.metrics.

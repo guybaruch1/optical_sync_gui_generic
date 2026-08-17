@@ -1,8 +1,9 @@
-"""Wizard's actual multi-camera live-run page - one CameraLiveSessionPanel
-tab per configured camera (each camera's own intra-camera view, unchanged
-from today's single-camera experience) plus one always-visible
-cross-camera section (master vs. each slave's shared stream identities),
-all driven by ONE engine.multi_camera_session.MultiCameraSessionController.
+"""Wizard's actual multi-camera live-run page - a tab widget with one
+always-first "Cross-Camera Sync" tab (master vs. each slave's shared
+stream identities) followed by one CameraLiveSessionPanel tab per
+configured camera (each camera's own intra-camera view, unchanged from
+today's single-camera experience), all driven by ONE
+engine.multi_camera_session.MultiCameraSessionController.
 
 Reached from gui/pages/camera_hub_page.py's "Start Multi-Camera Live
 Session" via gui/main_window.py - MainWindow calls set_cameras() with
