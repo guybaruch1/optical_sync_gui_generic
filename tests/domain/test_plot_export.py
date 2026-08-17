@@ -92,32 +92,36 @@ def _cross_row(pair_index, slave_camera_id="cam2", stream_identity="infrared1",
 
 def test_export_cross_camera_plot_writes_a_file(tmp_path):
     rows = [_cross_row(0), _cross_row(1, pairing_gap_us=-12.0)]
-    path = str(tmp_path / "cross_camera_sync_plot.png")
+    path = str(tmp_path / "cross_camera_sync_plot_slave1.png")
 
-    export_cross_camera_plot(rows, path)
+    export_cross_camera_plot(rows, path, title="Slave 1: D455 B (SN 1)  vs.  Master: D455 A (SN 0)")
 
     assert os.path.exists(path)
     assert os.path.getsize(path) > 0
 
 
 def test_export_cross_camera_plot_handles_empty_rows(tmp_path):
-    path = str(tmp_path / "cross_camera_sync_plot.png")
+    path = str(tmp_path / "cross_camera_sync_plot_slave1.png")
 
-    export_cross_camera_plot([], path)
+    export_cross_camera_plot([], path, title="Slave 1")
 
     assert os.path.exists(path)
 
 
-def test_export_cross_camera_plot_draws_one_line_per_pair():
+def test_export_cross_camera_plot_draws_one_line_per_identity():
+    # Rows are pre-filtered to ONE slave by the caller (gui/pages/
+    # multi_camera_live_session_page.py) - a single figure can still have
+    # multiple lines if that one slave shares multiple stream identities
+    # with master.
     rows = [
-        _cross_row(0, slave_camera_id="cam2", stream_identity="infrared1", pairing_gap_us=-10.0),
-        _cross_row(1, slave_camera_id="cam2", stream_identity="infrared1", pairing_gap_us=-11.0),
-        _cross_row(0, slave_camera_id="cam3", stream_identity="color", pairing_gap_us=5.0),
+        _cross_row(0, stream_identity="infrared1", pairing_gap_us=-10.0),
+        _cross_row(1, stream_identity="infrared1", pairing_gap_us=-11.0),
+        _cross_row(0, stream_identity="color", pairing_gap_us=5.0),
     ]
 
     import matplotlib.pyplot as plt
     from domain.plot_export import _build_cross_camera_figure
-    fig = _build_cross_camera_figure(rows)
+    fig = _build_cross_camera_figure(rows, title="Slave 1")
     lines = fig.axes[0].get_lines()
 
     assert len(lines) == 2
@@ -129,7 +133,7 @@ def test_export_cross_camera_plot_nans_out_excluded_values():
 
     import matplotlib.pyplot as plt
     from domain.plot_export import _build_cross_camera_figure
-    fig = _build_cross_camera_figure(rows)
+    fig = _build_cross_camera_figure(rows, title="Slave 1")
     line = fig.axes[0].get_lines()[0]
 
     assert math.isnan(line.get_ydata()[0])
@@ -138,14 +142,14 @@ def test_export_cross_camera_plot_nans_out_excluded_values():
 
 def test_export_cross_camera_plot_draws_position_gap_on_second_axis():
     rows = [
-        _cross_row(0, slave_camera_id="cam2", stream_identity="infrared1"),
-        _cross_row(1, slave_camera_id="cam2", stream_identity="infrared1"),
-        _cross_row(0, slave_camera_id="cam3", stream_identity="color"),
+        _cross_row(0, stream_identity="infrared1"),
+        _cross_row(1, stream_identity="infrared1"),
+        _cross_row(0, stream_identity="color"),
     ]
 
     import matplotlib.pyplot as plt
     from domain.plot_export import _build_cross_camera_figure
-    fig = _build_cross_camera_figure(rows)
+    fig = _build_cross_camera_figure(rows, title="Slave 1")
     lines = fig.axes[1].get_lines()
 
     assert len(lines) == 2
@@ -157,10 +161,21 @@ def test_export_cross_camera_plot_nans_out_excluded_position_gap_values():
 
     import matplotlib.pyplot as plt
     from domain.plot_export import _build_cross_camera_figure
-    fig = _build_cross_camera_figure(rows)
+    fig = _build_cross_camera_figure(rows, title="Slave 1")
     line = fig.axes[1].get_lines()[0]
 
     assert math.isnan(line.get_ydata()[0])
+    plt.close(fig)
+
+
+def test_export_cross_camera_plot_sets_the_given_title():
+    rows = [_cross_row(0)]
+
+    import matplotlib.pyplot as plt
+    from domain.plot_export import _build_cross_camera_figure
+    fig = _build_cross_camera_figure(rows, title="Slave 1: D455 B  vs.  Master: D455 A")
+
+    assert fig._suptitle.get_text() == "Slave 1: D455 B  vs.  Master: D455 A"
     plt.close(fig)
 
 
