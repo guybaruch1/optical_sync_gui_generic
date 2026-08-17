@@ -91,7 +91,9 @@ def test_set_cameras_builds_one_tab_per_camera(qapp, tmp_path):
 
     page.set_cameras(object(), _two_cameras(tmp_path))
 
-    assert page.tabs.count() == 2
+    # 3, not 2: the Cross-Camera Sync tab (added first) plus one tab per
+    # camera - see test_cross_camera_tab_is_first for the same count.
+    assert page.tabs.count() == 3
     assert "cam1" in page._panels
     assert "cam2" in page._panels
 
@@ -245,7 +247,33 @@ def test_camera_frame_ready_routes_to_the_right_panel(qapp, tmp_path):
     assert page._panels["cam1"]._last_stream_a_image is None
 
 
-def test_matching_rows_produce_a_cross_camera_plot_point(qapp, tmp_path):
+def test_cross_pair_ready_does_not_plot_directly(qapp, tmp_path):
+    # Efficiency fix: row_ready-cadence callbacks must stay O(1) (CLAUDE.md's
+    # documented row_ready/stats_ready split) - add_point only happens on the
+    # throttled stats_ready cadence, in _on_cross_stats_ready.
+    page, fake_threads = _page_with_fake_threads()
+    page.set_cameras(object(), _two_cameras(tmp_path))
+    page.start_all_sessions()
+    series_key = page._cross_pair_series_keys[("cam2", "infrared1")]
+
+    fake_threads["SN1"].row_ready.emit({
+        "pair_index": 1, "stream_a_ts_us": 1_000_000.0, "stream_b_ts_us": 1_000_000.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+    })
+    fake_threads["SN2"].row_ready.emit({
+        "pair_index": 1, "stream_a_ts_us": 1_000_010.0, "stream_b_ts_us": 1_000_010.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+    })
+
+    assert page.cross_plot.get_series_data(series_key)[1] == []
+    # 2, not 1: _camera_config's two cameras share BOTH "infrared1" and
+    # "color" identities (see test_set_cameras_with_two_cameras_builds_one_
+    # cross_series_per_shared_identity), so one row_ready from each camera
+    # legitimately produces one cross_pair_ready per shared identity.
+    assert len(page._cross_rows) == 2
+
+
+def test_matching_rows_plot_a_cross_camera_hw_ts_point_on_stats_ready(qapp, tmp_path):
     page, fake_threads = _page_with_fake_threads()
     page.set_cameras(object(), _two_cameras(tmp_path))
     page.start_all_sessions()
@@ -263,7 +291,6 @@ def test_matching_rows_produce_a_cross_camera_plot_point(qapp, tmp_path):
         "pair_index": 1, "stream_a_ts_us": 1_000_010.0, "stream_b_ts_us": 1_000_010.0,
         "stream_a_frame_drop": False, "stream_b_frame_drop": False,
     })
-
     # Second pair, after calibration (offset learned: 10) - reports the
     # genuine residual (-5), not the raw absolute difference.
     fake_threads["SN1"].row_ready.emit({
@@ -275,12 +302,61 @@ def test_matching_rows_produce_a_cross_camera_plot_point(qapp, tmp_path):
         "stream_a_frame_drop": False, "stream_b_frame_drop": False,
     })
 
-    # pair_index here is the reconciler's own synthetic counter (shared
-    # across every configured pair, not tied to either camera's own
-    # pair_index) - only the actual gap value is asserted on.
+    # The plot point only appears once the throttled stats_ready cadence
+    # fires - mirrors piggybacking on any camera's own stats_ready
+    # (engine.multi_camera_session.MultiCameraSessionController._on_stats_ready).
+    fake_threads["SN1"].stats_ready.emit({"pair_index": 2})
+
     series_key = page._cross_pair_series_keys[("cam2", "infrared1")]
     _, ys = page.cross_plot.get_series_data(series_key)
-    assert ys == [0.0, -5.0]
+    assert ys == [-5.0]
+
+
+def test_matching_rows_plot_a_cross_camera_optical_sync_point_on_stats_ready(qapp, tmp_path):
+    page, fake_threads = _page_with_fake_threads()
+    page.set_cameras(object(), _two_cameras(tmp_path))
+    page.start_all_sessions()
+
+    # Calibration pair - HW TS offset learned; LED indices equal (no
+    # assertion needed on this one).
+    fake_threads["SN1"].row_ready.emit({
+        "pair_index": 1, "stream_a_ts_us": 1_000_000.0, "stream_b_ts_us": 1_000_000.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+        "stream_a_last_led": 0, "position_gap_ms_excluded": False,
+    })
+    fake_threads["SN2"].row_ready.emit({
+        "pair_index": 1, "stream_a_ts_us": 1_000_010.0, "stream_b_ts_us": 1_000_010.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+        "stream_a_last_led": 0, "position_gap_ms_excluded": False,
+    })
+    # Second pair: master detects LED 1, slave detects LED 0. _camera_config's
+    # default num_leds=2, switch_time_ms=1.0 ->
+    # compute_position_gap(1, 0, 2) == 1, * 1.0 == 1.0ms.
+    fake_threads["SN1"].row_ready.emit({
+        "pair_index": 2, "stream_a_ts_us": 1_100_000.0, "stream_b_ts_us": 1_100_000.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+        "stream_a_last_led": 1, "position_gap_ms_excluded": False,
+    })
+    fake_threads["SN2"].row_ready.emit({
+        "pair_index": 2, "stream_a_ts_us": 1_100_015.0, "stream_b_ts_us": 1_100_015.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+        "stream_a_last_led": 0, "position_gap_ms_excluded": False,
+    })
+
+    fake_threads["SN1"].stats_ready.emit({"pair_index": 2})
+
+    series_key = page._cross_pair_series_keys[("cam2", "infrared1")]
+    _, ys = page.cross_position_plot.get_series_data(series_key)
+    assert ys == [1.0]
+
+
+def test_cross_camera_tab_is_first(qapp, tmp_path):
+    page, _ = _page_with_fake_threads()
+
+    page.set_cameras(object(), _two_cameras(tmp_path))
+
+    assert page.tabs.tabText(0) == "Cross-Camera Sync"
+    assert page.tabs.count() == 3  # cross-camera tab + 2 per-camera tabs
 
 
 def test_all_sessions_finished_reenables_start(qapp, tmp_path):

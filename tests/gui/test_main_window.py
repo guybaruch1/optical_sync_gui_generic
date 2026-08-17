@@ -553,7 +553,10 @@ def test_two_fully_configured_cameras_both_reach_the_live_session_page(qapp, mon
     window._on_start_multi_camera_session_requested()
 
     page = window.multi_camera_live_session_page
-    assert page.tabs.count() == 2
+    # 3, not 2: the Cross-Camera Sync tab (added first) plus one tab per
+    # camera - see test_multi_camera_live_session_page.py's own
+    # test_cross_camera_tab_is_first for the same count.
+    assert page.tabs.count() == 3
     assert set(page._panels.keys()) == {first_camera_id, second_camera_id}
     assert len(page._cameras) == 2
 

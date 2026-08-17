@@ -32,9 +32,10 @@ there resolves to None here too - genlock is skipped for that camera
 rather than guessing a possibly-wrong value - and MultiCameraSessionController
 is what actually applies a non-None value to the real device before
 starting that camera's thread (see engine/multi_camera_session.py).
-Cross-camera comparison itself stays infrared-only regardless of genlock
-(see engine/cross_camera_reconciler.py) - a genlock slave's color sensor
-cannot stream at all while genlocked, confirmed on real hardware.
+Cross-camera comparison pairs any shared stream identity the operator
+configured (infrared or color) - see engine/cross_camera_reconciler.py
+and gui/main_window.py's own resolution-ceiling guard for a genlock
+slave's color stream.
 
 Output layout: ONE shared run folder (domain.run_output.create_run_dir,
 using the master camera's own output_root - every camera's settings.yaml-
@@ -137,11 +138,12 @@ class MultiCameraLiveSessionPage(QWidget):
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs)
 
-        self._cross_section_widget = QWidget()
-        self._cross_section_layout = QVBoxLayout(self._cross_section_widget)
-        layout.addWidget(self._cross_section_widget)
+        self._cross_tab_widget = QWidget()
+        self._cross_tab_layout = QVBoxLayout(self._cross_tab_widget)
         self.cross_plot = None
         self.cross_stats_panel = None
+        self.cross_position_plot = None
+        self.cross_position_stats_panel = None
 
         self.status_label = QLabel("")
         layout.addWidget(self.status_label)
@@ -156,6 +158,11 @@ class MultiCameraLiveSessionPage(QWidget):
 
         self.tabs.clear()
         self._panels = {}
+
+        # Cross-camera tab first - it's the operator's primary test.
+        self._rebuild_cross_camera_section(cameras)
+        self.tabs.addTab(self._cross_tab_widget, "Cross-Camera Sync")
+
         for camera in cameras:
             panel = CameraLiveSessionPanel(camera["camera_id"])
             config = camera["config"]
@@ -164,11 +171,9 @@ class MultiCameraLiveSessionPage(QWidget):
             self.tabs.addTab(panel, tab_label)
             self._panels[camera["camera_id"]] = panel
 
-        self._rebuild_cross_camera_section(cameras)
-
     def _rebuild_cross_camera_section(self, cameras):
-        while self._cross_section_layout.count():
-            item = self._cross_section_layout.takeAt(0)
+        while self._cross_tab_layout.count():
+            item = self._cross_tab_layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
@@ -181,10 +186,17 @@ class MultiCameraLiveSessionPage(QWidget):
         self.cross_stats_panel.setFixedWidth(220)
         self.cross_stats_panel.add_section_header("Cross-Camera HW TS Latency")
 
-        self._cross_section_layout.addWidget(QLabel("Cross-Camera Sync (master vs. each slave)"))
+        self.cross_position_plot = LivePlot()
+        self.cross_position_plot.setLabel("left", "Cross-Camera Optical Sync (ms)")
+        self.cross_position_plot.setLabel("bottom", "Pair Index")
+        self.cross_position_stats_panel = StatsPanel()
+        self.cross_position_stats_panel.setFixedWidth(220)
+        self.cross_position_stats_panel.add_section_header("Cross-Camera Optical Sync")
+
+        self._cross_tab_layout.addWidget(QLabel("Cross-Camera Sync (master vs. each slave)"))
 
         if len(cameras) < 2:
-            self._cross_section_layout.addWidget(
+            self._cross_tab_layout.addWidget(
                 QLabel("Add a second camera to see cross-camera sync.")
             )
             return
@@ -216,12 +228,19 @@ class MultiCameraLiveSessionPage(QWidget):
             color = CROSS_CAMERA_COLORS[index % len(CROSS_CAMERA_COLORS)]
             self.cross_plot.add_series(series_key, color=color, display_name=display_name)
             self.cross_stats_panel.add_field(series_key, display_name)
+            self.cross_position_plot.add_series(series_key, color=color, display_name=display_name)
+            self.cross_position_stats_panel.add_field(series_key, display_name)
             self._cross_pair_series_keys[(spec.slave_camera_id, spec.stream_identity)] = series_key
 
-        row = QHBoxLayout()
-        row.addWidget(self.cross_plot, stretch=1)
-        row.addWidget(self.cross_stats_panel)
-        self._cross_section_layout.addLayout(row)
+        pairing_row = QHBoxLayout()
+        pairing_row.addWidget(self.cross_plot, stretch=1)
+        pairing_row.addWidget(self.cross_stats_panel)
+        self._cross_tab_layout.addLayout(pairing_row)
+
+        position_row = QHBoxLayout()
+        position_row.addWidget(self.cross_position_plot, stretch=1)
+        position_row.addWidget(self.cross_position_stats_panel)
+        self._cross_tab_layout.addLayout(position_row)
 
     def start_all_sessions(self):
         if not self._cameras:
@@ -357,22 +376,31 @@ class MultiCameraLiveSessionPage(QWidget):
             panel.on_error(message)
 
     def _on_cross_pair_ready(self, cross_row):
+        # O(1) bookkeeping only - no add_point here. Fires unthrottled, once
+        # per cross-camera match; plotting on this cadence caused a real GUI
+        # freeze for the analogous intra-camera case (see CLAUDE.md's
+        # row_ready/stats_ready cadence split). Both graphs' add_point calls
+        # happen only in _on_cross_stats_ready, below.
         self._cross_rows.append(cross_row)
-        series_key = self._cross_pair_series_keys.get(
-            (cross_row["slave_camera_id"], cross_row["stream_identity"])
-        )
-        if series_key is None:
-            return
-        value = cross_row["pairing_gap_us"]
-        if cross_row.get("pairing_gap_us_excluded"):
-            value = float("nan")
-        self.cross_plot.add_point(series_key, cross_row["pair_index"], value)
 
     def _on_cross_stats_ready(self, latest_by_pair):
         for key, series_key in self._cross_pair_series_keys.items():
             row = latest_by_pair.get(key)
-            if row is not None:
-                self.cross_stats_panel.set_value(series_key, row["pairing_gap_us"])
+            if row is None:
+                continue
+
+            self.cross_stats_panel.set_value(series_key, row["pairing_gap_us"])
+            pairing_value = row["pairing_gap_us"]
+            if row.get("pairing_gap_us_excluded"):
+                pairing_value = float("nan")
+            self.cross_plot.add_point(series_key, row["pair_index"], pairing_value)
+
+            if row.get("position_gap_ms") is not None:
+                self.cross_position_stats_panel.set_value(series_key, row["position_gap_ms"])
+                position_value = row["position_gap_ms"]
+                if row.get("position_gap_ms_excluded"):
+                    position_value = float("nan")
+                self.cross_position_plot.add_point(series_key, row["pair_index"], position_value)
 
     def _on_all_sessions_finished(self, rows_by_camera):
         self.start_button.setEnabled(True)
