@@ -162,6 +162,20 @@ def test_start_all_sessions_defaults_inter_cam_sync_value_to_none_when_config_om
     assert specs_by_camera_id["cam2"].inter_cam_sync_value is None
 
 
+def test_start_all_sessions_carries_each_cameras_own_num_leds_and_switch_time_ms_into_its_spec(qapp, tmp_path):
+    page, _ = _page_with_fake_threads()
+    cameras = _two_cameras(tmp_path)
+    cameras[0]["config"]["num_leds"] = 20
+    cameras[0]["config"]["switch_time_ms"] = 3.0
+    page.set_cameras(object(), cameras)
+
+    page.start_all_sessions()
+
+    spec = next(s for s in page._controller._camera_specs if s.camera_id == "cam1")
+    assert spec.num_leds == 20
+    assert spec.switch_time_ms == 3.0
+
+
 # --- Output layout: ONE shared run folder, one subfolder per camera, plus
 # a combined cross_camera_sync.csv/plot written once the whole run finishes -
 # see domain/run_output.py's create_camera_subdir and domain/csv_export.py's

@@ -67,15 +67,18 @@ from domain.plot_theme import CROSS_CAMERA_COLORS
 
 class _IdentitySpec:
     """Duck-typed stand-in for engine.multi_camera_session.CameraSessionSpec,
-    carrying only the 3 attributes build_cross_camera_pair_specs actually
-    reads (camera_id/is_master/stream_identities) - used here purely to
-    decide which cross-camera series to show; the real CameraSessionSpec
-    list built in start_all_sessions carries everything else."""
+    carrying only the 5 attributes build_cross_camera_pair_specs actually
+    reads (camera_id/is_master/stream_identities/num_leds/switch_time_ms) -
+    used here purely to decide which cross-camera series to show; the real
+    CameraSessionSpec list built in start_all_sessions carries everything
+    else."""
 
-    def __init__(self, camera_id, is_master, stream_identities):
+    def __init__(self, camera_id, is_master, stream_identities, num_leds, switch_time_ms):
         self.camera_id = camera_id
         self.is_master = is_master
         self.stream_identities = stream_identities
+        self.num_leds = num_leds
+        self.switch_time_ms = switch_time_ms
 
 
 def _stream_identities(config):
@@ -187,7 +190,10 @@ class MultiCameraLiveSessionPage(QWidget):
             return
 
         identity_specs = [
-            _IdentitySpec(camera["camera_id"], camera["is_master"], _stream_identities(camera["config"]))
+            _IdentitySpec(
+                camera["camera_id"], camera["is_master"], _stream_identities(camera["config"]),
+                num_leds=camera["config"]["num_leds"], switch_time_ms=camera["config"]["switch_time_ms"],
+            )
             for camera in cameras
         ]
         try:
@@ -285,6 +291,7 @@ class MultiCameraLiveSessionPage(QWidget):
                 inter_cam_sync_value=config.get("inter_cam_sync_value"),
                 stream_identities=_stream_identities(config),
                 device_serial=config["device_serial"],
+                num_leds=config["num_leds"], switch_time_ms=config["switch_time_ms"],
                 hardware_reset_before_start=config["hardware_reset_before_start"],
                 hardware_reset_settle_s=config["hardware_reset_settle_s"],
                 thread_kwargs=thread_kwargs,
