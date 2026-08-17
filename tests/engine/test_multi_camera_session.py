@@ -43,13 +43,16 @@ class _FakeSessionEngineThread(QObject):
 
 
 def _spec(camera_id, is_master, inter_cam_sync_value=1, stream_identities=None,
-          hardware_reset_before_start=False, device_serial=None, dual_panel_config=None):
+          hardware_reset_before_start=False, device_serial=None, dual_panel_config=None,
+          num_leds=10, switch_time_ms=1.0):
     return CameraSessionSpec(
         camera_id=camera_id,
         is_master=is_master,
         inter_cam_sync_value=inter_cam_sync_value,
         stream_identities=stream_identities or {"stream_a": "infrared1"},
         device_serial=device_serial or "{}_serial".format(camera_id),
+        num_leds=num_leds,
+        switch_time_ms=switch_time_ms,
         hardware_reset_before_start=hardware_reset_before_start,
         hardware_reset_settle_s=0.0,
         thread_kwargs={"dual_panel_config": dual_panel_config} if dual_panel_config is not None else {},
@@ -352,6 +355,20 @@ def test_start_all_skips_genlock_entirely_for_a_lone_camera():
 
     sync_setter.assert_not_called()
     assert len(controller.threads) == 1
+
+
+def test_controller_builds_cross_camera_pair_specs_using_real_camera_session_spec_num_leds(qapp):
+    specs = [
+        _spec("cam1", True, num_leds=20, switch_time_ms=2.5),
+        _spec("cam2", False, num_leds=999, switch_time_ms=999.0),
+    ]
+
+    controller, _ = _controller(specs)
+
+    assert controller._reconciler is not None
+    pair_spec = controller._reconciler._pair_specs[0]
+    assert pair_spec.num_leds == 20
+    assert pair_spec.switch_time_ms == 2.5
 
 
 # --- Signal relaying: per-camera signals pass through tagged with

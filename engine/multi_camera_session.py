@@ -54,6 +54,13 @@ class CameraSessionSpec:
     # engine.streams.stream_slug mapping, for cross-camera identity matching.
     stream_identities: dict
     device_serial: str
+    # This camera's own num_leds/switch_time_ms - read by
+    # engine.cross_camera_reconciler.build_cross_camera_pair_specs off
+    # whichever spec is the designated master, for the cross-camera Optical
+    # Sync computation (CrossCameraPairSpec's own docstring: master's config
+    # wins, the slave's own values are never read).
+    num_leds: int
+    switch_time_ms: float
     hardware_reset_before_start: bool = False
     hardware_reset_settle_s: float = 8.0
     thread_kwargs: dict = field(default_factory=dict)
