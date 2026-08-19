@@ -1,5 +1,6 @@
 """Cross-camera (master-vs-slave) HW TS Latency AND Optical Sync
-reconciliation for the multi-camera sync test.
+reconciliation for the multi-camera sync test, plus a Global TS Latency
+metric using RealSense's GLOBAL_TIME-domain timestamp.
 
 Deliberately does NOT touch engine.session_engine/engine.test_session/
 engine.acquisition_loop - each configured camera keeps running its own
@@ -7,13 +8,14 @@ existing, unmodified SessionEngineThread/TestSession/AcquisitionLoop,
 exactly as a single-camera run does today. This module only consumes the
 already-existing row_ready dict shape (engine.test_session.TestSession.
 process_pair's own row) from however many cameras are running
-concurrently: the "{role}_ts_us"/"{role}_frame_drop" keys drive the HW TS
-Latency metric (reusing engine.metrics.PairingGapMetric completely
-unmodified), and the "{role}_last_led"/"position_gap_ms_excluded"/
+concurrently: the "{role}_ts_us"/"{role}_global_ts_us"/"{role}_frame_drop"
+keys drive the HW TS Latency and Global TS Latency metrics (both reusing
+engine.metrics.PairingGapMetric completely unmodified, on two independent
+instances per pair-spec), and the "{role}_last_led"/"position_gap_ms_excluded"/
 "position_gap_ms_exclude_reason" keys - folded into each row by
 engine.metrics.PositionGapMetric's own MetricResult.extra - drive the
-second, Optical Sync metric (engine.metrics.compute_position_gap, reused
-on the SAME already-matched pair, no second matching pass) - see
+third, Optical Sync metric (engine.metrics.compute_position_gap, reused on
+the SAME already-matched pair, no second matching pass) - see
 docs/superpowers's multi-camera design doc's "Design detail" section 1.
 
 No Qt, no pyrealsense2 - pure Python, fully unit-testable with fake row
@@ -37,7 +39,8 @@ class CrossCameraPairSpec:
     stream_identity: str
     master_row_role: str  # "stream_a" or "stream_b" - which field on the MASTER's own row
     slave_row_role: str   # "stream_a" or "stream_b" - which field on the SLAVE's own row
-    pairing_gap_metric: object  # engine.metrics.PairingGapMetric, one instance per pair
+    pairing_gap_metric: object  # engine.metrics.PairingGapMetric, HW-ts-based, offset-corrected
+    global_ts_gap_metric: object  # engine.metrics.PairingGapMetric, global-ts-based, NEVER offset-corrected
     # Master's own num_leds/switch_time_ms - authoritative for the cross-camera
     # Optical Sync circular wraparound math and unit conversion (same "master's
     # config wins" reasoning already used elsewhere in this project). The
@@ -95,6 +98,7 @@ def build_cross_camera_pair_specs(camera_specs, outlier_threshold_us):
                 master_row_role=master_row_role,
                 slave_row_role=slave_row_role,
                 pairing_gap_metric=PairingGapMetric(outlier_threshold_us=outlier_threshold_us),
+                global_ts_gap_metric=PairingGapMetric(outlier_threshold_us=outlier_threshold_us),
                 num_leds=master.num_leds,
                 switch_time_ms=master.switch_time_ms,
             ))
@@ -151,31 +155,32 @@ class CrossCameraReconciler:
     resets near zero at its own pipeline.start() call, so two genuinely-
     genlocked devices' raw timestamps still differ by an arbitrary, but
     perfectly STABLE, constant offset (measured on real hardware: anywhere
-    from ~2.6s to ~13.3s across different runs, varying with how long each
-    pipeline actually took to start relative to the other). A fixed
-    max_match_gap_us (default 50ms) could never bridge that on its own -
-    the true corresponding pair is always orders of magnitude further away
-    than any window small enough to also reject genuinely wrong pairs.
+    from ~2.6s to ~13.3s across different runs). Further real-hardware
+    finding: even that "stable" offset turned out to drift slowly over long
+    runs (measured: ~40us over 50s) - small, but real, and silently baked
+    into the reported HW TS Latency number as if it were genuine physical
+    latency.
 
-    So each pair CALIBRATES this constant offset once, from whichever
-    correspondence it can establish first (an unbounded nearest-match - no
-    window size could safely assume the offset's scale ahead of time), then
-    matches and reports every later row relative to that learned baseline
-    with the normal tight window. The first matched pair for a given
-    identity IS the calibration - it always reports pairing_gap_us == 0.0
-    by construction (it defines the baseline, it doesn't measure anything
-    yet); every pair after that reports the genuine residual (how much the
-    two devices' clocks have diverged since calibration), which is what
-    this metric actually means. Without this correction, PairingGapMetric's
-    own unmodified outlier-exclusion (built for INTRA-camera sub-millisecond
-    gaps) would flag every cross-camera row as an outlier anyway, given the
-    raw multi-second difference - so this isn't just a matching fix, it's
-    required for the metric to report anything meaningful at all.
+    RealSense's GLOBAL_TIME-domain timestamp (frame.get_timestamp(),
+    periodically re-corrected against the HOST's own clock rather than each
+    device's free-running local counter - see engine.streams.
+    _read_global_ts_us) is directly comparable across two independent
+    devices with no per-device epoch to bridge. So MATCHING (the join) now
+    uses global timestamps, with a plain, uniform max_match_gap_us window
+    from the very first row for a given spec - no more unbounded-first-
+    search calibration branch, since global ts needs no calibration at all.
 
-    Calibrated once per reconciler lifetime (i.e. once per Live Session
-    run), not periodically re-verified - real data showed the offset stays
-    effectively perfectly stable for a full 20s recording once established;
-    add recalibration later only if real hardware ever shows drift."""
+    "HW TS Latency" (pairing_gap_us) keeps its EXACT prior meaning: raw HW
+    ts still carries its own arbitrary per-device epoch, so it still needs
+    a one-time-learned offset (the first match for a spec defines it,
+    reported as 0.0) subtracted before diffing - this is now a small
+    reporting step in _build_cross_row rather than a pre-match concern.
+    "Global TS Latency" (global_ts_gap_us) is the plain, NEVER offset-
+    corrected difference between the two sides' global timestamps for the
+    same matched pair - correcting it would defeat its whole purpose as an
+    independent, drift-free check on HW TS Latency: if global time behaves
+    as expected, this number stays near zero with no drift, directly
+    comparable pair-for-pair against its HW-ts counterpart, which may not."""
 
     def __init__(self, pair_specs, buffer_seconds=1.0, max_match_gap_us=50_000.0, fps_hint=30.0):
         self._pair_specs = pair_specs
@@ -191,9 +196,13 @@ class CrossCameraReconciler:
         self._master_buffers = [_PendingBuffer(buffer_len) for _ in pair_specs]
         self._slave_buffers = [_PendingBuffer(buffer_len) for _ in pair_specs]
 
-        # Per-spec learned calibration offset (slave_ts - master_ts at the
-        # moment of calibration) - None until that spec's first match.
-        self._offset_us = [None] * len(pair_specs)
+        # Per-spec learned HW-ts offset (slave_hw_ts - master_hw_ts at the
+        # moment of that spec's first match) - None until then. Matching
+        # itself no longer needs this (it uses global ts, which needs no
+        # calibration) - this is purely a reporting concern for
+        # pairing_gap_us ("HW TS Latency"), computed lazily in
+        # _build_cross_row.
+        self._hw_offset_us = [None] * len(pair_specs)
 
         self._specs_by_camera = {}
         for index, spec in enumerate(pair_specs):
@@ -208,86 +217,100 @@ class CrossCameraReconciler:
                     row, ts_role=spec.master_row_role,
                     own_buffer=self._master_buffers[index],
                     other_buffer=self._slave_buffers[index],
-                    index=index, is_master_side=True,
-                    build=lambda match, offset_us: self._build_cross_row(spec, row, match, offset_us),
+                    build=lambda match: self._build_cross_row(index, spec, row, match),
                 )
             else:
                 cross_row = self._ingest_side(
                     row, ts_role=spec.slave_row_role,
                     own_buffer=self._slave_buffers[index],
                     other_buffer=self._master_buffers[index],
-                    index=index, is_master_side=False,
-                    build=lambda match, offset_us: self._build_cross_row(spec, match, row, offset_us),
+                    build=lambda match: self._build_cross_row(index, spec, match, row),
                 )
             if cross_row is not None:
                 cross_rows.append(cross_row)
         return cross_rows
 
-    def _ingest_side(self, row, ts_role, own_buffer, other_buffer, index, is_master_side, build):
-        ts_us = row.get(f"{ts_role}_ts_us")
+    def _ingest_side(self, row, ts_role, own_buffer, other_buffer, build):
+        ts_us = row.get(f"{ts_role}_global_ts_us")
         if ts_us is None:
             return None
 
-        offset_us = self._offset_us[index]
-        if offset_us is None:
-            # Not yet calibrated for this pair - accept the CLOSEST
-            # available candidate regardless of distance (see class
-            # docstring: the real constant offset can be arbitrarily large,
-            # so no window size is safe to assume ahead of time). This
-            # match establishes the pair's baseline; every later match uses
-            # the normal tight window instead.
-            match = other_buffer.pop_nearest(ts_us, float("inf"))
-            if match is None:
-                own_buffer.push(ts_us, row)
-                return None
-            matched_ts, matched_row = match
-            offset_us = (ts_us - matched_ts) if not is_master_side else (matched_ts - ts_us)
-            self._offset_us[index] = offset_us
-            return build(matched_row, offset_us)
-
-        # Already calibrated - shift the query into the OTHER side's own
-        # raw timestamp space before searching, using the real tight window.
-        query_ts = (ts_us + offset_us) if is_master_side else (ts_us - offset_us)
-        match = other_buffer.pop_nearest(query_ts, self._max_match_gap_us)
+        # A plain, uniform tight-window search from the very first row for
+        # this spec - global timestamps from two genlocked, global-time-
+        # enabled devices are directly comparable with no per-device epoch
+        # to bridge, so unlike the old HW-ts design, there is no separate
+        # "unbounded first match" branch needed here at all.
+        match = other_buffer.pop_nearest(ts_us, self._max_match_gap_us)
         if match is None:
             own_buffer.push(ts_us, row)
             return None
         _, matched_row = match
-        return build(matched_row, offset_us)
+        return build(matched_row)
 
-    def _build_cross_row(self, spec, master_row, slave_row, offset_us):
+    def _build_cross_row(self, index, spec, master_row, slave_row):
         self._pair_counter += 1
-        master_ts_us = master_row[f"{spec.master_row_role}_ts_us"]
-        slave_ts_us = slave_row[f"{spec.slave_row_role}_ts_us"]
+        master_hw_ts = master_row[f"{spec.master_row_role}_ts_us"]
+        slave_hw_ts = slave_row[f"{spec.slave_row_role}_ts_us"]
+        master_global_ts = master_row[f"{spec.master_row_role}_global_ts_us"]
+        slave_global_ts = slave_row[f"{spec.slave_row_role}_global_ts_us"]
         master_frame_drop = master_row.get(f"{spec.master_row_role}_frame_drop", False)
         slave_frame_drop = slave_row.get(f"{spec.slave_row_role}_frame_drop", False)
-        sample = FramePairSample(
+
+        # HW TS Latency keeps its exact prior meaning: raw HW ts still
+        # carries an arbitrary per-device epoch, so it still needs a
+        # one-time-learned offset, subtracted before diffing - this is now
+        # a small reporting step here rather than a pre-match concern (see
+        # class docstring).
+        hw_offset_us = self._hw_offset_us[index]
+        if hw_offset_us is None:
+            hw_offset_us = slave_hw_ts - master_hw_ts
+            self._hw_offset_us[index] = hw_offset_us
+
+        hw_sample = FramePairSample(
             pair_index=self._pair_counter,
-            # Offset-corrected: removes the arbitrary, per-pipeline-session
-            # constant learned at calibration, so PairingGapMetric's own
-            # unmodified gap = stream_a_ts_us - stream_b_ts_us math reports
-            # the genuine residual latency - see class docstring.
-            stream_a_ts_us=master_ts_us,
-            stream_b_ts_us=slave_ts_us - offset_us,
+            stream_a_ts_us=master_hw_ts,
+            stream_b_ts_us=slave_hw_ts - hw_offset_us,
             stream_a_frame_drop=master_frame_drop,
             stream_b_frame_drop=slave_frame_drop,
         )
-        result = spec.pairing_gap_metric.update(sample)
+        hw_result = spec.pairing_gap_metric.update(hw_sample)
+
+        # Global TS Latency: the plain, NEVER offset-corrected difference -
+        # global timestamps are directly comparable already; correcting
+        # this one would defeat its whole purpose as an independent,
+        # drift-free check on HW TS Latency.
+        global_sample = FramePairSample(
+            pair_index=self._pair_counter,
+            stream_a_ts_us=master_global_ts,
+            stream_b_ts_us=slave_global_ts,
+            stream_a_frame_drop=master_frame_drop,
+            stream_b_frame_drop=slave_frame_drop,
+        )
+        global_result = spec.global_ts_gap_metric.update(global_sample)
+
         position_gap_ms, position_gap_excluded, position_gap_exclude_reason = _compute_cross_position_gap(
             spec, master_row, slave_row, master_frame_drop, slave_frame_drop,
         )
+        # Explicit key names, NOT hw_result.name/global_result.name - both
+        # results come from PairingGapMetric instances, whose .name is
+        # always the class-level "pairing_gap_us" regardless of which
+        # instance produced it; using .name for both would silently make
+        # the second write clobber the first under the same dict key.
         return {
-            "pair_index": sample.pair_index,
+            "pair_index": hw_sample.pair_index,
             "master_camera_id": spec.master_camera_id,
             "slave_camera_id": spec.slave_camera_id,
             "stream_identity": spec.stream_identity,
             "master_pair_index": master_row.get("pair_index"),
             "slave_pair_index": slave_row.get("pair_index"),
-            "master_ts_us": master_ts_us,  # RAW, unadjusted - for CSV/debugging transparency
-            "slave_ts_us": slave_ts_us,    # RAW, unadjusted
-            result.name: result.value,
-            f"{result.name}_excluded": result.excluded,
-            f"{result.name}_exclude_reason": result.exclude_reason,
+            "master_ts_us": master_hw_ts,  # RAW, unadjusted - for CSV/debugging transparency
+            "slave_ts_us": slave_hw_ts,    # RAW, unadjusted
+            "pairing_gap_us": hw_result.value,
+            "pairing_gap_us_excluded": hw_result.excluded,
+            "pairing_gap_us_exclude_reason": hw_result.exclude_reason,
+            "global_ts_gap_us": global_result.value,
+            "global_ts_gap_us_excluded": global_result.excluded,
+            "global_ts_gap_us_exclude_reason": global_result.exclude_reason,
             "position_gap_ms": position_gap_ms,
             "position_gap_ms_excluded": position_gap_excluded,
             "position_gap_ms_exclude_reason": position_gap_exclude_reason,

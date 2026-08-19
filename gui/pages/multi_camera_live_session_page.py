@@ -343,14 +343,14 @@ class MultiCameraLiveSessionPage(QWidget):
             self._cross_tab_layout.addWidget(inner_tabs)
 
     def _build_slave_section(self, slave, roles, master_display, specs):
-        """One slave's worth of cross-camera UI: a header line, two stacked
-        graphs (HW TS Latency, Optical Sync), and one combined stats panel -
-        mirrors CameraLiveSessionPanel's own graphs_column + single
-        stats_panel layout exactly, scoped to this one slave's shared
-        identities. Registers this slave's series keys and RunningStats
-        instances into self._cross_pair_series_keys/self._cross_running_stats
-        as a side effect - _on_cross_pair_ready/_on_cross_stats_ready
-        (Task 4) read those to route incoming cross-rows here."""
+        """One slave's worth of cross-camera UI: a header line, three
+        stacked graphs (HW TS Latency, Global TS Latency, Optical Sync),
+        and one combined stats panel - mirrors CameraLiveSessionPanel's own
+        graphs_column + single stats_panel layout, scoped to this one
+        slave's shared identities. Registers this slave's series keys and
+        RunningStats instances into self._cross_pair_series_keys/
+        self._cross_running_stats as a side effect - _on_cross_pair_ready/
+        _on_cross_stats_ready read those to route incoming cross-rows here."""
         slave_camera_id = slave["camera_id"]
         slave_role = roles[slave_camera_id]
 
@@ -364,6 +364,10 @@ class MultiCameraLiveSessionPage(QWidget):
         pairing_plot.setLabel("left", "HW TS Latency (us)")
         pairing_plot.setLabel("bottom", "Pair Index")
 
+        global_ts_plot = LivePlot()
+        global_ts_plot.setLabel("left", "Global TS Latency (us)")
+        global_ts_plot.setLabel("bottom", "Pair Index")
+
         position_plot = LivePlot()
         position_plot.setLabel("left", "Optical Sync (ms)")
         position_plot.setLabel("bottom", "Pair Index")
@@ -375,6 +379,7 @@ class MultiCameraLiveSessionPage(QWidget):
         for spec in specs:
             identity = spec.stream_identity
             stats_panel.add_field("{}_pairing_gap_us".format(identity), "{} HW TS Latency (us)".format(identity))
+            stats_panel.add_field("{}_global_ts_gap_us".format(identity), "{} Global TS Latency (us)".format(identity))
             stats_panel.add_field("{}_position_gap_ms".format(identity), "{} Optical Sync (ms)".format(identity))
         stats_panel.add_field("switch_time_ms", "LED Switch Time (ms)")
         stats_panel.add_section_header("Stats")
@@ -382,6 +387,7 @@ class MultiCameraLiveSessionPage(QWidget):
         for spec in specs:
             identity = spec.stream_identity
             stats_rows.append(("{}_hw_ts_latency".format(identity), "{} HW TS Latency".format(identity)))
+            stats_rows.append(("{}_global_ts_latency".format(identity), "{} Global TS Latency".format(identity)))
             stats_rows.append(("{}_optical_sync".format(identity), "{} Optical Sync".format(identity)))
         stats_panel.add_stats_table(stats_rows)
         if specs:
@@ -391,17 +397,21 @@ class MultiCameraLiveSessionPage(QWidget):
             identity = spec.stream_identity
             color = CROSS_CAMERA_COLORS[index % len(CROSS_CAMERA_COLORS)]
             pairing_plot.add_series(identity, color=color, display_name=identity)
+            global_ts_plot.add_series(identity, color=color, display_name=identity)
             position_plot.add_series(identity, color=color, display_name=identity)
             self._cross_pair_series_keys[(slave_camera_id, identity)] = identity
             self._cross_running_stats[(slave_camera_id, identity, "pairing_gap_us")] = RunningStats()
+            self._cross_running_stats[(slave_camera_id, identity, "global_ts_gap_us")] = RunningStats()
             self._cross_running_stats[(slave_camera_id, identity, "position_gap_ms")] = RunningStats()
 
         self._slave_sections[slave_camera_id] = {
-            "pairing_plot": pairing_plot, "position_plot": position_plot, "stats_panel": stats_panel,
+            "pairing_plot": pairing_plot, "global_ts_plot": global_ts_plot, "position_plot": position_plot,
+            "stats_panel": stats_panel,
         }
 
         graphs_column = QVBoxLayout()
         graphs_column.addWidget(pairing_plot, stretch=1)
+        graphs_column.addWidget(global_ts_plot, stretch=1)
         graphs_column.addWidget(position_plot, stretch=1)
 
         middle_row = QHBoxLayout()
@@ -426,6 +436,7 @@ class MultiCameraLiveSessionPage(QWidget):
         per-test override that differs from it."""
         for section in self._slave_sections.values():
             section["pairing_plot"].clear_data()
+            section["global_ts_plot"].clear_data()
             section["position_plot"].clear_data()
             section["stats_panel"].set_value("switch_time_ms", self._last_confirmed_switch_time_ms)
         for key in self._cross_running_stats:
@@ -493,6 +504,14 @@ class MultiCameraLiveSessionPage(QWidget):
                 output_dir=output_dir,
                 position_gap_outlier_threshold_ms=config["position_gap_outlier_threshold_ms"],
                 position_gap_outlier_max_snapshots=config["position_gap_outlier_max_snapshots"],
+                # This page's own cameras always number >= 2 (a solo camera
+                # routes to LiveSessionPage instead - see gui/main_window.py's
+                # _on_start_multi_camera_session_requested) - global
+                # timestamps are only ever needed for CrossCameraReconciler's
+                # matching/Global TS Latency metric, so every camera in a
+                # multi-camera run captures them; LiveSessionPage's own
+                # start_session() never sets this.
+                capture_global_ts=True,
             )
 
             camera_specs.append(CameraSessionSpec(
@@ -598,6 +617,9 @@ class MultiCameraLiveSessionPage(QWidget):
         pairing_stats = self._cross_running_stats.get(key + ("pairing_gap_us",))
         if pairing_stats is not None and not cross_row.get("pairing_gap_us_excluded"):
             pairing_stats.update(cross_row["pairing_gap_us"])
+        global_ts_stats = self._cross_running_stats.get(key + ("global_ts_gap_us",))
+        if global_ts_stats is not None and not cross_row.get("global_ts_gap_us_excluded"):
+            global_ts_stats.update(cross_row["global_ts_gap_us"])
         position_stats = self._cross_running_stats.get(key + ("position_gap_ms",))
         if (position_stats is not None and cross_row.get("position_gap_ms") is not None
                 and not cross_row.get("position_gap_ms_excluded")):
@@ -614,6 +636,7 @@ class MultiCameraLiveSessionPage(QWidget):
                 continue
             stats_panel = section["stats_panel"]
             pairing_plot = section["pairing_plot"]
+            global_ts_plot = section["global_ts_plot"]
             position_plot = section["position_plot"]
 
             # A slave sharing multiple identities can have each identity's
@@ -634,6 +657,12 @@ class MultiCameraLiveSessionPage(QWidget):
                     pairing_value = float("nan")
                 pairing_plot.add_point(series_key, row["pair_index"], pairing_value)
 
+                stats_panel.set_value("{}_global_ts_gap_us".format(identity), row["global_ts_gap_us"])
+                global_ts_value = row["global_ts_gap_us"]
+                if row.get("global_ts_gap_us_excluded"):
+                    global_ts_value = float("nan")
+                global_ts_plot.add_point(series_key, row["pair_index"], global_ts_value)
+
                 if row.get("position_gap_ms") is not None:
                     stats_panel.set_value("{}_position_gap_ms".format(identity), row["position_gap_ms"])
                     position_value = row["position_gap_ms"]
@@ -644,6 +673,9 @@ class MultiCameraLiveSessionPage(QWidget):
                 pairing_stats = self._cross_running_stats.get((slave_camera_id, identity, "pairing_gap_us"))
                 if pairing_stats is not None:
                     self._push_running_stats(stats_panel, "{}_hw_ts_latency".format(identity), pairing_stats)
+                global_ts_stats = self._cross_running_stats.get((slave_camera_id, identity, "global_ts_gap_us"))
+                if global_ts_stats is not None:
+                    self._push_running_stats(stats_panel, "{}_global_ts_latency".format(identity), global_ts_stats)
                 position_stats = self._cross_running_stats.get((slave_camera_id, identity, "position_gap_ms"))
                 if position_stats is not None:
                     self._push_running_stats(stats_panel, "{}_optical_sync".format(identity), position_stats)

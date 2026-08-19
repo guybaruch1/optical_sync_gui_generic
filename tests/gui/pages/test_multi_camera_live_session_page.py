@@ -176,6 +176,24 @@ def test_set_cameras_with_two_cameras_builds_one_cross_series_per_shared_identit
     assert len(page._cross_pair_series_keys) == 2
 
 
+def test_slave_section_has_a_global_ts_latency_plot(qapp, tmp_path):
+    page, _ = _page_with_fake_threads()
+
+    page.set_cameras(object(), _two_cameras(tmp_path))
+
+    assert "global_ts_plot" in page._slave_sections["cam2"]
+
+
+def test_start_all_sessions_requests_global_ts_capture_for_every_camera(qapp, tmp_path):
+    page, fake_threads = _page_with_fake_threads()
+    page.set_cameras(object(), _two_cameras(tmp_path))
+
+    page.start_all_sessions()
+
+    assert fake_threads["SN1"].kwargs["capture_global_ts"] is True
+    assert fake_threads["SN2"].kwargs["capture_global_ts"] is True
+
+
 def test_set_cameras_with_one_camera_has_no_cross_series(qapp, tmp_path):
     page, _ = _page_with_fake_threads()
     cameras = _two_cameras(tmp_path)[:1]
@@ -347,10 +365,12 @@ def test_all_sessions_finished_writes_cross_camera_csv_and_one_plot_per_slave(qa
 
     fake_threads["SN1"].row_ready.emit({
         "pair_index": 1, "stream_a_ts_us": 1_000_000.0, "stream_b_ts_us": 1_000_000.0,
+        "stream_a_global_ts_us": 1_000_000.0, "stream_b_global_ts_us": 1_000_000.0,
         "stream_a_frame_drop": False, "stream_b_frame_drop": False,
     })
     fake_threads["SN2"].row_ready.emit({
         "pair_index": 1, "stream_a_ts_us": 1_000_010.0, "stream_b_ts_us": 1_000_010.0,
+        "stream_a_global_ts_us": 1_000_010.0, "stream_b_global_ts_us": 1_000_010.0,
         "stream_a_frame_drop": False, "stream_b_frame_drop": False,
     })
     fake_threads["SN1"].session_finished.emit([])
@@ -377,14 +397,17 @@ def test_all_sessions_finished_writes_a_separate_plot_per_slave_with_three_camer
 
     fake_threads["SN1"].row_ready.emit({
         "pair_index": 1, "stream_a_ts_us": 1_000_000.0, "stream_b_ts_us": 1_000_000.0,
+        "stream_a_global_ts_us": 1_000_000.0, "stream_b_global_ts_us": 1_000_000.0,
         "stream_a_frame_drop": False, "stream_b_frame_drop": False,
     })
     fake_threads["SN2"].row_ready.emit({
         "pair_index": 1, "stream_a_ts_us": 1_000_010.0, "stream_b_ts_us": 1_000_010.0,
+        "stream_a_global_ts_us": 1_000_010.0, "stream_b_global_ts_us": 1_000_010.0,
         "stream_a_frame_drop": False, "stream_b_frame_drop": False,
     })
     fake_threads["SN3"].row_ready.emit({
         "pair_index": 1, "stream_a_ts_us": 1_000_020.0, "stream_b_ts_us": 1_000_020.0,
+        "stream_a_global_ts_us": 1_000_020.0, "stream_b_global_ts_us": 1_000_020.0,
         "stream_a_frame_drop": False, "stream_b_frame_drop": False,
     })
     for serial in ("SN1", "SN2", "SN3"):
@@ -468,8 +491,10 @@ def test_cross_running_stats_registered_per_slave_identity_and_metric(qapp, tmp_
     page.set_cameras(object(), _two_cameras(tmp_path))
 
     assert ("cam2", "infrared1", "pairing_gap_us") in page._cross_running_stats
+    assert ("cam2", "infrared1", "global_ts_gap_us") in page._cross_running_stats
     assert ("cam2", "infrared1", "position_gap_ms") in page._cross_running_stats
     assert ("cam2", "color", "pairing_gap_us") in page._cross_running_stats
+    assert ("cam2", "color", "global_ts_gap_us") in page._cross_running_stats
     assert ("cam2", "color", "position_gap_ms") in page._cross_running_stats
 
 
@@ -517,10 +542,12 @@ def test_cross_pair_ready_does_not_plot_directly(qapp, tmp_path):
 
     fake_threads["SN1"].row_ready.emit({
         "pair_index": 1, "stream_a_ts_us": 1_000_000.0, "stream_b_ts_us": 1_000_000.0,
+        "stream_a_global_ts_us": 1_000_000.0, "stream_b_global_ts_us": 1_000_000.0,
         "stream_a_frame_drop": False, "stream_b_frame_drop": False,
     })
     fake_threads["SN2"].row_ready.emit({
         "pair_index": 1, "stream_a_ts_us": 1_000_010.0, "stream_b_ts_us": 1_000_010.0,
+        "stream_a_global_ts_us": 1_000_010.0, "stream_b_global_ts_us": 1_000_010.0,
         "stream_a_frame_drop": False, "stream_b_frame_drop": False,
     })
 
@@ -536,23 +563,27 @@ def test_matching_rows_plot_a_cross_camera_hw_ts_point_on_stats_ready(qapp, tmp_
     page.set_cameras(object(), _two_cameras(tmp_path))
     page.start_all_sessions()
 
-    # First pair is the reconciler's own calibration pair - always 0.0.
+    # First pair is the reconciler's own HW-ts calibration pair - always 0.0.
     fake_threads["SN1"].row_ready.emit({
         "pair_index": 1, "stream_a_ts_us": 1_000_000.0, "stream_b_ts_us": 1_000_000.0,
+        "stream_a_global_ts_us": 1_000_000.0, "stream_b_global_ts_us": 1_000_000.0,
         "stream_a_frame_drop": False, "stream_b_frame_drop": False,
     })
     fake_threads["SN2"].row_ready.emit({
         "pair_index": 1, "stream_a_ts_us": 1_000_010.0, "stream_b_ts_us": 1_000_010.0,
+        "stream_a_global_ts_us": 1_000_010.0, "stream_b_global_ts_us": 1_000_010.0,
         "stream_a_frame_drop": False, "stream_b_frame_drop": False,
     })
-    # Second pair, after calibration (offset learned: 10) - reports the
-    # genuine residual (-5), not the raw absolute difference.
+    # Second pair, after calibration (HW-ts offset learned: 10) - reports
+    # the genuine residual (-5), not the raw absolute difference.
     fake_threads["SN1"].row_ready.emit({
         "pair_index": 2, "stream_a_ts_us": 1_100_000.0, "stream_b_ts_us": 1_100_000.0,
+        "stream_a_global_ts_us": 1_100_000.0, "stream_b_global_ts_us": 1_100_000.0,
         "stream_a_frame_drop": False, "stream_b_frame_drop": False,
     })
     fake_threads["SN2"].row_ready.emit({
         "pair_index": 2, "stream_a_ts_us": 1_100_015.0, "stream_b_ts_us": 1_100_015.0,
+        "stream_a_global_ts_us": 1_100_015.0, "stream_b_global_ts_us": 1_100_015.0,
         "stream_a_frame_drop": False, "stream_b_frame_drop": False,
     })
 
@@ -563,6 +594,45 @@ def test_matching_rows_plot_a_cross_camera_hw_ts_point_on_stats_ready(qapp, tmp_
     assert ys == [-5.0]
 
 
+def test_matching_rows_plot_a_cross_camera_global_ts_point_on_stats_ready(qapp, tmp_path):
+    # Global TS Latency never gets offset-corrected - both pairs here use
+    # IDENTICAL global-ts and hw-ts values (see _row payloads below), so
+    # the plotted global-ts point (-15.0, the plain diff on the LATEST
+    # pair) differs from the HW TS Latency point (-5.0, offset-corrected)
+    # for the exact same underlying data - proving the two metrics are
+    # genuinely independent, not aliases of each other.
+    page, fake_threads = _page_with_fake_threads()
+    page.set_cameras(object(), _two_cameras(tmp_path))
+    page.start_all_sessions()
+
+    fake_threads["SN1"].row_ready.emit({
+        "pair_index": 1, "stream_a_ts_us": 1_000_000.0, "stream_b_ts_us": 1_000_000.0,
+        "stream_a_global_ts_us": 1_000_000.0, "stream_b_global_ts_us": 1_000_000.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+    })
+    fake_threads["SN2"].row_ready.emit({
+        "pair_index": 1, "stream_a_ts_us": 1_000_010.0, "stream_b_ts_us": 1_000_010.0,
+        "stream_a_global_ts_us": 1_000_010.0, "stream_b_global_ts_us": 1_000_010.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+    })
+    fake_threads["SN1"].row_ready.emit({
+        "pair_index": 2, "stream_a_ts_us": 1_100_000.0, "stream_b_ts_us": 1_100_000.0,
+        "stream_a_global_ts_us": 1_100_000.0, "stream_b_global_ts_us": 1_100_000.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+    })
+    fake_threads["SN2"].row_ready.emit({
+        "pair_index": 2, "stream_a_ts_us": 1_100_015.0, "stream_b_ts_us": 1_100_015.0,
+        "stream_a_global_ts_us": 1_100_015.0, "stream_b_global_ts_us": 1_100_015.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+    })
+
+    fake_threads["SN1"].stats_ready.emit({"pair_index": 2})
+
+    global_ts_plot = page._slave_sections["cam2"]["global_ts_plot"]
+    _, ys = global_ts_plot.get_series_data("infrared1")
+    assert ys == [-15.0]
+
+
 def test_matching_rows_plot_a_cross_camera_optical_sync_point_on_stats_ready(qapp, tmp_path):
     page, fake_threads = _page_with_fake_threads()
     page.set_cameras(object(), _two_cameras(tmp_path))
@@ -570,11 +640,13 @@ def test_matching_rows_plot_a_cross_camera_optical_sync_point_on_stats_ready(qap
 
     fake_threads["SN1"].row_ready.emit({
         "pair_index": 1, "stream_a_ts_us": 1_000_000.0, "stream_b_ts_us": 1_000_000.0,
+        "stream_a_global_ts_us": 1_000_000.0, "stream_b_global_ts_us": 1_000_000.0,
         "stream_a_frame_drop": False, "stream_b_frame_drop": False,
         "stream_a_last_led": 0, "position_gap_ms_excluded": False,
     })
     fake_threads["SN2"].row_ready.emit({
         "pair_index": 1, "stream_a_ts_us": 1_000_010.0, "stream_b_ts_us": 1_000_010.0,
+        "stream_a_global_ts_us": 1_000_010.0, "stream_b_global_ts_us": 1_000_010.0,
         "stream_a_frame_drop": False, "stream_b_frame_drop": False,
         "stream_a_last_led": 0, "position_gap_ms_excluded": False,
     })
@@ -583,11 +655,13 @@ def test_matching_rows_plot_a_cross_camera_optical_sync_point_on_stats_ready(qap
     # compute_position_gap(1, 0, 2) == 1, * 1.0 == 1.0ms.
     fake_threads["SN1"].row_ready.emit({
         "pair_index": 2, "stream_a_ts_us": 1_100_000.0, "stream_b_ts_us": 1_100_000.0,
+        "stream_a_global_ts_us": 1_100_000.0, "stream_b_global_ts_us": 1_100_000.0,
         "stream_a_frame_drop": False, "stream_b_frame_drop": False,
         "stream_a_last_led": 1, "position_gap_ms_excluded": False,
     })
     fake_threads["SN2"].row_ready.emit({
         "pair_index": 2, "stream_a_ts_us": 1_100_015.0, "stream_b_ts_us": 1_100_015.0,
+        "stream_a_global_ts_us": 1_100_015.0, "stream_b_global_ts_us": 1_100_015.0,
         "stream_a_frame_drop": False, "stream_b_frame_drop": False,
         "stream_a_last_led": 0, "position_gap_ms_excluded": False,
     })
@@ -616,14 +690,20 @@ def test_start_all_sessions_resets_running_stats_and_plots_on_a_second_run(qapp,
 
     page.start_all_sessions()
 
-    # Simulate "a previous run happened": pollute a RunningStats instance
-    # and add a plot point directly.
-    key = ("cam2", "infrared1", "pairing_gap_us")
-    page._cross_running_stats[key].update(123.0)
-    assert page._cross_running_stats[key].count != 0
+    # Simulate "a previous run happened": pollute both a HW-ts and a
+    # global-ts RunningStats instance and add points directly to both plots.
+    pairing_key = ("cam2", "infrared1", "pairing_gap_us")
+    global_ts_key = ("cam2", "infrared1", "global_ts_gap_us")
+    page._cross_running_stats[pairing_key].update(123.0)
+    page._cross_running_stats[global_ts_key].update(456.0)
+    assert page._cross_running_stats[pairing_key].count != 0
+    assert page._cross_running_stats[global_ts_key].count != 0
     pairing_plot = page._slave_sections["cam2"]["pairing_plot"]
+    global_ts_plot = page._slave_sections["cam2"]["global_ts_plot"]
     pairing_plot.add_point("infrared1", 1, 5.0)
+    global_ts_plot.add_point("infrared1", 1, 7.0)
     assert pairing_plot.get_series_data("infrared1")[1] != []
+    assert global_ts_plot.get_series_data("infrared1")[1] != []
 
     fake_threads["SN1"].session_finished.emit([])
     fake_threads["SN1"].finished.emit()
@@ -632,8 +712,10 @@ def test_start_all_sessions_resets_running_stats_and_plots_on_a_second_run(qapp,
 
     page.start_all_sessions()
 
-    assert page._cross_running_stats[key].count == 0
+    assert page._cross_running_stats[pairing_key].count == 0
+    assert page._cross_running_stats[global_ts_key].count == 0
     assert page._slave_sections["cam2"]["pairing_plot"].get_series_data("infrared1")[1] == []
+    assert page._slave_sections["cam2"]["global_ts_plot"].get_series_data("infrared1")[1] == []
 
 
 def test_cross_stats_ready_routes_only_to_the_exercised_slave_with_three_cameras(qapp, tmp_path):
@@ -650,22 +732,26 @@ def test_cross_stats_ready_routes_only_to_the_exercised_slave_with_three_cameras
     page.set_cameras(object(), cameras)
     page.start_all_sessions()
 
-    # First pair is the reconciler's own calibration pair.
+    # First pair is the reconciler's own HW-ts calibration pair.
     fake_threads["SN1"].row_ready.emit({
         "pair_index": 1, "stream_a_ts_us": 1_000_000.0, "stream_b_ts_us": 1_000_000.0,
+        "stream_a_global_ts_us": 1_000_000.0, "stream_b_global_ts_us": 1_000_000.0,
         "stream_a_frame_drop": False, "stream_b_frame_drop": False,
     })
     fake_threads["SN2"].row_ready.emit({
         "pair_index": 1, "stream_a_ts_us": 1_000_010.0, "stream_b_ts_us": 1_000_010.0,
+        "stream_a_global_ts_us": 1_000_010.0, "stream_b_global_ts_us": 1_000_010.0,
         "stream_a_frame_drop": False, "stream_b_frame_drop": False,
     })
     # Second pair - a real match for cam2 only. cam3/SN3 never emits anything.
     fake_threads["SN1"].row_ready.emit({
         "pair_index": 2, "stream_a_ts_us": 1_100_000.0, "stream_b_ts_us": 1_100_000.0,
+        "stream_a_global_ts_us": 1_100_000.0, "stream_b_global_ts_us": 1_100_000.0,
         "stream_a_frame_drop": False, "stream_b_frame_drop": False,
     })
     fake_threads["SN2"].row_ready.emit({
         "pair_index": 2, "stream_a_ts_us": 1_100_015.0, "stream_b_ts_us": 1_100_015.0,
+        "stream_a_global_ts_us": 1_100_015.0, "stream_b_global_ts_us": 1_100_015.0,
         "stream_a_frame_drop": False, "stream_b_frame_drop": False,
     })
 
@@ -675,6 +761,10 @@ def test_cross_stats_ready_routes_only_to_the_exercised_slave_with_three_cameras
     unexercised_ys = page._slave_sections["cam3"]["pairing_plot"].get_series_data("infrared1")[1]
     assert exercised_ys != []
     assert unexercised_ys == []
+    exercised_global_ys = page._slave_sections["cam2"]["global_ts_plot"].get_series_data("infrared1")[1]
+    unexercised_global_ys = page._slave_sections["cam3"]["global_ts_plot"].get_series_data("infrared1")[1]
+    assert exercised_global_ys != []
+    assert unexercised_global_ys == []
 
 
 def test_cross_stats_panel_shows_latest_pair_index_and_running_stats(qapp, tmp_path):
@@ -684,18 +774,22 @@ def test_cross_stats_panel_shows_latest_pair_index_and_running_stats(qapp, tmp_p
 
     fake_threads["SN1"].row_ready.emit({
         "pair_index": 1, "stream_a_ts_us": 1_000_000.0, "stream_b_ts_us": 1_000_000.0,
+        "stream_a_global_ts_us": 1_000_000.0, "stream_b_global_ts_us": 1_000_000.0,
         "stream_a_frame_drop": False, "stream_b_frame_drop": False,
     })
     fake_threads["SN2"].row_ready.emit({
         "pair_index": 1, "stream_a_ts_us": 1_000_010.0, "stream_b_ts_us": 1_000_010.0,
+        "stream_a_global_ts_us": 1_000_010.0, "stream_b_global_ts_us": 1_000_010.0,
         "stream_a_frame_drop": False, "stream_b_frame_drop": False,
     })
     fake_threads["SN1"].row_ready.emit({
         "pair_index": 2, "stream_a_ts_us": 1_100_000.0, "stream_b_ts_us": 1_100_000.0,
+        "stream_a_global_ts_us": 1_100_000.0, "stream_b_global_ts_us": 1_100_000.0,
         "stream_a_frame_drop": False, "stream_b_frame_drop": False,
     })
     fake_threads["SN2"].row_ready.emit({
         "pair_index": 2, "stream_a_ts_us": 1_100_015.0, "stream_b_ts_us": 1_100_015.0,
+        "stream_a_global_ts_us": 1_100_015.0, "stream_b_global_ts_us": 1_100_015.0,
         "stream_a_frame_drop": False, "stream_b_frame_drop": False,
     })
 
@@ -710,3 +804,5 @@ def test_cross_stats_panel_shows_latest_pair_index_and_running_stats(qapp, tmp_p
     assert stats_panel._value_labels["pair_index"].text() == "4"
     assert stats_panel._value_labels["infrared1_hw_ts_latency_min"].text() != "-"
     assert stats_panel._value_labels["infrared1_hw_ts_latency_avg"].text() != "-"
+    assert stats_panel._value_labels["infrared1_global_ts_latency_min"].text() != "-"
+    assert stats_panel._value_labels["infrared1_global_ts_latency_avg"].text() != "-"
