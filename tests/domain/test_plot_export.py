@@ -81,11 +81,13 @@ def test_figure_width_caps_for_very_long_runs():
 
 def _cross_row(pair_index, slave_camera_id="cam2", stream_identity="infrared1",
                 pairing_gap_us=-10.0, excluded=False,
+                global_ts_gap_us=-10.0, global_ts_gap_us_excluded=False,
                 position_gap_ms=1.0, position_gap_ms_excluded=False):
     return {
         "pair_index": pair_index, "master_camera_id": "cam1", "slave_camera_id": slave_camera_id,
         "stream_identity": stream_identity,
         "pairing_gap_us": pairing_gap_us, "pairing_gap_us_excluded": excluded,
+        "global_ts_gap_us": global_ts_gap_us, "global_ts_gap_us_excluded": global_ts_gap_us_excluded,
         "position_gap_ms": position_gap_ms, "position_gap_ms_excluded": position_gap_ms_excluded,
     }
 
@@ -112,7 +114,10 @@ def test_export_cross_camera_plot_draws_one_line_per_identity():
     # Rows are pre-filtered to ONE slave by the caller (gui/pages/
     # multi_camera_live_session_page.py) - a single figure can still have
     # multiple lines if that one slave shares multiple stream identities
-    # with master.
+    # with master. 4, not 2: each identity now draws BOTH an HW TS Latency
+    # line and a Global TS Latency line on this same axis (see
+    # test_export_cross_camera_plot_draws_global_ts_gap_as_dashed_line_same_color_as_hw_ts_latency
+    # for how they're told apart).
     rows = [
         _cross_row(0, stream_identity="infrared1", pairing_gap_us=-10.0),
         _cross_row(1, stream_identity="infrared1", pairing_gap_us=-11.0),
@@ -124,7 +129,34 @@ def test_export_cross_camera_plot_draws_one_line_per_identity():
     fig = _build_cross_camera_figure(rows, title="Slave 1")
     lines = fig.axes[0].get_lines()
 
-    assert len(lines) == 2
+    assert len(lines) == 4
+    plt.close(fig)
+
+
+def test_export_cross_camera_plot_draws_global_ts_gap_as_dashed_line_same_color_as_hw_ts_latency():
+    rows = [_cross_row(0, stream_identity="infrared1", pairing_gap_us=-10.0, global_ts_gap_us=-2.0)]
+
+    import matplotlib.pyplot as plt
+    from domain.plot_export import _build_cross_camera_figure
+    fig = _build_cross_camera_figure(rows, title="Slave 1")
+    hw_line, global_line = fig.axes[0].get_lines()
+
+    assert hw_line.get_linestyle() == "-"
+    assert global_line.get_linestyle() == "--"
+    assert hw_line.get_color() == global_line.get_color()
+    assert global_line.get_ydata()[0] == -2.0
+    plt.close(fig)
+
+
+def test_export_cross_camera_plot_nans_out_excluded_global_ts_gap_values():
+    rows = [_cross_row(0, global_ts_gap_us=99999.0, global_ts_gap_us_excluded=True)]
+
+    import matplotlib.pyplot as plt
+    from domain.plot_export import _build_cross_camera_figure
+    fig = _build_cross_camera_figure(rows, title="Slave 1")
+    _, global_line = fig.axes[0].get_lines()
+
+    assert math.isnan(global_line.get_ydata()[0])
     plt.close(fig)
 
 

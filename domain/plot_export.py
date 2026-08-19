@@ -170,11 +170,21 @@ def _build_cross_camera_figure(cross_rows, title):
                            for row in pair_rows]
         pairing_ax.plot(pair_indices, pairing_values, label=identity, color=color)
 
+        # Same color as this identity's own HW TS Latency line, dashed
+        # instead of solid - lets the operator directly compare the two
+        # latency measures for the same pairs on one chart (the whole
+        # point of this metric: Global TS Latency should stay near zero
+        # with no drift, unlike its HW-ts counterpart).
+        global_ts_values = [_to_plot_value(row.get("global_ts_gap_us"), row.get("global_ts_gap_us_excluded"))
+                             for row in pair_rows]
+        pairing_ax.plot(pair_indices, global_ts_values, label="{} (global)".format(identity),
+                         color=color, linestyle="--")
+
         position_values = [_to_plot_value(row.get("position_gap_ms"), row.get("position_gap_ms_excluded"))
                             for row in pair_rows]
         position_ax.plot(pair_indices, position_values, label=identity, color=color)
 
-    pairing_ax.set_ylabel("HW TS Latency (us)")
+    pairing_ax.set_ylabel("HW TS / Global TS Latency (us)")
     _style_axis(pairing_ax)
 
     position_ax.set_ylabel("Optical Sync (ms)")
