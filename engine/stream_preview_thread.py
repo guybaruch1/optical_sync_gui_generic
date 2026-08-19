@@ -41,7 +41,7 @@ class StreamPreviewThread(QThread):
             self._capture.start()
 
             bundle_index = 0
-            for image_a, image_b, ts_a, ts_b, num_a, num_b in self._capture.frames_with_diagnostics():
+            for image_a, image_b, ts_a, ts_b, num_a, num_b, _, _ in self._capture.frames_with_diagnostics():
                 if self._stop_requested:
                     break
 

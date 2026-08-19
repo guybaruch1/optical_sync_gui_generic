@@ -157,7 +157,7 @@ def _capture_samples_thread(serial, stop_event, samples_out, samples_lock, error
     capture = ContinuousCapture(serial, IR_PICK, COLOR_PICK, enable_depth_for_ir_sync=enable_depth_sync)
     try:
         capture.start()
-        for _image_a, _image_b, ts_a, ts_b, _num_a, _num_b in capture.frames_with_diagnostics():
+        for _image_a, _image_b, ts_a, ts_b, _num_a, _num_b, _global_ts_a, _global_ts_b in capture.frames_with_diagnostics():
             wall_time = time.monotonic()
             with samples_lock:
                 samples_out.append((wall_time, ts_a, ts_b))
