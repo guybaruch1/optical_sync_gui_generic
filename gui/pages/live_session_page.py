@@ -163,10 +163,17 @@ class LiveSessionPage(QWidget):
         self._hw_ts_latency_stats = RunningStats()
         self._optical_sync_stats = RunningStats()
         self._last_session_rows = None
-        # The switch-time value last acknowledged via Confirm - purely a UI
-        # affordance (see switch_time_spinbox's own setup comment); None
-        # until set_context() first prefills the spinbox.
+        # The switch-time value last acknowledged via Confirm - now a REAL
+        # gate (see _update_confirm_switch_time_button_state): start_session()
+        # reads THIS, not the spinbox directly, so an unconfirmed edit is
+        # never silently used. None until set_context() first prefills the
+        # spinbox (together with this).
         self._last_confirmed_switch_time_ms = None
+        # True for the entire span between start_session() and
+        # _on_engine_thread_finished() - start_button's own enabled state is
+        # the AND of "not currently running" and "no pending unconfirmed
+        # switch-time edit" (see _update_confirm_switch_time_button_state).
+        self._session_running = False
 
         # The page's real content lives in content_widget/layout, inside a
         # QScrollArea - not directly in self. Without this, a lower-
@@ -330,25 +337,24 @@ class LiveSessionPage(QWidget):
         # editable per-run (like duration) so switch speed can be tuned
         # without hand-editing settings.yaml between runs.
         self.switch_time_spinbox.setValue(1.0)
-        # valueChanged only toggles Confirm's enabled state - no hardware
-        # call. Unlike gui/pages/threshold_tuning_page.py's own Confirm
-        # button (which exists to fix a real bug - that page applies switch
-        # time live, mid-run), this page's switch_time_spinbox is ALREADY
-        # only ever read fresh inside start_session() itself and locked for
-        # the whole run (setEnabled(False) below/_on_engine_thread_finished) -
-        # there is no separate "apply" step for Confirm to gate here. It
-        # exists purely for UI parity between the two pages (the operator
-        # sees the same "confirm before it's locked in" affordance on both);
-        # clicking it never touches hardware, only marks the value as
-        # acknowledged.
+        # valueChanged only toggles Confirm's (and, transitively, Start's)
+        # enabled state here - no hardware call happens from typing into
+        # the box. Unlike gui/pages/threshold_tuning_page.py's own Confirm
+        # button (which applies a new speed live, to an already-running LED
+        # panel), there is no live-apply step here: this page's
+        # start_session() reads self._last_confirmed_switch_time_ms, and
+        # Confirm is what advances that value - an edit sitting unconfirmed
+        # in the box is never used for a run, and start_button itself stays
+        # disabled while one is pending (see
+        # _update_confirm_switch_time_button_state).
         self.switch_time_spinbox.valueChanged.connect(self._on_switch_time_spinbox_changed)
         control_row.addWidget(self.switch_time_spinbox)
         self.confirm_switch_time_button = QPushButton("Confirm")
         self.confirm_switch_time_button.setEnabled(False)
         self.confirm_switch_time_button.setToolTip(
-            "Acknowledge the LED Switch Time above - purely a UI confirmation, matching "
-            "Threshold Tuning's own Confirm button. start_session() always reads the spinbox's "
-            "current value fresh regardless of whether this has been clicked."
+            "Confirm the LED Switch Time above. start_session() reads the last confirmed "
+            "value, not the box's raw current value - an unconfirmed edit is never used for "
+            "a run, and Start stays disabled until you confirm or revert it."
         )
         self.confirm_switch_time_button.clicked.connect(self._on_confirm_switch_time_clicked)
         control_row.addWidget(self.confirm_switch_time_button)
@@ -547,12 +553,15 @@ class LiveSessionPage(QWidget):
     def start_session(self):
         ctx = self._context
         duration_s = self.duration_spinbox.value() or None
-        # Read live from the toolbar, not ctx["switch_time_ms"] - the
-        # spinbox is what the operator can tune per-run (see set_context).
-        # Used for BOTH the metric's math and the LED panel's actual scan
-        # speed (below) - they must agree, or position_gap_ms would be
-        # computed against a switch time the panel wasn't really using.
-        switch_time_ms = self.switch_time_spinbox.value()
+        # Read the last CONFIRMED value, not whatever the spinbox currently
+        # shows - Confirm is a real gate now (see
+        # _update_confirm_switch_time_button_state): an edit sitting
+        # unconfirmed in the box must never silently be used for a run, and
+        # Start itself stays disabled while one is pending anyway. Used for
+        # BOTH the metric's math and the LED panel's actual scan speed
+        # (below) - they must agree, or position_gap_ms would be computed
+        # against a switch time the panel wasn't really using.
+        switch_time_ms = self._last_confirmed_switch_time_ms
         display_stride = self.frame_sample_interval_spinbox.value()
         # Read BEFORE _begin_new_run_output() (unlike before this feature
         # existed) - the output folder's own name now encodes these three
@@ -645,6 +654,7 @@ class LiveSessionPage(QWidget):
         self.engine_thread.finished.connect(self._on_engine_thread_finished)
         self.engine_thread.start()
 
+        self._session_running = True
         self.status_label.setText("")
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
@@ -672,6 +682,12 @@ class LiveSessionPage(QWidget):
     def _update_confirm_switch_time_button_state(self):
         unconfirmed = self.switch_time_spinbox.value() != self._last_confirmed_switch_time_ms
         self.confirm_switch_time_button.setEnabled(unconfirmed)
+        # Not gated while a session is running - start_session()'s own lock
+        # (setEnabled(False)) already owns start_button for that span; this
+        # only decides start_button's state for the "not currently running"
+        # span, where it's otherwise always available.
+        if not self._session_running:
+            self.start_button.setEnabled(not unconfirmed)
 
     def _on_confirm_switch_time_clicked(self):
         # No hardware call - purely acknowledges the current value so
@@ -863,12 +879,13 @@ class LiveSessionPage(QWidget):
         # QThread.finished - fires only once run() has fully returned,
         # finally block included, so it's safe to let the user start a new
         # session now (the camera/LED panel are actually free).
-        self.start_button.setEnabled(True)
+        self._session_running = False
         self.stop_button.setEnabled(False)
         self.duration_spinbox.setEnabled(True)
         self.switch_time_spinbox.setEnabled(True)
-        # Not a blind setEnabled(True) - Confirm's availability still
-        # reflects whether the spinbox actually holds an unconfirmed value.
+        # Not a blind setEnabled(True) on start_button - its availability
+        # also reflects whether the spinbox actually holds an unconfirmed
+        # value (see _update_confirm_switch_time_button_state).
         self._update_confirm_switch_time_button_state()
         self.frame_sample_interval_spinbox.setEnabled(True)
 
