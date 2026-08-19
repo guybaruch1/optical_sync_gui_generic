@@ -394,10 +394,16 @@ class MultiCameraLiveSessionPage(QWidget):
         self._cross_running_stats' min/avg/std/max permanently polluted by
         every previous run's samples (min/max in particular never recover),
         and the plots keep drawing the new run's points (pair_index
-        restarting from 1) on top of the previous run's leftover data."""
+        restarting from 1) on top of the previous run's leftover data. Also
+        refreshes each slave's own "LED Switch Time (ms)" display field to
+        the value THIS run will actually use - it was built once, at
+        set_cameras() time, from each camera's own original per-camera
+        config, which no longer matches once the operator confirms a
+        per-test override that differs from it."""
         for section in self._slave_sections.values():
             section["pairing_plot"].clear_data()
             section["position_plot"].clear_data()
+            section["stats_panel"].set_value("switch_time_ms", self._last_confirmed_switch_time_ms)
         for key in self._cross_running_stats:
             self._cross_running_stats[key] = RunningStats()
 

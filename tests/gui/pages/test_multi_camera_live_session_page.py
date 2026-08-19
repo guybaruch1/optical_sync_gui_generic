@@ -206,6 +206,20 @@ def test_start_all_sessions_uses_confirmed_switch_time_for_every_camera(qapp, tm
     assert specs_by_camera_id["cam2"].switch_time_ms == 5.0
 
 
+def test_start_all_sessions_refreshes_cross_camera_switch_time_display(qapp, tmp_path):
+    page, _ = _page_with_fake_threads()
+    cameras = _two_cameras(tmp_path)
+    cameras[0]["config"]["switch_time_ms"] = 3.0  # cam1's own stale, originally-tuned value
+    page.set_cameras(object(), cameras)
+    page.switch_time_spinbox.setValue(5.0)
+    page._on_confirm_switch_time_clicked()
+
+    page.start_all_sessions()
+
+    stats_panel = page._slave_sections["cam2"]["stats_panel"]
+    assert stats_panel._value_labels["switch_time_ms"].text() == "5.0"
+
+
 def test_finishing_all_sessions_does_not_reenable_start_over_a_pending_unconfirmed_edit(qapp, tmp_path):
     page, fake_threads = _page_with_fake_threads()
     page.set_cameras(object(), _two_cameras(tmp_path))
