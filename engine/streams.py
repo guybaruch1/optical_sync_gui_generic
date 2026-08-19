@@ -645,17 +645,49 @@ def set_manual_exposure(sensor, exposure):
     return True
 
 
+def _read_global_ts_us(frame_a, frame_b):
+    """Reads and validates both frames' RealSense global timestamp
+    (frame.get_timestamp(), converted from its native ms to this project's
+    _ts_us microsecond convention) - the join key
+    engine.cross_camera_reconciler.CrossCameraReconciler's matching uses.
+    Raises if either frame isn't actually reporting the GLOBAL_TIME domain:
+    global_time_enabled may be disabled/unsupported on this device/driver,
+    in which case frame.get_timestamp() silently falls back to a different
+    domain (system_time/hardware_clock) that isn't comparable across two
+    independent devices the way GLOBAL_TIME is meant to be - a silently-
+    wrong value here would be worse than an obvious failure (same "fail
+    loudly" convention as the frame_timestamp metadata check in
+    ContinuousCapture.frames_with_diagnostics, the only caller of this
+    function)."""
+    domain = rs.timestamp_domain.global_time
+    if frame_a.get_frame_timestamp_domain() != domain or frame_b.get_frame_timestamp_domain() != domain:
+        raise RuntimeError(
+            "This camera is not reporting frames in the RealSense GLOBAL_TIME "
+            "timestamp domain (global_time_enabled may be disabled or unsupported "
+            "on this device/driver), which the cross-camera Global TS Latency "
+            "metric requires. Reconnect the camera or disable "
+            "camera_sync.capture_global_ts and retry."
+        )
+    return frame_a.get_timestamp() * 1000.0, frame_b.get_timestamp() * 1000.0
+
+
 class ContinuousCapture:
-    def __init__(self, device_serial, pick_a, pick_b, enable_depth_for_ir_sync=True):
+    def __init__(self, device_serial, pick_a, pick_b, enable_depth_for_ir_sync=True, capture_global_ts=False):
         self.device_serial = device_serial
         self.pick_a = pick_a
         self.pick_b = pick_b
         # See _depth_sync_stream/_build_config - whether to co-enable the
         # stereo module's depth stream to fix IR/RGB sync.
         self.enable_depth_for_ir_sync = enable_depth_for_ir_sync
+        # Opt-in: reads+validates each frame's RealSense GLOBAL_TIME-domain
+        # timestamp too (see _read_global_ts_us) - a cross-camera-only
+        # concept (engine.cross_camera_reconciler's matching key and its
+        # Global TS Latency metric), so single-camera runs never need or
+        # request it.
+        self.capture_global_ts = capture_global_ts
         # Set on start() to whether a depth stream was actually requested
         # (self._depth_sync_stream() is not None) - not a resolve/success
-        # check, just what start() attempted, for callers to report.
+        # check, just what start() attempted, for callers that want to report.
         self.depth_sync_active = False
         self._pipeline = None
 
@@ -745,7 +777,7 @@ class ContinuousCapture:
         return frameset.get_color_frame(pick["stream_index"])
 
     def frames(self):
-        for stream_a_image, stream_b_image, stream_a_ts_us, stream_b_ts_us, _, _ in self.frames_with_diagnostics():
+        for stream_a_image, stream_b_image, stream_a_ts_us, stream_b_ts_us, _, _, _, _ in self.frames_with_diagnostics():
             yield stream_a_image, stream_b_image, stream_a_ts_us, stream_b_ts_us
 
     def frames_with_diagnostics(self):
@@ -774,7 +806,12 @@ class ContinuousCapture:
             num_a = frame_a.get_frame_number()
             num_b = frame_b.get_frame_number()
 
-            yield image_a, image_b, ts_a, ts_b, num_a, num_b
+            if self.capture_global_ts:
+                global_ts_a, global_ts_b = _read_global_ts_us(frame_a, frame_b)
+            else:
+                global_ts_a, global_ts_b = None, None
+
+            yield image_a, image_b, ts_a, ts_b, num_a, num_b, global_ts_a, global_ts_b
 
     def stop(self):
         if self._pipeline is not None:

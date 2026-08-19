@@ -12,6 +12,7 @@ from engine.streams import (
     parse_camera_tests_config, resolve_camera_tests,
     set_inter_cam_sync_mode, INTER_CAM_SYNC_MASTER, INTER_CAM_SYNC_SLAVE,
     resolve_inter_cam_sync_value, resolve_max_slave_color_resolution,
+    _read_global_ts_us,
 )
 
 
@@ -1097,3 +1098,57 @@ def test_continuous_capture_stop_is_safe_after_start_raises():
             capture.start()
 
     capture.stop()  # must not raise - nothing was ever successfully started
+
+
+# --- ContinuousCapture's opt-in capture_global_ts feature: _read_global_ts_us
+# is a pure validation+conversion helper, testable with a tiny fake exposing
+# only the two rs.frame methods it actually calls - no real pipeline/frameset
+# needed, same "pull the meaningful logic into its own testable function"
+# convention _depth_sync_stream/_build_config already use in this file. ---
+
+class _FakeGlobalTsFrame:
+    def __init__(self, timestamp_ms, domain):
+        self._timestamp_ms = timestamp_ms
+        self._domain = domain
+
+    def get_timestamp(self):
+        return self._timestamp_ms
+
+    def get_frame_timestamp_domain(self):
+        return self._domain
+
+
+def test_read_global_ts_us_converts_ms_to_us_for_both_frames():
+    frame_a = _FakeGlobalTsFrame(1000.5, rs.timestamp_domain.global_time)
+    frame_b = _FakeGlobalTsFrame(2000.25, rs.timestamp_domain.global_time)
+
+    global_ts_a, global_ts_b = _read_global_ts_us(frame_a, frame_b)
+
+    assert global_ts_a == 1_000_500.0
+    assert global_ts_b == 2_000_250.0
+
+
+def test_read_global_ts_us_raises_when_frame_a_is_the_wrong_domain():
+    frame_a = _FakeGlobalTsFrame(1000.0, rs.timestamp_domain.system_time)
+    frame_b = _FakeGlobalTsFrame(2000.0, rs.timestamp_domain.global_time)
+
+    with pytest.raises(RuntimeError, match="GLOBAL_TIME"):
+        _read_global_ts_us(frame_a, frame_b)
+
+
+def test_read_global_ts_us_raises_when_frame_b_is_the_wrong_domain():
+    frame_a = _FakeGlobalTsFrame(1000.0, rs.timestamp_domain.global_time)
+    frame_b = _FakeGlobalTsFrame(2000.0, rs.timestamp_domain.hardware_clock)
+
+    with pytest.raises(RuntimeError, match="GLOBAL_TIME"):
+        _read_global_ts_us(frame_a, frame_b)
+
+
+def test_continuous_capture_capture_global_ts_defaults_to_false():
+    capture = ContinuousCapture("SN1", _ir_pick(), _color_pick())
+    assert capture.capture_global_ts is False
+
+
+def test_continuous_capture_capture_global_ts_can_be_enabled():
+    capture = ContinuousCapture("SN1", _ir_pick(), _color_pick(), capture_global_ts=True)
+    assert capture.capture_global_ts is True
