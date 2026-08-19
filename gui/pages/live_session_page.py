@@ -672,11 +672,13 @@ class LiveSessionPage(QWidget):
             self.engine_thread.request_stop()
 
     def _on_switch_time_spinbox_changed(self, value):
-        # Pure UI state - matches gui/pages/threshold_tuning_page.py's own
-        # identically-named handler, but there is no hardware call to gate
-        # here at all - start_session() always reads the spinbox's current
-        # value fresh regardless of this button. See switch_time_spinbox's
-        # own setup comment for why this exists purely for UI parity.
+        # No hardware call here - typing into the box only updates the GATE
+        # state (Confirm's and, transitively, Start's enabled state via
+        # _update_confirm_switch_time_button_state). start_session() reads
+        # self._last_confirmed_switch_time_ms, not the spinbox directly,
+        # precisely because of this gating - an edit sitting here unconfirmed
+        # must never be silently used for a run. See switch_time_spinbox's
+        # own setup comment for the full rationale.
         self._update_confirm_switch_time_button_state()
 
     def _update_confirm_switch_time_button_state(self):
@@ -690,9 +692,11 @@ class LiveSessionPage(QWidget):
             self.start_button.setEnabled(not unconfirmed)
 
     def _on_confirm_switch_time_clicked(self):
-        # No hardware call - purely acknowledges the current value so
-        # Confirm disables itself again, matching Threshold Tuning's own
-        # Confirm button's visual behavior.
+        # No hardware call - but this DOES advance the real gate:
+        # _last_confirmed_switch_time_ms becomes what start_session() will
+        # actually use, and _update_confirm_switch_time_button_state() below
+        # both disables Confirm again and re-enables start_button (if a
+        # session isn't already running) now that nothing is unconfirmed.
         self._last_confirmed_switch_time_ms = self.switch_time_spinbox.value()
         self._update_confirm_switch_time_button_state()
 
