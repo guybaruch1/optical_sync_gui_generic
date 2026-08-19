@@ -1,6 +1,8 @@
 """Wizard shell: a Camera Hub page in front of every run (even a single
 camera - see docs/superpowers's multi-camera design doc's "Design detail"
-section 4) that fans out into the existing per-camera sub-flow (Device
+section 4; the hub still fronts every run regardless of camera count, only
+its Start destination now depends on camera count - see the paragraph
+below) that fans out into the existing per-camera sub-flow (Device
 select -> Stream config -> ROI select -> Calibration -> Threshold tuning),
 in a QStackedWidget, persisting choices to state.gui_state as the user
 moves through the wizard.
@@ -26,7 +28,12 @@ instead routes to the original single-camera gui/pages/live_session_page.py's
 LiveSessionPage directly - a solo camera has no genlock partner and no
 cross-camera concept, so the lighter, purpose-built single-camera page is
 used instead of the multi-camera one. See
-_on_start_multi_camera_session_requested for the branch.
+_on_start_multi_camera_session_requested for the branch. Note this is a
+genuine second implementation of the single-camera view:
+gui/widgets/camera_live_session_panel.py's CameraLiveSessionPanel is the
+2+-camera page's own near-clone of it (chart/export/snapshot/switch-time-
+gate logic all duplicated) - a behavior fix to one must be mirrored in the
+other, since both are now independently reachable.
 """
 
 import numpy as np
@@ -46,6 +53,7 @@ from engine.streams import (
     list_video_stream_options, stream_slug,
     parse_camera_tests_config, resolve_camera_tests,
     resolve_inter_cam_sync_value, resolve_max_slave_color_resolution,
+    find_device_by_serial, set_inter_cam_sync_mode, INTER_CAM_SYNC_DEFAULT,
 )
 from domain.calibration import load_led_positions
 from settings import ensure_output_dir
@@ -542,6 +550,18 @@ class MainWindow(QMainWindow):
             # dict's own keys already match set_context()'s parameters
             # exactly - see _on_tuning_done's own comment.
             only_camera = next(iter(self._cameras.values()))
+            # Best-effort self-heal, mirroring engine/multi_camera_session.py's
+            # own _reset_genlock_roles: a camera left stuck in
+            # INTER_CAM_SYNC_SLAVE from an earlier crashed/killed multi-camera
+            # run would otherwise sit waiting here for a genlock trigger it
+            # will never receive when run solo. A single device-lookup/set
+            # failure (e.g. no hardware connected) must not block starting the
+            # session - swallow it and proceed regardless.
+            try:
+                device = find_device_by_serial(self.ctx, only_camera["config"]["device_serial"])
+                set_inter_cam_sync_mode(device, INTER_CAM_SYNC_DEFAULT)
+            except Exception:
+                pass
             self.live_session_page.set_context(ctx=self.ctx, **only_camera["config"])
             self.stack.setCurrentWidget(self.live_session_page)
             return

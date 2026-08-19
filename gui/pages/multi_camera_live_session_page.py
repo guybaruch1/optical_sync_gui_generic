@@ -50,7 +50,12 @@ subfolder underneath it (domain.run_output.create_camera_subdir), and a
 combined cross_camera_sync.csv plus one cross_camera_sync_plot_{slave-slug}.png
 per slave, all written once every camera's session has finished
 (_on_all_sessions_finished) - skipped entirely for a single-camera run,
-where there's no cross-camera concept at all."""
+where there's no cross-camera concept at all. (Single-camera runs no longer
+reach this page in the running app at all - gui/main_window.py's
+_on_start_multi_camera_session_requested routes exactly 1 configured camera
+to gui/pages/live_session_page.py's LiveSessionPage instead - but this
+page's own single-camera branch is kept for direct unit-test coverage and
+as defensive robustness against ever being reached with 1 camera.)"""
 
 import os
 
@@ -273,6 +278,11 @@ class MultiCameraLiveSessionPage(QWidget):
         self._cross_tab_layout.addWidget(QLabel("Cross-Camera Sync (master vs. each slave)"))
 
         if len(cameras) < 2:
+            # Single-camera runs no longer reach this page in the running
+            # app - see main_window._on_start_multi_camera_session_requested,
+            # which routes exactly 1 configured camera to LiveSessionPage
+            # instead - but this branch is kept for direct unit-test
+            # coverage / defensive robustness.
             self._cross_tab_layout.addWidget(
                 QLabel("Add a second camera to see cross-camera sync.")
             )
@@ -660,7 +670,11 @@ class MultiCameraLiveSessionPage(QWidget):
         # Only when a cross-camera comparison actually exists (>=2 cameras,
         # >=1 shared stream identity) - with a single camera there's no
         # cross-camera concept at all, and writing an empty-but-valid
-        # cross_camera_sync.csv would just be confusing clutter.
+        # cross_camera_sync.csv would just be confusing clutter. (As above,
+        # single-camera runs no longer reach this page in the running app -
+        # see main_window._on_start_multi_camera_session_requested - this
+        # guard is kept for direct unit-test coverage / defensive
+        # robustness.)
         if self._cross_pair_series_keys:
             export_cross_camera_csv(self._cross_rows, os.path.join(self._run_dir, "cross_camera_sync.csv"))
 
