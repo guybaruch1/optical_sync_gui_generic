@@ -624,17 +624,33 @@ def test_start_multi_camera_session_requested_does_nothing_with_no_cameras(qapp)
     assert window.stack.currentWidget() is window.camera_hub_page
 
 
-def test_start_multi_camera_session_requested_switches_to_the_new_page_with_cameras(qapp, monkeypatch, tmp_path):
+def test_start_multi_camera_session_requested_switches_to_live_session_page_with_exactly_one_camera(qapp, monkeypatch, tmp_path):
     window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
-    camera_id = window._editing_camera_id
     with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
         window._on_calibration_done()
         window._on_tuning_done()
 
     window._on_start_multi_camera_session_requested()
 
-    assert window.stack.currentWidget() is window.multi_camera_live_session_page
-    assert camera_id in window.multi_camera_live_session_page._panels
+    assert window.stack.currentWidget() is window.live_session_page
+    assert window.live_session_page._context["device_serial"] == "SN123"
+
+
+def test_start_multi_camera_session_requested_skips_genlock_resolution_for_one_camera(qapp, monkeypatch, tmp_path):
+    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window._on_tuning_done()
+
+    calls = []
+    monkeypatch.setattr(
+        main_window_module, "resolve_inter_cam_sync_value",
+        lambda *a, **k: calls.append((a, k)) or 1,
+    )
+
+    window._on_start_multi_camera_session_requested()
+
+    assert calls == []
 
 
 # --- Genlock (inter_cam_sync_mode) role resolution: MainWindow embeds the
@@ -692,9 +708,30 @@ def test_start_multi_camera_session_requested_embeds_inter_cam_sync_value_for_ma
 
 def test_start_multi_camera_session_requested_leaves_inter_cam_sync_value_none_for_unconfigured_camera_model(qapp, monkeypatch, tmp_path):
     # No camera.inter_cam_sync entry at all for this device name - genlock is
-    # skipped entirely rather than guessing a possibly-wrong raw value.
+    # skipped entirely rather than guessing a possibly-wrong raw value. Needs
+    # 2 cameras: with only 1 configured, MainWindow now routes to
+    # LiveSessionPage instead (see test_start_multi_camera_session_requested_
+    # switches_to_live_session_page_with_exactly_one_camera), which never
+    # attempts genlock resolution for a solo camera at all.
     window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+    first_camera_id = window._editing_camera_id
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window._on_tuning_done()
 
+    window._on_add_camera_requested()
+    window._on_device_chosen("SN456", "Intel RealSense D455")
+    window._on_config_chosen((IR1, COLOR0, {
+        "emitter_enabled": False, "auto_exposure": True, "exposure_a": None, "exposure_b": None,
+    }))
+    window.gui_state.stream_a_roi = [0, 0, 50, 50]
+    window.gui_state.stream_b_roi = [0, 0, 50, 50]
+    window.calibration_page.last_calibration_result = dict(
+        image_a_on=np.full((50, 50), 50, dtype=np.uint8), image_a_off=np.full((50, 50), 50, dtype=np.uint8),
+        image_b_on=np.full((50, 50), 50, dtype=np.uint8), image_b_off=np.full((50, 50), 50, dtype=np.uint8),
+        stream_a_otsu_threshold=127, stream_b_otsu_threshold=127,
+        min_blob_area=5, row_gap_px=15, neighborhood_size=5,
+    )
     with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
         window._on_calibration_done()
         window._on_tuning_done()
@@ -702,8 +739,8 @@ def test_start_multi_camera_session_requested_leaves_inter_cam_sync_value_none_f
     window._on_start_multi_camera_session_requested()
 
     page = window.multi_camera_live_session_page
-    only_config = page._cameras[0]["config"]
-    assert only_config["inter_cam_sync_value"] is None
+    configs_by_id = {c["camera_id"]: c["config"] for c in page._cameras}
+    assert configs_by_id[first_camera_id]["inter_cam_sync_value"] is None
 
 
 # --- Slave color-resolution guard: a genlock SLAVE's own color stream

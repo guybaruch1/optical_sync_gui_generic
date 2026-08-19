@@ -19,12 +19,14 @@ known, deliberately-deferred limitation - see the design doc's "Explicitly
 deferred to v2" list); self._cameras is this run's actual source of truth
 for every configured camera's full config.
 
-CameraHubPage's "Start Multi-Camera Live Session" now switches to
-gui/pages/multi_camera_live_session_page.py's MultiCameraLiveSessionPage,
-handing it self._cameras/self._master_camera_id verbatim - the original
-single-camera LiveSessionPage is untouched and no longer constructed here
-at all (its logic lives on in gui/widgets/camera_live_session_panel.py's
-CameraLiveSessionPanel, one per configured camera on the new page).
+CameraHubPage's "Start Multi-Camera Live Session" switches to
+gui/pages/multi_camera_live_session_page.py's MultiCameraLiveSessionPage
+when 2+ cameras are configured. With exactly 1 configured camera, it
+instead routes to the original single-camera gui/pages/live_session_page.py's
+LiveSessionPage directly - a solo camera has no genlock partner and no
+cross-camera concept, so the lighter, purpose-built single-camera page is
+used instead of the multi-camera one. See
+_on_start_multi_camera_session_requested for the branch.
 """
 
 import numpy as np
@@ -38,6 +40,7 @@ from gui.pages.calibration_page import CalibrationPage
 from gui.pages.threshold_tuning_page import ThresholdTuningPage
 from gui.pages.camera_hub_page import CameraHubPage, CameraSummary
 from gui.pages.multi_camera_live_session_page import MultiCameraLiveSessionPage
+from gui.pages.live_session_page import LiveSessionPage
 from state.gui_state import GuiState, save_gui_state
 from engine.streams import (
     list_video_stream_options, stream_slug,
@@ -111,6 +114,7 @@ class MainWindow(QMainWindow):
         self.threshold_tuning_page = ThresholdTuningPage()
         self.camera_hub_page = CameraHubPage()
         self.multi_camera_live_session_page = MultiCameraLiveSessionPage()
+        self.live_session_page = LiveSessionPage()
         self._device_name = None
         # Stashed in _on_calibration_done, consumed in _on_tuning_done -
         # everything the eventual multi-camera Live Session controller will
@@ -159,7 +163,7 @@ class MainWindow(QMainWindow):
 
         for page in (self.device_page, self.stream_config_page, self.roi_page,
                      self.calibration_page, self.threshold_tuning_page, self.camera_hub_page,
-                     self.multi_camera_live_session_page):
+                     self.multi_camera_live_session_page, self.live_session_page):
             self.stack.addWidget(page)
 
         self.device_page.device_chosen.connect(self._on_device_chosen)
@@ -528,6 +532,18 @@ class MainWindow(QMainWindow):
         # disabled - see CameraHubPage._can_start), but guard defensively
         # rather than switch to an empty page if something else calls this.
         if not self._cameras:
+            return
+        if len(self._cameras) == 1:
+            # A solo camera has no genlock partner and no cross-camera
+            # concept at all - route to the lighter, purpose-built
+            # single-camera page instead of the multi-camera one, skipping
+            # genlock/slave-color-resolution resolution entirely (it's
+            # meaningless without a second camera). The per-camera config
+            # dict's own keys already match set_context()'s parameters
+            # exactly - see _on_tuning_done's own comment.
+            only_camera = next(iter(self._cameras.values()))
+            self.live_session_page.set_context(ctx=self.ctx, **only_camera["config"])
+            self.stack.setCurrentWidget(self.live_session_page)
             return
         # Genlock role resolution happens fresh HERE, at Start-time, not
         # earlier - the master assignment can change at any point in the hub
