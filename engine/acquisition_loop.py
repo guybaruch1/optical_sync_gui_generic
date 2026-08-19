@@ -29,7 +29,9 @@ class AcquisitionLoop:
 
     def run_until_stopped(self, is_stop_requested, elapsed_s_fn) -> "list[dict]":
         pair_index = 0
-        for stream_a_image, stream_b_image, stream_a_ts_us, stream_b_ts_us, stream_a_bright, stream_b_bright in self.frame_source:
+        for (stream_a_image, stream_b_image, stream_a_ts_us, stream_b_ts_us,
+             stream_a_bright, stream_b_bright,
+             stream_a_global_ts_us, stream_b_global_ts_us) in self.frame_source:
             if is_stop_requested():
                 break
             if self.test_session.should_auto_stop(elapsed_s_fn()):
@@ -41,6 +43,8 @@ class AcquisitionLoop:
                 stream_b_ts_us=stream_b_ts_us,
                 stream_a_bright=stream_a_bright,
                 stream_b_bright=stream_b_bright,
+                stream_a_global_ts_us=stream_a_global_ts_us,
+                stream_b_global_ts_us=stream_b_global_ts_us,
             )
             row = self.test_session.process_pair(sample)
             self.callbacks.on_row(row)

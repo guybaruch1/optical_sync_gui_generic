@@ -25,6 +25,8 @@ class FramePairSample:
     stream_b_bright: "np.ndarray | None" = None
     stream_a_frame_drop: bool = False
     stream_b_frame_drop: bool = False
+    stream_a_global_ts_us: "float | None" = None
+    stream_b_global_ts_us: "float | None" = None
 
 
 @dataclass

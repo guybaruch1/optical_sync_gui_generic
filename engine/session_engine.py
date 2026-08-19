@@ -75,7 +75,8 @@ class SessionEngineThread(QThread):
                  test_session, stream_a_xy=None, stream_b_xy=None, neighborhood_size=5,
                  scan_direction=None, switch_time_ms=None,
                  display_stride=10, position_gap_metric=None, dual_panel_config=None,
-                 enable_depth_for_ir_sync=True, hardware_reset_before_start=False,
+                 enable_depth_for_ir_sync=True, capture_global_ts=False,
+                 hardware_reset_before_start=False,
                  hardware_reset_settle_s=8.0, output_dir=None,
                  position_gap_outlier_threshold_ms=None, position_gap_outlier_max_snapshots=200,
                  parent=None):
@@ -91,6 +92,11 @@ class SessionEngineThread(QThread):
         # (camera_sync:) - see ContinuousCapture._depth_sync_stream and
         # run()'s reset block below for what each actually does and why.
         self.enable_depth_for_ir_sync = enable_depth_for_ir_sync
+        # Cross-camera-only concept (engine.cross_camera_reconciler's
+        # matching key and its Global TS Latency metric) - see
+        # ContinuousCapture.__init__'s own capture_global_ts docstring for
+        # why single-camera runs never set this.
+        self.capture_global_ts = capture_global_ts
         self.hardware_reset_before_start = hardware_reset_before_start
         self.hardware_reset_settle_s = hardware_reset_settle_s
         self.stream_a_xy = stream_a_xy
@@ -130,14 +136,17 @@ class SessionEngineThread(QThread):
         self._stop_requested = True
 
     def _frame_pairs_with_brightness(self):
-        """Adapts ContinuousCapture.frames()'s 4-tuple (image, image, ts, ts)
-        into the 6-tuple AcquisitionLoop/FramePairSample need, by sampling
-        brightness at each calibrated LED position. This is deliberately done
-        here, not inside ContinuousCapture itself: ContinuousCapture is a
-        generic hardware-capture primitive with no notion of LED positions or
-        metrics (gui/pages/calibration_page.py, a later task, consumes its raw
-        4-tuple directly for exactly that reason)."""
-        for stream_a_image, stream_b_image, stream_a_ts_us, stream_b_ts_us in self._capture.frames():
+        """Adapts ContinuousCapture.frames_with_diagnostics()'s 8-tuple into
+        the 8-tuple AcquisitionLoop/FramePairSample need, by sampling
+        brightness at each calibrated LED position and discarding the two
+        frame-number entries this method has no use for. Reads
+        frames_with_diagnostics() directly (not the plain 4-tuple frames()
+        wrapper) specifically so the global-ts values it also carries reach
+        AcquisitionLoop - frames() itself stays unchanged for its own
+        callers (gui/pages/calibration_page.py, gui/pages/roi_select_page.py),
+        which have no notion of metrics/global-ts at all."""
+        for (stream_a_image, stream_b_image, stream_a_ts_us, stream_b_ts_us, _, _,
+             stream_a_global_ts_us, stream_b_global_ts_us) in self._capture.frames_with_diagnostics():
             stream_a_bright = (
                 sample_all_neighborhood_brightness(stream_a_image, self.stream_a_xy, self._stream_a_safe_size)
                 if self.stream_a_xy is not None else None
@@ -146,7 +155,8 @@ class SessionEngineThread(QThread):
                 sample_all_neighborhood_brightness(stream_b_image, self.stream_b_xy, self._stream_b_safe_size)
                 if self.stream_b_xy is not None else None
             )
-            yield stream_a_image, stream_b_image, stream_a_ts_us, stream_b_ts_us, stream_a_bright, stream_b_bright
+            yield (stream_a_image, stream_b_image, stream_a_ts_us, stream_b_ts_us,
+                   stream_a_bright, stream_b_bright, stream_a_global_ts_us, stream_b_global_ts_us)
 
     def _maybe_save_position_gap_outlier(self, stream_a_image, stream_b_image, row):
         """Saves a side-by-side IR/RGB debug image (same on/off overlay style
@@ -253,6 +263,7 @@ class SessionEngineThread(QThread):
             self._capture = ContinuousCapture(
                 self.device_serial, self.pick_a, self.pick_b,
                 enable_depth_for_ir_sync=self.enable_depth_for_ir_sync,
+                capture_global_ts=self.capture_global_ts,
             )
             self._capture.start()
             self._start_time = time.time()

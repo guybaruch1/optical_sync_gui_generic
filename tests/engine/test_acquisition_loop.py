@@ -15,7 +15,7 @@ def fake_frame_source(n_pairs):
     for i in range(n_pairs):
         stream_a_image = np.full((4, 4, 3), i, dtype=np.uint8)
         stream_b_image = np.full((4, 4, 3), i, dtype=np.uint8)
-        yield stream_a_image, stream_b_image, float(i), float(i), None, None
+        yield stream_a_image, stream_b_image, float(i), float(i), None, None, None, None
 
 
 def test_run_until_stopped_processes_every_frame_and_calls_on_row():
@@ -128,3 +128,29 @@ def test_run_until_stopped_works_without_on_frame_pair():
     loop = AcquisitionLoop(fake_frame_source(3), session, callbacks, display_stride=10)
     rows = loop.run_until_stopped(is_stop_requested=lambda: False, elapsed_s_fn=lambda: 0.0)
     assert len(rows) == 3
+
+
+# --- Global timestamps: AcquisitionLoop's frame_source now yields an
+# 8-tuple (2 more entries than before) - fake_frame_source above always
+# supplies None, None for them; this section proves real values thread
+# through into the row unchanged. ---
+
+def fake_frame_source_with_global_ts(n_pairs):
+    for i in range(n_pairs):
+        stream_a_image = np.full((4, 4, 3), i, dtype=np.uint8)
+        stream_b_image = np.full((4, 4, 3), i, dtype=np.uint8)
+        yield stream_a_image, stream_b_image, float(i), float(i), None, None, float(i) * 10, float(i) * 10 + 1
+
+
+def test_run_until_stopped_threads_global_ts_into_the_row():
+    session = TestSession(TestSessionConfig(metrics=[CountingMetric()]))
+    session.start()
+    callbacks = AcquisitionCallbacks(on_frames=lambda *a: None, on_row=lambda r: None, on_stats=lambda s: None)
+    loop = AcquisitionLoop(fake_frame_source_with_global_ts(2), session, callbacks, display_stride=10)
+
+    rows = loop.run_until_stopped(is_stop_requested=lambda: False, elapsed_s_fn=lambda: 0.0)
+
+    assert rows[0]["stream_a_global_ts_us"] == 0.0
+    assert rows[0]["stream_b_global_ts_us"] == 1.0
+    assert rows[1]["stream_a_global_ts_us"] == 10.0
+    assert rows[1]["stream_b_global_ts_us"] == 11.0
