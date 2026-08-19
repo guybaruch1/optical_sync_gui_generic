@@ -562,6 +562,12 @@ class LiveSessionPage(QWidget):
         # (below) - they must agree, or position_gap_ms would be computed
         # against a switch time the panel wasn't really using.
         switch_time_ms = self._last_confirmed_switch_time_ms
+        # Refresh the stats tile to the value THIS run actually uses -
+        # set_context() is otherwise the only writer of this field, so
+        # confirming a different switch time and starting a run left the
+        # tile showing the stale pre-confirm value for the whole run even
+        # though the run itself used the newly-confirmed one.
+        self.stats_panel.set_value("switch_time_ms", switch_time_ms)
         display_stride = self.frame_sample_interval_spinbox.value()
         # Read BEFORE _begin_new_run_output() (unlike before this feature
         # existed) - the output folder's own name now encodes these three

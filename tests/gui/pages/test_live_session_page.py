@@ -227,6 +227,18 @@ def test_start_session_passes_toolbar_switch_time_and_frame_sample_interval(qapp
     assert _FakeEngineThread.last_kwargs["display_stride"] == 99
 
 
+def test_start_session_refreshes_the_switch_time_stats_tile_to_the_confirmed_value(qapp, tmp_path):
+    page = LiveSessionPage()
+    page.set_context(**_minimal_context(tmp_path, switch_time_ms=1))
+    page.switch_time_spinbox.setValue(5)
+    page._on_confirm_switch_time_clicked()
+
+    with patch("gui.pages.live_session_page.SessionEngineThread", _FakeEngineThread):
+        page.start_session()
+
+    assert page.stats_panel._value_labels["switch_time_ms"].text() == "5.0"
+
+
 # --- settings.yaml camera_sync: knobs must actually reach the engine thread,
 # since they change how the camera is brought up and therefore the very
 # inter-sensor offset the app measures. ---

@@ -2,6 +2,7 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pyrealsense2 as rs
+import pytest
 from PySide6.QtCore import QObject, Signal
 
 from gui.pages.multi_camera_live_session_page import MultiCameraLiveSessionPage
@@ -124,6 +125,36 @@ def test_set_cameras_builds_one_tab_per_camera(qapp, tmp_path):
     assert page.tabs.count() == 3
     assert "cam1" in page._panels
     assert "cam2" in page._panels
+
+
+def test_set_cameras_prefills_switch_time_from_masters_own_tuned_value(qapp, tmp_path):
+    page, _ = _page_with_fake_threads()
+    cameras = _two_cameras(tmp_path)
+    cameras[0]["config"]["switch_time_ms"] = 2.5  # cam1 is master in _two_cameras
+
+    page.set_cameras(object(), cameras)
+
+    assert page.switch_time_spinbox.value() == 2.5
+    assert page.start_button.isEnabled()  # prefill must count as already-confirmed, not a pending edit
+
+
+def test_start_all_sessions_leaves_session_running_false_after_an_early_exception(qapp, tmp_path):
+    # Regression test: self._session_running used to be set True as the very
+    # first line of start_all_sessions(), ~90 lines before the actual
+    # widget-locking block - an exception raised anywhere in between (e.g.
+    # no master camera designated, as forced here) left the flag stuck True
+    # forever with start_button never actually disabled, permanently
+    # breaking _update_confirm_switch_time_button_state()'s own gate.
+    page, _ = _page_with_fake_threads()
+    cameras = _two_cameras(tmp_path)
+    for camera in cameras:
+        camera["is_master"] = False  # no master -> start_all_sessions raises before widget-locking
+    page.set_cameras(object(), cameras)
+
+    with pytest.raises(StopIteration):
+        page.start_all_sessions()
+
+    assert page._session_running is False
 
 
 def test_set_cameras_tags_every_tab_with_its_role(qapp, tmp_path):

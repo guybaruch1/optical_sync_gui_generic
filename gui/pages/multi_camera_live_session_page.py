@@ -229,6 +229,20 @@ class MultiCameraLiveSessionPage(QWidget):
         self._ctx = ctx
         self._cameras = cameras
 
+        # Prefill the switch-time spinbox from the MASTER camera's own tuned
+        # config value (the same "master's config is authoritative"
+        # precedent num_leds/switch_time_ms already use elsewhere for the
+        # cross-camera Optical Sync feature) - mirrors LiveSessionPage.
+        # set_context()'s own prefill-from-that-camera's-tuned-value. Falls
+        # back to __init__'s fixed 1.0 default (left untouched) if no master
+        # is flagged (shouldn't happen once Start is actually clickable, but
+        # this page never crashes on a "shouldn't happen" input).
+        master_config = next((c["config"] for c in cameras if c["is_master"]), None)
+        if master_config is not None:
+            self._last_confirmed_switch_time_ms = master_config["switch_time_ms"]
+            self.switch_time_spinbox.setValue(master_config["switch_time_ms"])
+            self._update_confirm_switch_time_button_state()
+
         self.tabs.clear()
         self._panels = {}
 
@@ -410,7 +424,6 @@ class MultiCameraLiveSessionPage(QWidget):
     def start_all_sessions(self):
         if not self._cameras:
             return
-        self._session_running = True
         duration_s = self.duration_spinbox.value() or None
         display_stride = self.frame_sample_interval_spinbox.value()
 
@@ -506,6 +519,7 @@ class MultiCameraLiveSessionPage(QWidget):
         self._controller.all_sessions_finished.connect(self._on_all_sessions_finished)
 
         self.status_label.setText("")
+        self._session_running = True
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.duration_spinbox.setEnabled(False)
