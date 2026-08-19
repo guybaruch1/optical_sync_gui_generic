@@ -163,8 +163,65 @@ def test_start_all_sessions_locks_toolbar_and_starts_every_thread(qapp, tmp_path
     assert not page.start_button.isEnabled()
     assert page.stop_button.isEnabled()
     assert not page.duration_spinbox.isEnabled()
+    assert not page.switch_time_spinbox.isEnabled()
+    assert not page.confirm_switch_time_button.isEnabled()
     assert fake_threads["SN1"].started
     assert fake_threads["SN2"].started
+
+
+def test_switch_time_spinbox_defaults_to_one_ms(qapp, tmp_path):
+    page, _ = _page_with_fake_threads()
+    assert page.switch_time_spinbox.value() == 1.0
+    assert page.start_button.isEnabled()
+
+
+def test_ticking_switch_time_spinbox_disables_start_all_until_confirmed(qapp, tmp_path):
+    page, _ = _page_with_fake_threads()
+    page.set_cameras(object(), _two_cameras(tmp_path))
+    assert page.start_button.isEnabled()
+
+    page.switch_time_spinbox.setValue(5.0)
+    assert not page.start_button.isEnabled()
+
+    page._on_confirm_switch_time_clicked()
+    assert page.start_button.isEnabled()
+
+
+def test_start_all_sessions_uses_confirmed_switch_time_for_every_camera(qapp, tmp_path):
+    page, fake_threads = _page_with_fake_threads()
+    cameras = _two_cameras(tmp_path)
+    # Each camera's own individually-tuned value - both must be overridden.
+    cameras[0]["config"]["switch_time_ms"] = 3.0
+    cameras[1]["config"]["switch_time_ms"] = 7.0
+    page.set_cameras(object(), cameras)
+    page.switch_time_spinbox.setValue(5.0)
+    page._on_confirm_switch_time_clicked()
+
+    page.start_all_sessions()
+
+    assert fake_threads["SN1"].kwargs["switch_time_ms"] == 5.0
+    assert fake_threads["SN2"].kwargs["switch_time_ms"] == 5.0
+    specs_by_camera_id = {spec.camera_id: spec for spec in page._controller._camera_specs}
+    assert specs_by_camera_id["cam1"].switch_time_ms == 5.0
+    assert specs_by_camera_id["cam2"].switch_time_ms == 5.0
+
+
+def test_finishing_all_sessions_does_not_reenable_start_over_a_pending_unconfirmed_edit(qapp, tmp_path):
+    page, fake_threads = _page_with_fake_threads()
+    page.set_cameras(object(), _two_cameras(tmp_path))
+    page.start_all_sessions()
+
+    # Simulates an edit landing while sessions were running (defensive -
+    # the spinbox is normally disabled during a run).
+    page.switch_time_spinbox.setValue(99.0)
+
+    fake_threads["SN1"].session_finished.emit([])
+    fake_threads["SN1"].finished.emit()
+    fake_threads["SN2"].session_finished.emit([])
+    fake_threads["SN2"].finished.emit()
+
+    assert not page.start_button.isEnabled()
+    assert page.confirm_switch_time_button.isEnabled()
 
 
 # --- Genlock: each camera's OWN config-embedded inter_cam_sync_value
@@ -202,18 +259,20 @@ def test_start_all_sessions_defaults_inter_cam_sync_value_to_none_when_config_om
     assert specs_by_camera_id["cam2"].inter_cam_sync_value is None
 
 
-def test_start_all_sessions_carries_each_cameras_own_num_leds_and_switch_time_ms_into_its_spec(qapp, tmp_path):
+def test_start_all_sessions_carries_each_cameras_own_num_leds_into_its_spec(qapp, tmp_path):
+    # switch_time_ms is no longer per-camera - it's the shared, confirmed
+    # toolbar value now (see test_start_all_sessions_uses_confirmed_switch_
+    # time_for_every_camera), so this test only covers num_leds, which is
+    # still read straight off each camera's own config.
     page, _ = _page_with_fake_threads()
     cameras = _two_cameras(tmp_path)
     cameras[0]["config"]["num_leds"] = 20
-    cameras[0]["config"]["switch_time_ms"] = 3.0
     page.set_cameras(object(), cameras)
 
     page.start_all_sessions()
 
     spec = next(s for s in page._controller._camera_specs if s.camera_id == "cam1")
     assert spec.num_leds == 20
-    assert spec.switch_time_ms == 3.0
 
 
 # --- Output layout: ONE shared run folder, one subfolder per camera, plus
@@ -391,6 +450,7 @@ def test_all_sessions_finished_reenables_start(qapp, tmp_path):
     assert page.start_button.isEnabled()
     assert not page.stop_button.isEnabled()
     assert page.duration_spinbox.isEnabled()
+    assert page.switch_time_spinbox.isEnabled()
 
 
 def test_stop_all_sessions_requests_stop_on_the_controller(qapp, tmp_path):

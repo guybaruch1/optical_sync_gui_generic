@@ -14,13 +14,16 @@ camera's own finished 5-page sub-flow config), then switches the stack to
 this page. See docs/superpowers's multi-camera design doc's "Design
 detail" section 4.
 
-Toolbar is deliberately RUN-level, not per-camera: Duration and Frame
-Sample Interval apply identically to every camera when Start All is
-clicked (the same simplification the design doc's "Explicitly deferred to
-v2" list flags - per-camera-independent versions of these are a follow-up,
-not built here). LED switch time is NOT a toolbar control here at all -
-each camera already tuned its own switch_time_ms on its own Threshold
-Tuning page; that per-camera value is used as-is.
+Toolbar is deliberately RUN-level, not per-camera: Duration, LED Switch
+Time, and Frame Sample Interval all apply identically to every camera when
+Start All is clicked. LED Switch Time replaces every configured camera's
+own individually-tuned switch_time_ms (set on that camera's own Threshold
+Tuning page) for the run - it's a per-test parameter, not per-camera,
+since it configures the LED panel itself (one physical panel stepping at
+one real rate, even in the shared-single-panel case with 2+ cameras), not
+any one camera. Duration/Frame Sample Interval staying run-level rather
+than per-camera-independent is the design doc's own "Explicitly deferred
+to v2" simplification, unrelated to this.
 
 Genlock (master/slave role assignment): CameraSessionSpec.inter_cam_sync_value
 is read straight off each camera's OWN config dict (config.get(
@@ -52,7 +55,7 @@ where there's no cross-camera concept at all."""
 import os
 
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSpinBox, QTabWidget,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSpinBox, QDoubleSpinBox, QTabWidget,
 )
 
 from gui.widgets.camera_live_session_panel import CameraLiveSessionPanel
@@ -149,6 +152,15 @@ class MultiCameraLiveSessionPage(QWidget):
         self._controller = None
         self._run_dir = None
         self._cross_rows = []
+        # The switch-time value last acknowledged via Confirm - a real gate
+        # (see _update_confirm_switch_time_button_state): start_all_sessions()
+        # reads THIS, not the spinbox directly, for every configured camera.
+        self._last_confirmed_switch_time_ms = 1.0
+        # True for the entire span between start_all_sessions() and
+        # _on_all_sessions_finished() - start_button's own enabled state is
+        # the AND of "not currently running" and "no pending unconfirmed
+        # switch-time edit" (see _update_confirm_switch_time_button_state).
+        self._session_running = False
 
         layout = QVBoxLayout(self)
 
@@ -157,6 +169,26 @@ class MultiCameraLiveSessionPage(QWidget):
         self.duration_spinbox = QSpinBox()
         self.duration_spinbox.setRange(0, 3600)
         toolbar.addWidget(self.duration_spinbox)
+
+        toolbar.addWidget(QLabel("LED Switch Time (ms):"))
+        self.switch_time_spinbox = QDoubleSpinBox()
+        self.switch_time_spinbox.setRange(0.1, 10000.0)
+        self.switch_time_spinbox.setDecimals(1)
+        self.switch_time_spinbox.setSingleStep(0.5)
+        self.switch_time_spinbox.setValue(1.0)
+        self.switch_time_spinbox.valueChanged.connect(self._on_switch_time_spinbox_changed)
+        toolbar.addWidget(self.switch_time_spinbox)
+        self.confirm_switch_time_button = QPushButton("Confirm")
+        self.confirm_switch_time_button.setEnabled(False)
+        self.confirm_switch_time_button.setToolTip(
+            "Confirm the LED Switch Time above. This is a per-test parameter shared by "
+            "every camera (it configures the LED panel, not any one camera) - "
+            "start_all_sessions() reads the last confirmed value, and Start All stays "
+            "disabled until any edit here is confirmed or reverted."
+        )
+        self.confirm_switch_time_button.clicked.connect(self._on_confirm_switch_time_clicked)
+        toolbar.addWidget(self.confirm_switch_time_button)
+
         self.start_button = QPushButton("Start All")
         self.start_button.clicked.connect(self.start_all_sessions)
         self.stop_button = QPushButton("Stop All")
@@ -372,6 +404,7 @@ class MultiCameraLiveSessionPage(QWidget):
     def start_all_sessions(self):
         if not self._cameras:
             return
+        self._session_running = True
         duration_s = self.duration_spinbox.value() or None
         display_stride = self.frame_sample_interval_spinbox.value()
 
@@ -396,7 +429,7 @@ class MultiCameraLiveSessionPage(QWidget):
 
             position_gap_metric = PositionGapMetric(
                 stream_a_threshold=config["stream_a_threshold"], stream_b_threshold=config["stream_b_threshold"],
-                num_leds=config["num_leds"], switch_time_ms=config["switch_time_ms"],
+                num_leds=config["num_leds"], switch_time_ms=self._last_confirmed_switch_time_ms,
                 warmup_pairs_to_skip=config["warmup_pairs_to_skip"],
             )
             metrics = [
@@ -417,7 +450,7 @@ class MultiCameraLiveSessionPage(QWidget):
                 stream_a_xy=config["stream_a_xy"], stream_b_xy=config["stream_b_xy"],
                 stream_a_roi=config["stream_a_roi"], stream_b_roi=config["stream_b_roi"],
                 snapshot_every_n_pairs=config["snapshot_every_n_pairs"], max_snapshots=config["max_snapshots"],
-                switch_time_ms=config["switch_time_ms"],
+                switch_time_ms=self._last_confirmed_switch_time_ms,
             )
 
             thread_kwargs = dict(
@@ -425,7 +458,7 @@ class MultiCameraLiveSessionPage(QWidget):
                 test_session=test_session,
                 stream_a_xy=config["stream_a_xy"], stream_b_xy=config["stream_b_xy"],
                 neighborhood_size=config["neighborhood_size"], scan_direction=config["scan_direction"],
-                switch_time_ms=config["switch_time_ms"], display_stride=display_stride,
+                switch_time_ms=self._last_confirmed_switch_time_ms, display_stride=display_stride,
                 position_gap_metric=position_gap_metric, dual_panel_config=config["dual_panel_config"],
                 enable_depth_for_ir_sync=config["enable_depth_for_ir_sync"],
                 output_dir=output_dir,
@@ -438,7 +471,7 @@ class MultiCameraLiveSessionPage(QWidget):
                 inter_cam_sync_value=config.get("inter_cam_sync_value"),
                 stream_identities=_stream_identities(config),
                 device_serial=config["device_serial"],
-                num_leds=config["num_leds"], switch_time_ms=config["switch_time_ms"],
+                num_leds=config["num_leds"], switch_time_ms=self._last_confirmed_switch_time_ms,
                 hardware_reset_before_start=config["hardware_reset_before_start"],
                 hardware_reset_settle_s=config["hardware_reset_settle_s"],
                 thread_kwargs=thread_kwargs,
@@ -470,6 +503,8 @@ class MultiCameraLiveSessionPage(QWidget):
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.duration_spinbox.setEnabled(False)
+        self.switch_time_spinbox.setEnabled(False)
+        self.confirm_switch_time_button.setEnabled(False)
         self.frame_sample_interval_spinbox.setEnabled(False)
 
         self._controller.start_all(self._ctx)
@@ -477,6 +512,21 @@ class MultiCameraLiveSessionPage(QWidget):
     def stop_all_sessions(self):
         if self._controller is not None:
             self._controller.stop_all()
+
+    def _on_switch_time_spinbox_changed(self, value):
+        self._update_confirm_switch_time_button_state()
+
+    def _update_confirm_switch_time_button_state(self):
+        unconfirmed = self.switch_time_spinbox.value() != self._last_confirmed_switch_time_ms
+        self.confirm_switch_time_button.setEnabled(unconfirmed)
+        # Not gated while a session is running - start_all_sessions()'s own
+        # lock (setEnabled(False)) already owns start_button for that span.
+        if not self._session_running:
+            self.start_button.setEnabled(not unconfirmed)
+
+    def _on_confirm_switch_time_clicked(self):
+        self._last_confirmed_switch_time_ms = self.switch_time_spinbox.value()
+        self._update_confirm_switch_time_button_state()
 
     def _on_camera_frame_ready(self, camera_id, stream_name, image, pair_index, mask):
         panel = self._panels.get(camera_id)
@@ -577,9 +627,14 @@ class MultiCameraLiveSessionPage(QWidget):
         stats_panel.set_value("{}_max".format(key), round(stats.max, 1))
 
     def _on_all_sessions_finished(self, rows_by_camera):
-        self.start_button.setEnabled(True)
+        self._session_running = False
         self.stop_button.setEnabled(False)
         self.duration_spinbox.setEnabled(True)
+        self.switch_time_spinbox.setEnabled(True)
+        # Not a blind setEnabled(True) on start_button - its availability
+        # also reflects whether the spinbox actually holds an unconfirmed
+        # value (see _update_confirm_switch_time_button_state).
+        self._update_confirm_switch_time_button_state()
         self.frame_sample_interval_spinbox.setEnabled(True)
 
         # Only when a cross-camera comparison actually exists (>=2 cameras,
