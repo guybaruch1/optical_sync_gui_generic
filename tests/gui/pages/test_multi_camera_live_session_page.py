@@ -23,12 +23,22 @@ class _FakeSessionEngineThread(QObject):
         super().__init__()
         self.kwargs = kwargs
         self.started = False
+        self._recent_frames = {}  # pair_index -> (stream_a_image, stream_b_image)
 
     def start(self):
         self.started = True
 
     def request_stop(self):
         pass
+
+    def set_recent_frame_pair(self, pair_index, stream_a_image, stream_b_image):
+        """Test helper - mirrors the real SessionEngineThread's ring
+        buffer, but without any eviction/threading (tests drive this
+        directly with exactly the pair_indices they need)."""
+        self._recent_frames[pair_index] = (stream_a_image, stream_b_image)
+
+    def get_recent_frame_pair(self, pair_index):
+        return self._recent_frames.get(pair_index)
 
 
 def _pick(stream_type, stream_index, fmt):
@@ -570,6 +580,159 @@ def test_cross_running_stats_registered_per_slave_identity_and_metric(qapp, tmp_
     assert ("cam2", "color", "pairing_gap_us") in page._cross_running_stats
     assert ("cam2", "color", "global_ts_gap_us") in page._cross_running_stats
     assert ("cam2", "color", "position_gap_ms") in page._cross_running_stats
+
+
+def test_cross_debug_image_counts_registered_per_slave_identity(qapp, tmp_path):
+    page, _ = _page_with_fake_threads()
+
+    page.set_cameras(object(), _two_cameras(tmp_path))
+
+    assert page._cross_debug_image_counts[("cam2", "infrared1")] == {"periodic_count": 0, "outlier_count": 0}
+    assert page._cross_debug_image_counts[("cam2", "color")] == {"periodic_count": 0, "outlier_count": 0}
+
+
+def test_outlier_cross_row_saves_a_debug_image_with_the_actual_matched_frames(qapp, tmp_path):
+    page, fake_threads = _page_with_fake_threads()
+    cameras = _two_cameras(tmp_path)
+    # num_leds=2 (this fixture's default) means the only possible non-zero
+    # Optical Sync gap is +-1.0ms (compute_position_gap(1, 0, 2) == 1,
+    # * switch_time_ms 1.0) - a threshold of 0.5 guarantees that triggers.
+    cameras[0]["config"]["position_gap_outlier_threshold_ms"] = 0.5
+    page.set_cameras(object(), cameras)
+    page.start_all_sessions()
+
+    master_thread = fake_threads["SN1"]
+    slave_thread = fake_threads["SN2"]
+    master_thread.set_recent_frame_pair(1, np.full((4, 4), 10, dtype=np.uint8), np.full((4, 4, 3), 20, dtype=np.uint8))
+    slave_thread.set_recent_frame_pair(1, np.full((4, 4), 30, dtype=np.uint8), np.full((4, 4, 3), 40, dtype=np.uint8))
+
+    master_thread.row_ready.emit({
+        "pair_index": 1, "stream_a_ts_us": 1_000_000.0, "stream_b_ts_us": 1_000_000.0,
+        "stream_a_global_ts_us": 1_000_000.0, "stream_b_global_ts_us": 1_000_000.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+        "stream_a_last_led": 1, "position_gap_ms_excluded": False,
+    })
+    slave_thread.row_ready.emit({
+        "pair_index": 1, "stream_a_ts_us": 1_000_010.0, "stream_b_ts_us": 1_000_010.0,
+        "stream_a_global_ts_us": 1_000_010.0, "stream_b_global_ts_us": 1_000_010.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+        "stream_a_last_led": 0, "position_gap_ms_excluded": False,
+    })
+
+    saved = list(tmp_path.glob("**/cross_camera_optical_sync_outlier_*.png"))
+    assert len(saved) == 1
+    assert "slave1" in saved[0].name
+    assert "infrared1" in saved[0].name
+
+
+def test_periodic_cross_row_saves_a_debug_image_every_nth_pair_per_spec(qapp, tmp_path):
+    page, fake_threads = _page_with_fake_threads()
+    cameras = _two_cameras(tmp_path)
+    cameras[0]["config"]["snapshot_every_n_pairs"] = 1  # every pair, deterministic
+    cameras[0]["config"]["position_gap_outlier_threshold_ms"] = 999  # disable outlier triggering here
+    page.set_cameras(object(), cameras)
+    page.start_all_sessions()
+
+    master_thread = fake_threads["SN1"]
+    slave_thread = fake_threads["SN2"]
+    master_thread.set_recent_frame_pair(1, np.zeros((4, 4), dtype=np.uint8), np.zeros((4, 4, 3), dtype=np.uint8))
+    slave_thread.set_recent_frame_pair(1, np.zeros((4, 4), dtype=np.uint8), np.zeros((4, 4, 3), dtype=np.uint8))
+
+    master_thread.row_ready.emit({
+        "pair_index": 1, "stream_a_ts_us": 1_000_000.0, "stream_b_ts_us": 1_000_000.0,
+        "stream_a_global_ts_us": 1_000_000.0, "stream_b_global_ts_us": 1_000_000.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+    })
+    slave_thread.row_ready.emit({
+        "pair_index": 1, "stream_a_ts_us": 1_000_010.0, "stream_b_ts_us": 1_000_010.0,
+        "stream_a_global_ts_us": 1_000_010.0, "stream_b_global_ts_us": 1_000_010.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+    })
+
+    # _camera_config's two cameras share BOTH "infrared1" and "color" -
+    # each identity's own cross-row independently triggers the periodic
+    # save, using the reconciler's own synthetic pair_index (1 and 2).
+    saved = list(tmp_path.glob("**/cross_camera_periodic_*.png"))
+    assert len(saved) == 2
+
+
+def test_no_debug_image_saved_when_the_matched_frame_has_aged_out_of_the_buffer(qapp, tmp_path):
+    page, fake_threads = _page_with_fake_threads()
+    cameras = _two_cameras(tmp_path)
+    cameras[0]["config"]["snapshot_every_n_pairs"] = 1
+    page.set_cameras(object(), cameras)
+    page.start_all_sessions()
+
+    # Deliberately never call set_recent_frame_pair - simulates the image
+    # having already aged out of (or never having reached) the ring buffer.
+    fake_threads["SN1"].row_ready.emit({
+        "pair_index": 1, "stream_a_ts_us": 1_000_000.0, "stream_b_ts_us": 1_000_000.0,
+        "stream_a_global_ts_us": 1_000_000.0, "stream_b_global_ts_us": 1_000_000.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+    })
+    fake_threads["SN2"].row_ready.emit({
+        "pair_index": 1, "stream_a_ts_us": 1_000_010.0, "stream_b_ts_us": 1_000_010.0,
+        "stream_a_global_ts_us": 1_000_010.0, "stream_b_global_ts_us": 1_000_010.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+    })
+
+    saved = list(tmp_path.glob("**/cross_camera_periodic_*.png"))
+    assert saved == []
+
+
+def test_periodic_debug_images_stop_once_max_snapshots_reached_per_spec(qapp, tmp_path):
+    page, fake_threads = _page_with_fake_threads()
+    cameras = _two_cameras(tmp_path)
+    cameras[0]["config"]["snapshot_every_n_pairs"] = 1
+    cameras[0]["config"]["max_snapshots"] = 1
+    page.set_cameras(object(), cameras)
+    page.start_all_sessions()
+
+    master_thread = fake_threads["SN1"]
+    slave_thread = fake_threads["SN2"]
+    for pair in range(1, 3):
+        master_thread.set_recent_frame_pair(
+            pair, np.zeros((4, 4), dtype=np.uint8), np.zeros((4, 4, 3), dtype=np.uint8)
+        )
+        slave_thread.set_recent_frame_pair(
+            pair, np.zeros((4, 4), dtype=np.uint8), np.zeros((4, 4, 3), dtype=np.uint8)
+        )
+        master_thread.row_ready.emit({
+            "pair_index": pair, "stream_a_ts_us": 1_000_000.0 + pair, "stream_b_ts_us": 1_000_000.0 + pair,
+            "stream_a_global_ts_us": 1_000_000.0 + pair, "stream_b_global_ts_us": 1_000_000.0 + pair,
+            "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+        })
+        slave_thread.row_ready.emit({
+            "pair_index": pair, "stream_a_ts_us": 1_000_010.0 + pair, "stream_b_ts_us": 1_000_010.0 + pair,
+            "stream_a_global_ts_us": 1_000_010.0 + pair, "stream_b_global_ts_us": 1_000_010.0 + pair,
+            "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+        })
+
+    # max_snapshots=1 caps the infrared1 spec's own periodic count
+    # independently of the color spec's own count - across 2 rounds
+    # (2 cross-rows each), exactly 1 infrared1 image is ever saved.
+    saved = list(tmp_path.glob("**/cross_camera_periodic_slave1_infrared1_*.png"))
+    assert len(saved) == 1
+
+
+def test_reset_cross_run_state_resets_debug_image_counters_on_a_second_run(qapp, tmp_path):
+    page, fake_threads = _page_with_fake_threads()
+    cameras = _two_cameras(tmp_path)
+    page.set_cameras(object(), cameras)
+    page.start_all_sessions()
+
+    key = ("cam2", "infrared1")
+    page._cross_debug_image_counts[key]["periodic_count"] = 5
+    page._cross_debug_image_counts[key]["outlier_count"] = 3
+
+    fake_threads["SN1"].session_finished.emit([])
+    fake_threads["SN1"].finished.emit()
+    fake_threads["SN2"].session_finished.emit([])
+    fake_threads["SN2"].finished.emit()
+
+    page.start_all_sessions()
+
+    assert page._cross_debug_image_counts[key] == {"periodic_count": 0, "outlier_count": 0}
 
 
 def test_cross_camera_tab_is_first(qapp, tmp_path):

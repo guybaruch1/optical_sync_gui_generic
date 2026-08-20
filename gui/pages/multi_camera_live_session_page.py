@@ -59,6 +59,7 @@ as defensive robustness against ever being reached with 1 camera.)"""
 
 import os
 
+import cv2
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSpinBox, QDoubleSpinBox, QTabWidget,
 )
@@ -68,7 +69,7 @@ from gui.widgets.live_plot import LivePlot
 from gui.widgets.stats_panel import StatsPanel
 from engine.multi_camera_session import CameraSessionSpec, MultiCameraSessionController
 from engine.cross_camera_reconciler import build_cross_camera_pair_specs
-from engine.metrics import PairingGapMetric, PositionGapMetric
+from engine.metrics import PairingGapMetric, PositionGapMetric, is_position_gap_debug_outlier
 from engine.test_session import TestSession, TestSessionConfig
 from engine.streams import stream_slug
 from domain.run_output import create_run_dir, create_camera_subdir
@@ -76,6 +77,7 @@ from domain.csv_export import export_cross_camera_csv
 from domain.plot_export import export_cross_camera_plot
 from domain.plot_theme import CROSS_CAMERA_COLORS
 from domain.running_stats import RunningStats
+from domain.realsense_utils import draw_cross_camera_debug_overlay, combine_side_by_side
 
 
 class _IdentitySpec:
@@ -96,6 +98,16 @@ class _IdentitySpec:
 
 def _stream_identities(config):
     return {"stream_a": stream_slug(config["pick_a"]), "stream_b": stream_slug(config["pick_b"])}
+
+
+def _row_role_for_identity(config, identity):
+    """Which of a camera's own two picks (stream_a/stream_b) a given
+    shared stream identity actually is - mirrors the exact same lookup
+    engine.cross_camera_reconciler.build_cross_camera_pair_specs already
+    does when it computes master_row_role/slave_row_role, needed again
+    here since the cross-row dict itself doesn't carry those roles."""
+    stream_identities = _stream_identities(config)
+    return next(role for role, ident in stream_identities.items() if ident == identity)
 
 
 def _slave_vs_master_title(slave_role, master_display):
@@ -224,6 +236,11 @@ class MultiCameraLiveSessionPage(QWidget):
         # pushed to the stats panel only on the throttled _on_cross_stats_ready
         # tick.
         self._cross_running_stats = {}
+        # (slave_camera_id, stream_identity) -> {"periodic_count": int,
+        # "outlier_count": int} - independent per-spec caps for
+        # _maybe_save_cross_camera_debug_image, mirroring
+        # self._cross_running_stats' own per-spec independence.
+        self._cross_debug_image_counts = {}
 
         self.status_label = QLabel("")
         layout.addWidget(self.status_label)
@@ -405,6 +422,9 @@ class MultiCameraLiveSessionPage(QWidget):
             self._cross_running_stats[(slave_camera_id, identity, "pairing_gap_us")] = RunningStats()
             self._cross_running_stats[(slave_camera_id, identity, "global_ts_gap_us")] = RunningStats()
             self._cross_running_stats[(slave_camera_id, identity, "position_gap_ms")] = RunningStats()
+            self._cross_debug_image_counts[(slave_camera_id, identity)] = {
+                "periodic_count": 0, "outlier_count": 0,
+            }
 
         self._slave_sections[slave_camera_id] = {
             "pairing_plot": pairing_plot, "global_ts_plot": global_ts_plot, "position_plot": position_plot,
@@ -443,6 +463,8 @@ class MultiCameraLiveSessionPage(QWidget):
             section["stats_panel"].set_value("switch_time_ms", self._last_confirmed_switch_time_ms)
         for key in self._cross_running_stats:
             self._cross_running_stats[key] = RunningStats()
+        for key in self._cross_debug_image_counts:
+            self._cross_debug_image_counts[key] = {"periodic_count": 0, "outlier_count": 0}
 
     def start_all_sessions(self):
         if not self._cameras:
@@ -640,6 +662,105 @@ class MultiCameraLiveSessionPage(QWidget):
         if (position_stats is not None and cross_row.get("position_gap_ms") is not None
                 and not cross_row.get("position_gap_ms_excluded")):
             position_stats.update(cross_row["position_gap_ms"])
+
+        self._maybe_save_cross_camera_debug_image(cross_row)
+
+    def _maybe_save_cross_camera_debug_image(self, cross_row):
+        """Saves a side-by-side debug image of the two ACTUAL matched
+        frames for a cross-camera pair - outlier-triggered (Optical Sync
+        only, mirroring engine.session_engine.py's own intra-camera
+        _maybe_save_position_gap_outlier) or periodic (every Nth
+        cross-camera pair, per (slave, identity) spec independently) -
+        both reusing the MASTER camera's own already-configured
+        thresholds/cadence (same "master's config wins" precedent this
+        feature already uses for num_leds/switch_time_ms). Runs on every
+        unthrottled cross-camera match (this method's own cheap checks),
+        but the expensive part (image lookup, drawing, disk write) only
+        actually happens on a genuine trigger - the same shape
+        _maybe_save_position_gap_outlier already uses on its own
+        unthrottled per-pair callback, not a new risk to the documented
+        row_ready/stats_ready cadence discipline (which is specifically
+        about never calling GUI-widget updates like add_point here)."""
+        if self._controller is None or self._run_dir is None:
+            return
+        key = (cross_row["slave_camera_id"], cross_row["stream_identity"])
+        counts = self._cross_debug_image_counts.get(key)
+        if counts is None:
+            return
+
+        master_config = next((c["config"] for c in self._cameras if c["is_master"]), None)
+        if master_config is None:
+            return
+
+        is_outlier = (
+            is_position_gap_debug_outlier(cross_row, master_config["position_gap_outlier_threshold_ms"])
+            and counts["outlier_count"] < master_config["position_gap_outlier_max_snapshots"]
+        )
+        every_n = master_config["snapshot_every_n_pairs"]
+        is_periodic = (
+            every_n > 0 and cross_row["pair_index"] % every_n == 0
+            and counts["periodic_count"] < master_config["max_snapshots"]
+        )
+        if not is_outlier and not is_periodic:
+            return
+
+        threads = self._controller.threads
+        master_thread = threads.get(cross_row["master_camera_id"])
+        slave_thread = threads.get(cross_row["slave_camera_id"])
+        if master_thread is None or slave_thread is None:
+            return
+        master_frames = master_thread.get_recent_frame_pair(cross_row["master_pair_index"])
+        slave_frames = slave_thread.get_recent_frame_pair(cross_row["slave_pair_index"])
+        if master_frames is None or slave_frames is None:
+            return
+
+        identity = cross_row["stream_identity"]
+        slave_config = next(c["config"] for c in self._cameras if c["camera_id"] == cross_row["slave_camera_id"])
+        master_role = _row_role_for_identity(master_config, identity)
+        slave_role = _row_role_for_identity(slave_config, identity)
+        master_image = master_frames[0] if master_role == "stream_a" else master_frames[1]
+        slave_image = slave_frames[0] if slave_role == "stream_a" else slave_frames[1]
+
+        overlay_image = draw_cross_camera_debug_overlay(
+            master_image,
+            cross_pair_index=cross_row["pair_index"],
+            master_pair_index=cross_row["master_pair_index"], slave_pair_index=cross_row["slave_pair_index"],
+            master_ts_us=cross_row["master_ts_us"], slave_ts_us=cross_row["slave_ts_us"],
+            master_global_ts_us=cross_row["master_global_ts_us"], slave_global_ts_us=cross_row["slave_global_ts_us"],
+            pairing_gap_us=cross_row["pairing_gap_us"], global_ts_gap_us=cross_row["global_ts_gap_us"],
+            position_gap_ms=cross_row["position_gap_ms"],
+        )
+        # combine_side_by_side expects two already-BGR images (the same
+        # precondition the intra-camera call site satisfies by running BOTH
+        # sides through draw_led_state_overlay first) - draw_cross_camera_
+        # debug_overlay already converts master_image for us, but slave_image
+        # never goes through an overlay function here, so a grayscale
+        # infrared slave frame needs the same conversion done explicitly,
+        # or hstack fails on a 2D/3D shape mismatch for any grayscale identity.
+        if len(slave_image.shape) == 2:
+            slave_image = cv2.cvtColor(slave_image, cv2.COLOR_GRAY2BGR)
+        combined = combine_side_by_side(overlay_image, slave_image)
+        roles = _camera_roles(self._cameras)
+        slave_slug = roles[cross_row["slave_camera_id"]]["slug"]
+
+        if is_outlier:
+            path = os.path.join(
+                self._run_dir,
+                "cross_camera_optical_sync_outlier_{}_{}_pair{:05d}.png".format(
+                    slave_slug, identity, cross_row["pair_index"]
+                ),
+            )
+            cv2.imwrite(path, combined)
+            counts["outlier_count"] += 1
+        if is_periodic:
+            path = os.path.join(
+                self._run_dir,
+                "cross_camera_periodic_{}_{}_pair{:05d}.png".format(
+                    slave_slug, identity, cross_row["pair_index"]
+                ),
+            )
+            cv2.imwrite(path, combined)
+            counts["periodic_count"] += 1
 
     def _on_cross_stats_ready(self, latest_by_pair):
         rows_by_slave = {}
