@@ -514,6 +514,54 @@ Two callback cadences matter and must stay separate:
 
 The live session UI shows "HW TS Latency" and "Optical Sync" as user-facing names, but the underlying `Metric.name`/dict keys/CSV columns are still `pairing_gap_us` and `position_gap_ms` throughout `engine/`, `domain/csv_export.py`, and `gui/widgets/stats_panel.py`'s field keys. Only display text (checkbox labels, chart axis titles, `LivePlot.add_series`'s `display_name` param, stat tile labels) uses the renamed terms. This same UI-label-vs-data-key gap also applies to the generalized per-stream naming: the CSV/row columns are `stream_a_frame_drop`/`stream_b_frame_drop` (singular, from `engine/metrics.py`'s `PositionGapMetric`), but `stats_panel.py`'s live tiles and `LivePlot`'s drop-count series both use `stream_a_frame_drops`/`stream_b_frame_drops` (plural - a separately-tracked running count, not a copy of the row column). Don't assume a UI label - or even one data-layer key - matches another data-layer key when tracing a value back through the pipeline.
 
+### Cross-camera matching: HW timestamp vs. RealSense GLOBAL_TIME, and two parallel latency metrics
+
+`engine/cross_camera_reconciler.py`'s `CrossCameraReconciler` matches
+master/slave cross-camera pairs on RealSense's GLOBAL_TIME-domain
+timestamp (`frame.get_timestamp()`, periodically host-clock-corrected -
+see `engine/streams.py`'s `_read_global_ts_us`), not the raw per-device HW
+timestamp `pairing_gap_us`/"HW TS Latency" itself still reports. Real-
+hardware testing found the HW-ts-based one-time offset calibration this
+metric relies on drifts slowly over long sessions (~40us over 50s) -
+small, but silently baked into the reported number as if it were genuine
+physical latency. Global timestamps need no such calibration (directly
+comparable across devices from the first row), so matching switched to
+them; `pairing_gap_us` keeps its exact prior meaning as a separate,
+still-offset-corrected reporting step on whatever pair the (now more
+robust) match finds. A brand new "Global TS Latency" (`global_ts_gap_us`)
+metric - the plain, NEVER offset-corrected difference between the two
+sides' global timestamps for that same matched pair - is reported
+alongside it everywhere (live GUI, static plot export, CSV), specifically
+so the two can be compared pair-for-pair: if global time behaves as
+documented, this number should stay near zero with no drift, unlike its
+HW-ts counterpart.
+
+**Open question, not yet resolved:** once real-hardware testing confirms
+(or refutes) that Global TS Latency is genuinely drift-free, there is no
+current operator-facing guidance on which of the two numbers to trust if
+they ever disagree - both are presented as equally-weighted plots/stats
+today. Revisit once more real-hardware data exists.
+
+`capture_global_ts` (`engine/streams.py`'s `ContinuousCapture`,
+`engine/session_engine.py`'s `SessionEngineThread`) is the opt-in flag
+this all depends on - `settings.yaml`'s `camera_sync.capture_global_ts`
+(default `true`), threaded through only the multi-camera path
+(`gui/main_window.py`'s `_on_start_multi_camera_session_requested`,
+2+-camera branch only - never the 1-camera-routes-to-`LiveSessionPage`
+branch, since this is a cross-camera-only concept). A camera whose frames
+aren't actually in the GLOBAL_TIME domain (`global_time_enabled` disabled
+or unsupported) raises a clear `RuntimeError` rather than silently
+computing a meaningless value - same "fail loudly" convention as the
+existing HW-timestamp-metadata check right above it in
+`ContinuousCapture.frames_with_diagnostics`.
+
+**Output note:** `TestSession.process_pair`'s row now always carries
+`stream_a_global_ts_us`/`stream_b_global_ts_us` (`None` when
+`capture_global_ts` is off) - every single-camera CSV (raw and frame-drop)
+therefore gained two new, always-empty columns after `stream_b_ts_us`.
+Name-keyed CSV consumers are unaffected; anything reading these CSVs by
+column INDEX would break.
+
 ### `gui/widgets/live_plot.py` gotcha
 
 `LivePlot` subclasses `pg.PlotWidget`. Its own `clear()`-style method must be called `clear_data()`, not `clear()` - `pg.PlotWidget.__init__` copies several of its own methods (including `clear`) onto the *instance* itself, which in Python takes priority over a same-named method defined on the subclass, silently shadowing it. `add_series(name, color, display_name=None)` keeps `name` as the lookup key used everywhere (`add_point`, `get_series_data`, `set_series_visible`) and `display_name` as an independent, optional legend label.

@@ -44,6 +44,7 @@ import matplotlib.pyplot as plt
 from domain.plot_theme import (
     SURFACE, GRIDLINE, MUTED_TEXT,
     PAIRING_GAP_COLOR, POSITION_GAP_COLOR, STREAM_A_DROP_COLOR, STREAM_B_DROP_COLOR,
+    CROSS_CAMERA_COLORS,
 )
 
 # Width grows with run length so a long session's line has room to breathe
@@ -69,7 +70,13 @@ def _style_axis(ax):
     ax.yaxis.label.set_color(MUTED_TEXT)
     for spine in ax.spines.values():
         spine.set_color(GRIDLINE)
-    ax.legend(facecolor=SURFACE, edgecolor=GRIDLINE, labelcolor=MUTED_TEXT)
+    # Guarded: an axis with zero labeled lines (e.g. export_cross_camera_
+    # plot's empty-rows case, where no groups exist to plot() at all) would
+    # otherwise raise a "No artists with labels found" UserWarning on every
+    # such call - every existing caller always has labeled lines, so this
+    # is a no-op for them.
+    if ax.get_legend_handles_labels()[0]:
+        ax.legend(facecolor=SURFACE, edgecolor=GRIDLINE, labelcolor=MUTED_TEXT)
 
 
 def _build_figure(rows):
@@ -125,3 +132,76 @@ def export_session_plot(rows, path):
 
 def _to_plot_value(value, excluded):
     return value if (value is not None and not excluded) else float("nan")
+
+
+def _build_cross_camera_figure(cross_rows, title):
+    """Two stacked subplots (sharing one x-axis, "Pair index") - HW TS
+    Latency and Optical Sync each get their own y-axis, same "wildly
+    different scales" reasoning _build_figure's own 3-axis split already
+    uses for the intra-camera plot. Global TS Latency shares the first
+    (HW TS Latency) axis rather than getting a third subplot of its own -
+    both are in the same us-scale range, and the whole point of this line
+    is a direct, same-scale visual comparison against its HW-ts
+    counterpart (see CrossCameraReconciler's own docstring) - plotted
+    dashed, same color as that identity's own HW TS Latency line, so the
+    two are easy to tell apart per identity. One line per stream identity - the
+    caller (gui/pages/multi_camera_live_session_page.py) pre-filters
+    cross_rows to a single slave camera before calling, since this export
+    is now one figure per slave (see that page's own per-slave cross-camera
+    section); a single slave can still produce multiple lines here if it
+    shares more than one stream identity with master. engine.
+    cross_camera_reconciler's own pair_index is a synthetic, shared-
+    across-all-pairs counter (not comparable to any one camera's own
+    pair_index), so it's used here only as this plot's own x-axis, not
+    cross-referenced against per-camera CSVs. Split out from
+    export_cross_camera_plot so tests can inspect the plotted line data
+    directly, same reason _build_figure is split from export_session_plot."""
+    groups = {}
+    for row in cross_rows:
+        key = row["stream_identity"]
+        groups.setdefault(key, []).append(row)
+
+    fig, (pairing_ax, position_ax) = plt.subplots(
+        2, 1, figsize=(_figure_width(len(cross_rows)), _FIGURE_HEIGHT), sharex=True,
+    )
+    fig.patch.set_facecolor(SURFACE)
+    fig.suptitle(title, color=MUTED_TEXT)
+
+    for index, identity in enumerate(sorted(groups.keys())):
+        pair_rows = groups[identity]
+        pair_indices = [row["pair_index"] for row in pair_rows]
+        color = CROSS_CAMERA_COLORS[index % len(CROSS_CAMERA_COLORS)]
+
+        pairing_values = [_to_plot_value(row.get("pairing_gap_us"), row.get("pairing_gap_us_excluded"))
+                           for row in pair_rows]
+        pairing_ax.plot(pair_indices, pairing_values, label=identity, color=color)
+
+        # Same color as this identity's own HW TS Latency line, dashed
+        # instead of solid - lets the operator directly compare the two
+        # latency measures for the same pairs on one chart (the whole
+        # point of this metric: Global TS Latency should stay near zero
+        # with no drift, unlike its HW-ts counterpart).
+        global_ts_values = [_to_plot_value(row.get("global_ts_gap_us"), row.get("global_ts_gap_us_excluded"))
+                             for row in pair_rows]
+        pairing_ax.plot(pair_indices, global_ts_values, label="{} (global)".format(identity),
+                         color=color, linestyle="--")
+
+        position_values = [_to_plot_value(row.get("position_gap_ms"), row.get("position_gap_ms_excluded"))
+                            for row in pair_rows]
+        position_ax.plot(pair_indices, position_values, label=identity, color=color)
+
+    pairing_ax.set_ylabel("HW TS / Global TS Latency (us)")
+    _style_axis(pairing_ax)
+
+    position_ax.set_ylabel("Optical Sync (ms)")
+    position_ax.set_xlabel("Pair index")
+    _style_axis(position_ax)
+
+    fig.tight_layout()
+    return fig
+
+
+def export_cross_camera_plot(cross_rows, path, title):
+    fig = _build_cross_camera_figure(cross_rows, title)
+    fig.savefig(path, facecolor=SURFACE)
+    plt.close(fig)

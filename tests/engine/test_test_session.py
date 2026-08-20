@@ -104,3 +104,25 @@ def test_should_auto_stop_respects_configured_duration():
 def test_should_auto_stop_never_true_when_duration_is_none():
     session = TestSession(TestSessionConfig(metrics=[], duration_s=None))
     assert session.should_auto_stop(elapsed_s=1_000_000.0) is False
+
+
+def test_process_pair_carries_global_ts_into_the_row():
+    session = TestSession(TestSessionConfig(metrics=[FakeMetric()]))
+    session.start()
+    row = session.process_pair(FramePairSample(
+        pair_index=0, stream_a_ts_us=100.0, stream_b_ts_us=100.0,
+        stream_a_global_ts_us=5_000.0, stream_b_global_ts_us=5_001.0,
+    ))
+    assert row["stream_a_global_ts_us"] == 5_000.0
+    assert row["stream_b_global_ts_us"] == 5_001.0
+
+
+def test_process_pair_defaults_global_ts_to_none_when_not_captured():
+    # Every existing single-camera FramePairSample call (this file's own
+    # other tests included) never sets these two fields - process_pair
+    # must not require them.
+    session = TestSession(TestSessionConfig(metrics=[FakeMetric()]))
+    session.start()
+    row = session.process_pair(FramePairSample(pair_index=0, stream_a_ts_us=100.0, stream_b_ts_us=100.0))
+    assert row["stream_a_global_ts_us"] is None
+    assert row["stream_b_global_ts_us"] is None

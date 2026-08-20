@@ -539,6 +539,78 @@ def set_emitter_enabled(sensor, enabled):
     return False
 
 
+# D400-series' own values for rs.option.inter_cam_sync_mode. D500-series
+# devices (e.g. this project's "RealSense D585 Prototype") use the SAME
+# option but a DIFFERENT value scheme entirely - rs.d500_intercam_sync_mode's
+# own enum (none=0/rgb_master=1/pwm_master=2/external_master=3), confirmed
+# via direct pyrealsense2 2.58.3 introspection, NOT the plain master/slave
+# scheme below. Picking the right raw value per camera model/generation is
+# the responsibility of whoever assigns master/slave roles (not this
+# function - see set_inter_cam_sync_mode's own docstring), and needs real
+# multi-camera hardware confirmation before it's load-bearing either way -
+# see the multi-camera design doc's "Known risks" section.
+INTER_CAM_SYNC_DEFAULT = 0
+INTER_CAM_SYNC_MASTER = 1
+INTER_CAM_SYNC_SLAVE = 2
+
+
+def set_inter_cam_sync_mode(device, mode):
+    """Applies rs.option.inter_cam_sync_mode to whichever sensor on `device`
+    actually supports it - NOT assumed to be a fixed sensor/index, since a
+    camera can have multiple sensors and (per public RealSense documentation,
+    not yet confirmed on this project's own hardware) genlock is reportedly
+    carried by the depth/stereo sensor, not the color sensor. `mode` is
+    written as given - this function does NOT translate between D400-series'
+    plain master/slave scheme and D500-series' differently-numbered
+    rs.d500_intercam_sync_mode scheme (see the constants above); the caller
+    must pass whichever raw value is correct for that specific device's
+    generation. Returns True/False so callers can warn the operator instead
+    of silently proceeding unsynced - same convention as
+    set_emitter_enabled/enable_auto_exposure."""
+    for sensor in device.query_sensors():
+        if sensor.supports(rs.option.inter_cam_sync_mode):
+            sensor.set_option(rs.option.inter_cam_sync_mode, mode)
+            return True
+    return False
+
+
+def resolve_inter_cam_sync_value(inter_cam_sync_settings, camera_name, is_master):
+    """Looks up the raw inter_cam_sync_mode value for THIS camera's role
+    (master/slave) from settings.yaml's camera.inter_cam_sync section
+    (keyed by exact device name, same convention as camera.stream_options) -
+    NOT hardcoded here, because which raw value means what is a per-CAMERA-
+    MODEL property (see set_inter_cam_sync_mode's own docstring: D400-series
+    and D500-series use different value schemes on the same option - D500's
+    own rs.d500_intercam_sync_mode enum doesn't even have a plain "slave"
+    value, so blindly reusing D400's scheme for an unconfirmed model would
+    silently misconfigure it). Returns None - skip genlock entirely for
+    this camera - if camera_name has no entry, a safe default rather than
+    guessing a possibly-wrong value for a model/firmware nobody has
+    confirmed the right values for yet."""
+    entry = inter_cam_sync_settings.get(camera_name)
+    if entry is None:
+        return None
+    return entry["master"] if is_master else entry["slave"]
+
+
+def resolve_max_slave_color_resolution(inter_cam_sync_settings, camera_name):
+    """Returns (width, height) - the confirmed max color-stream resolution
+    this camera MODEL can safely use while acting as a genlock SLAVE,
+    without hitting the real USB-bandwidth ceiling found on real hardware
+    (full 1280x720@30 color blocks BOTH streams entirely once genlocked;
+    640x480@30 was rigorously confirmed - frame-count parity + tight
+    index-lockstep offset stability, not just "frames flow" - see
+    tools/genlock_diag/diag_genlock_quality_test.py). Returns None if this
+    camera model has no confirmed cap at all - same "unconfirmed means
+    don't guess" convention as resolve_inter_cam_sync_value; the caller
+    must treat None as "block, not allow.\""""
+    entry = inter_cam_sync_settings.get(camera_name)
+    if entry is None or "max_slave_color_resolution" not in entry:
+        return None
+    resolution = entry["max_slave_color_resolution"]
+    return resolution["width"], resolution["height"]
+
+
 def set_manual_exposure(sensor, exposure):
     """Manual mode touches EXPOSURE ONLY - gain is deliberately never read
     or written here. See enable_auto_exposure's docstring for why: an
@@ -573,17 +645,49 @@ def set_manual_exposure(sensor, exposure):
     return True
 
 
+def _read_global_ts_us(frame_a, frame_b):
+    """Reads and validates both frames' RealSense global timestamp
+    (frame.get_timestamp(), converted from its native ms to this project's
+    _ts_us microsecond convention) - the join key
+    engine.cross_camera_reconciler.CrossCameraReconciler's matching uses.
+    Raises if either frame isn't actually reporting the GLOBAL_TIME domain:
+    global_time_enabled may be disabled/unsupported on this device/driver,
+    in which case frame.get_timestamp() silently falls back to a different
+    domain (system_time/hardware_clock) that isn't comparable across two
+    independent devices the way GLOBAL_TIME is meant to be - a silently-
+    wrong value here would be worse than an obvious failure (same "fail
+    loudly" convention as the frame_timestamp metadata check in
+    ContinuousCapture.frames_with_diagnostics, the only caller of this
+    function)."""
+    domain = rs.timestamp_domain.global_time
+    if frame_a.get_frame_timestamp_domain() != domain or frame_b.get_frame_timestamp_domain() != domain:
+        raise RuntimeError(
+            "This camera is not reporting frames in the RealSense GLOBAL_TIME "
+            "timestamp domain (global_time_enabled may be disabled or unsupported "
+            "on this device/driver), which the cross-camera Global TS Latency "
+            "metric requires. Reconnect the camera or disable "
+            "camera_sync.capture_global_ts and retry."
+        )
+    return frame_a.get_timestamp() * 1000.0, frame_b.get_timestamp() * 1000.0
+
+
 class ContinuousCapture:
-    def __init__(self, device_serial, pick_a, pick_b, enable_depth_for_ir_sync=True):
+    def __init__(self, device_serial, pick_a, pick_b, enable_depth_for_ir_sync=True, capture_global_ts=False):
         self.device_serial = device_serial
         self.pick_a = pick_a
         self.pick_b = pick_b
         # See _depth_sync_stream/_build_config - whether to co-enable the
         # stereo module's depth stream to fix IR/RGB sync.
         self.enable_depth_for_ir_sync = enable_depth_for_ir_sync
+        # Opt-in: reads+validates each frame's RealSense GLOBAL_TIME-domain
+        # timestamp too (see _read_global_ts_us) - a cross-camera-only
+        # concept (engine.cross_camera_reconciler's matching key and its
+        # Global TS Latency metric), so single-camera runs never need or
+        # request it.
+        self.capture_global_ts = capture_global_ts
         # Set on start() to whether a depth stream was actually requested
         # (self._depth_sync_stream() is not None) - not a resolve/success
-        # check, just what start() attempted, for callers to report.
+        # check, just what start() attempted, for callers that want to report.
         self.depth_sync_active = False
         self._pipeline = None
 
@@ -654,8 +758,18 @@ class ContinuousCapture:
         # real error instead of a silent, wrong fallback.
         self.depth_sync_active = self._depth_sync_stream() is not None
         config = self._build_config()
-        self._pipeline = rs.pipeline()
-        self._pipeline.start(config)
+        # Only assign self._pipeline AFTER pipeline.start(config) actually
+        # succeeds - confirmed as a real bug via real hardware (two D455s
+        # opened concurrently, one's pipeline.start() failed): assigning
+        # self._pipeline = rs.pipeline() before the call that can fail left
+        # a constructed-but-never-started pipeline behind for stop()'s own
+        # "if self._pipeline is not None" guard to (wrongly) treat as
+        # stoppable, and pyrealsense2 itself raises "stop() cannot be called
+        # before start()" for that. If start(config) raises, self._pipeline
+        # stays None (its __init__ default), so stop() correctly no-ops.
+        pipeline = rs.pipeline()
+        pipeline.start(config)
+        self._pipeline = pipeline
 
     def _get_frame(self, frameset, pick):
         if pick["stream_type"] == rs.stream.infrared:
@@ -663,7 +777,7 @@ class ContinuousCapture:
         return frameset.get_color_frame(pick["stream_index"])
 
     def frames(self):
-        for stream_a_image, stream_b_image, stream_a_ts_us, stream_b_ts_us, _, _ in self.frames_with_diagnostics():
+        for stream_a_image, stream_b_image, stream_a_ts_us, stream_b_ts_us, _, _, _, _ in self.frames_with_diagnostics():
             yield stream_a_image, stream_b_image, stream_a_ts_us, stream_b_ts_us
 
     def frames_with_diagnostics(self):
@@ -692,7 +806,12 @@ class ContinuousCapture:
             num_a = frame_a.get_frame_number()
             num_b = frame_b.get_frame_number()
 
-            yield image_a, image_b, ts_a, ts_b, num_a, num_b
+            if self.capture_global_ts:
+                global_ts_a, global_ts_b = _read_global_ts_us(frame_a, frame_b)
+            else:
+                global_ts_a, global_ts_b = None, None
+
+            yield image_a, image_b, ts_a, ts_b, num_a, num_b, global_ts_a, global_ts_b
 
     def stop(self):
         if self._pipeline is not None:

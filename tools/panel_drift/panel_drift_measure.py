@@ -284,7 +284,7 @@ def frame_source(pipeline, panel_a_xy, panel_b_xy, neighborhood_size):
         # Same image, same timestamp for both "sides" - it's genuinely one
         # frame; only the sampled brightness differs (panel A's LED
         # positions vs panel B's).
-        yield image, image, ts_us, ts_us, bright_a, bright_b
+        yield image, image, ts_us, ts_us, bright_a, bright_b, None, None
 
 
 def main():

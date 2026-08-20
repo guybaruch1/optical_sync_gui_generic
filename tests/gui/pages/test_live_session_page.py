@@ -217,6 +217,7 @@ def test_start_session_passes_toolbar_switch_time_and_frame_sample_interval(qapp
     page = LiveSessionPage()
     page.set_context(**_minimal_context(tmp_path, switch_time_ms=1))
     page.switch_time_spinbox.setValue(42)
+    page._on_confirm_switch_time_clicked()
     page.frame_sample_interval_spinbox.setValue(99)
 
     with patch("gui.pages.live_session_page.SessionEngineThread", _FakeEngineThread):
@@ -224,6 +225,18 @@ def test_start_session_passes_toolbar_switch_time_and_frame_sample_interval(qapp
 
     assert _FakeEngineThread.last_kwargs["switch_time_ms"] == 42
     assert _FakeEngineThread.last_kwargs["display_stride"] == 99
+
+
+def test_start_session_refreshes_the_switch_time_stats_tile_to_the_confirmed_value(qapp, tmp_path):
+    page = LiveSessionPage()
+    page.set_context(**_minimal_context(tmp_path, switch_time_ms=1))
+    page.switch_time_spinbox.setValue(5)
+    page._on_confirm_switch_time_clicked()
+
+    with patch("gui.pages.live_session_page.SessionEngineThread", _FakeEngineThread):
+        page.start_session()
+
+    assert page.stats_panel._value_labels["switch_time_ms"].text() == "5.0"
 
 
 # --- settings.yaml camera_sync: knobs must actually reach the engine thread,
@@ -263,6 +276,7 @@ def test_start_session_passes_a_fractional_toolbar_switch_time(qapp, tmp_path):
     page = LiveSessionPage()
     page.set_context(**_minimal_context(tmp_path, switch_time_ms=1))
     page.switch_time_spinbox.setValue(2.5)
+    page._on_confirm_switch_time_clicked()
 
     with patch("gui.pages.live_session_page.SessionEngineThread", _FakeEngineThread):
         page.start_session()
@@ -317,12 +331,12 @@ def test_start_session_locks_duration_switch_time_and_frame_sample_interval(qapp
     assert page.frame_sample_interval_spinbox.isEnabled()
 
 
-# --- Confirm button next to LED Switch Time - purely a UI-parity affordance
-# matching gui/pages/threshold_tuning_page.py's own Confirm button. Unlike
-# that page, this one never applies switch time live at all - start_session()
-# always reads the spinbox's current value fresh - so Confirm here never
-# touches hardware; it only tracks/displays whether the value has been
-# acknowledged. ---
+# --- Confirm button next to LED Switch Time - now a REAL gate.
+# start_session() reads self._last_confirmed_switch_time_ms, not the
+# spinbox's raw value, so an edit sitting unconfirmed in the box is never
+# silently used for a run - and start_button itself stays disabled while
+# one is pending, so the operator can't even attempt to start with a
+# value they haven't acknowledged. ---
 
 def test_set_context_leaves_confirm_switch_time_disabled(qapp, tmp_path):
     page = LiveSessionPage()
@@ -342,10 +356,23 @@ def test_ticking_switch_time_spinbox_enables_confirm_then_disables_if_reverted(q
     assert not page.confirm_switch_time_button.isEnabled()
 
 
-def test_confirm_switch_time_click_does_not_touch_hardware_or_change_start_session_value(qapp, tmp_path):
-    # No SessionEngineThread/LEDPanel call at all - purely a UI
-    # acknowledgment. start_session() reads the spinbox's value fresh
-    # regardless of whether Confirm was ever clicked.
+def test_ticking_switch_time_spinbox_disables_start_until_confirmed(qapp, tmp_path):
+    page = LiveSessionPage()
+    page.set_context(**_minimal_context(tmp_path, switch_time_ms=1))
+    assert page.start_button.isEnabled()
+
+    page.switch_time_spinbox.setValue(5)
+    assert not page.start_button.isEnabled()
+
+    page._on_confirm_switch_time_clicked()
+    assert page.start_button.isEnabled()
+
+
+def test_confirm_switch_time_click_makes_the_value_usable_by_start_session(qapp, tmp_path):
+    # No SessionEngineThread/LEDPanel call from Confirm itself - still
+    # purely a UI acknowledgment - but start_session() now reads the
+    # CONFIRMED value, so clicking Confirm is what makes a new value
+    # actually usable for a run.
     page = LiveSessionPage()
     page.set_context(**_minimal_context(tmp_path, switch_time_ms=1))
     page.switch_time_spinbox.setValue(5)
@@ -359,6 +386,35 @@ def test_confirm_switch_time_click_does_not_touch_hardware_or_change_start_sessi
     with patch("gui.pages.live_session_page.SessionEngineThread", _FakeEngineThread):
         page.start_session()
     assert _FakeEngineThread.last_kwargs["switch_time_ms"] == 5
+
+
+def test_start_session_uses_last_confirmed_value_not_an_unconfirmed_edit(qapp, tmp_path):
+    page = LiveSessionPage()
+    page.set_context(**_minimal_context(tmp_path, switch_time_ms=1))
+    page.switch_time_spinbox.setValue(5)  # never confirmed
+
+    with patch("gui.pages.live_session_page.SessionEngineThread", _FakeEngineThread):
+        page.start_session()
+
+    assert _FakeEngineThread.last_kwargs["switch_time_ms"] == 1
+
+
+def test_finishing_a_run_does_not_reenable_start_over_a_pending_unconfirmed_edit(qapp, tmp_path):
+    page = LiveSessionPage()
+    page.set_context(**_minimal_context(tmp_path, switch_time_ms=1))
+
+    with patch("gui.pages.live_session_page.SessionEngineThread", _FakeEngineThread):
+        page.start_session()
+
+    # Simulates an edit landing while the run was in progress (defensive -
+    # the spinbox is normally disabled during a run, but nothing prevents a
+    # direct/programmatic value change, e.g. from a future call site).
+    page.switch_time_spinbox.setValue(99)
+
+    page._on_engine_thread_finished()
+
+    assert not page.start_button.isEnabled()
+    assert page.confirm_switch_time_button.isEnabled()
 
 
 # --- Per-run output folder: every Start click must mint its OWN

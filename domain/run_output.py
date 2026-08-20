@@ -35,6 +35,33 @@ def create_run_dir(output_root, kind, now=None, suffix=None):
     return run_dir
 
 
+def _sanitize_for_filename(text):
+    # Filesystem-safe folder-name fragment - collapses whitespace/punctuation
+    # a raw device name like "Intel RealSense D455" would otherwise carry
+    # into the folder name (spaces are legal on Windows but awkward to type/
+    # tab-complete; other camera-name punctuation isn't universally safe).
+    return "".join(c if c.isalnum() else "_" for c in text).strip("_")
+
+
+def create_camera_subdir(run_dir, camera_id, label=None):
+    """Creates and returns run_dir/camera_<camera_id>[_<sanitized label>]/ -
+    one per configured camera under ONE shared multi-camera run's own
+    parent folder (create_run_dir), so every camera's own CSVs/plots/
+    snapshots stay together with the run they belong to instead of
+    scattered across independent top-level output/live_session_<timestamp>/
+    folders (today's single-camera behavior). Idempotent for the same
+    camera_id within one run_dir (exist_ok=True) - unlike create_run_dir's
+    collision-numbering (meant to guarantee two separate RUNS never share a
+    folder), re-preparing the same camera within an already-unique run_dir
+    should return the same folder, not a numbered duplicate."""
+    name = "camera_{}".format(camera_id)
+    if label:
+        name = "{}_{}".format(name, _sanitize_for_filename(label))
+    subdir = os.path.join(run_dir, name)
+    os.makedirs(subdir, exist_ok=True)
+    return subdir
+
+
 def _format_number(value):
     # Whole-valued floats (e.g. switch_time_ms=1.0) print as "1", not "1.0" -
     # but a real fraction (0.5) still prints in full. int/None pass through

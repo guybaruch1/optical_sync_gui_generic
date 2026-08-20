@@ -30,6 +30,33 @@ def export_series_csv(path, series_x, series_y_by_name):
             writer.writerow(row)
 
 
+def export_cross_camera_csv(cross_rows, path):
+    """One combined file for every cross-camera (master-vs-slave) pair -
+    filterable/pivotable by slave_camera_id/stream_identity, NOT split
+    kept/dropped like export_session_csvs above: that split is specifically
+    about per-STREAM frame drops within one camera's own pipeline, and
+    engine.cross_camera_reconciler's rows carry no stream_a_frame_drop/
+    stream_b_frame_drop columns at all - a dropped frame on either camera
+    already excludes the match via pairing_gap_us_excluded/exclude_reason
+    (="frame_drop"), same convention as every other exclusion reason here:
+    flagged via a column, never a separate file, for a metric that only has
+    ONE reason bucket worth splitting out to begin with (there isn't one)."""
+    fieldnames = []
+    for row in cross_rows:
+        for key in row.keys():
+            if key not in fieldnames:
+                fieldnames.append(key)
+    if not fieldnames:
+        fieldnames = ["pair_index"]
+
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in cross_rows:
+            writer.writerow(row)
+    return len(cross_rows)
+
+
 def export_session_csvs(rows, kept_path, dropped_path):
     fieldnames = []
     for row in rows:

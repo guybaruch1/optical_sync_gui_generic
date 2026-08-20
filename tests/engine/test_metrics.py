@@ -218,6 +218,48 @@ def test_position_gap_metric_tracks_last_on_masks_for_debug_snapshots():
     assert metric.last_stream_b_on_mask.tolist() == [True, False, False, False]
 
 
+def test_position_gap_metric_exposes_detected_led_index_via_extra():
+    threshold = np.full(4, 150.0)
+    metric = PositionGapMetric(
+        stream_a_threshold=threshold, stream_b_threshold=threshold, num_leds=4,
+        switch_time_ms=1.0, warmup_pairs_to_skip=0,
+    )
+    stream_a_bright = np.array([50.0, 200.0, 50.0, 50.0])
+    stream_b_bright = np.array([50.0, 50.0, 200.0, 50.0])
+
+    result = metric.update(FramePairSample(0, 0.0, 0.0, stream_a_bright, stream_b_bright))
+
+    assert result.extra == {"stream_a_last_led": 1, "stream_b_last_led": 2}
+
+
+def test_position_gap_metric_extra_reflects_a_miss_on_one_side():
+    threshold = np.full(4, 150.0)
+    metric = PositionGapMetric(
+        stream_a_threshold=threshold, stream_b_threshold=threshold, num_leds=4,
+        switch_time_ms=1.0, warmup_pairs_to_skip=0,
+    )
+    stream_a_bright = np.array([50.0, 200.0, 50.0, 50.0])
+    stream_b_bright = np.full(4, 50.0)  # nothing on
+
+    result = metric.update(FramePairSample(0, 0.0, 0.0, stream_a_bright, stream_b_bright))
+
+    assert result.exclude_reason == "miss"
+    assert result.extra == {"stream_a_last_led": 1, "stream_b_last_led": None}
+
+
+def test_position_gap_metric_extra_is_none_with_no_led_data_at_all():
+    threshold = np.full(4, 150.0)
+    metric = PositionGapMetric(
+        stream_a_threshold=threshold, stream_b_threshold=threshold, num_leds=4,
+        switch_time_ms=1.0, warmup_pairs_to_skip=0,
+    )
+
+    result = metric.update(FramePairSample(0, 0.0, 0.0, None, None))
+
+    assert result.exclude_reason == "no_led_data"
+    assert result.extra is None
+
+
 def test_is_position_gap_debug_outlier_true_at_exact_positive_threshold():
     # >=, not >, matching "delta above or equal to 5".
     row = {"position_gap_ms": 5.0, "position_gap_ms_excluded": False}

@@ -53,6 +53,8 @@ class TestSession:
             "pair_index": sample.pair_index,
             "stream_a_ts_us": sample.stream_a_ts_us,
             "stream_b_ts_us": sample.stream_b_ts_us,
+            "stream_a_global_ts_us": sample.stream_a_global_ts_us,
+            "stream_b_global_ts_us": sample.stream_b_global_ts_us,
             "stream_a_frame_drop": stream_a_drop,
             "stream_b_frame_drop": stream_b_drop,
         }

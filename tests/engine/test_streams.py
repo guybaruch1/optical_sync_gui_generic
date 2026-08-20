@@ -1,5 +1,6 @@
 import threading
 import time
+from unittest.mock import patch
 
 import pytest
 import pyrealsense2 as rs
@@ -9,6 +10,9 @@ from engine.streams import (
     list_video_stream_options_from_device, resolve_and_group, group_for_pick, exposure_for_group,
     set_emitter_enabled, set_manual_exposure, stream_slug,
     parse_camera_tests_config, resolve_camera_tests,
+    set_inter_cam_sync_mode, INTER_CAM_SYNC_MASTER, INTER_CAM_SYNC_SLAVE,
+    resolve_inter_cam_sync_value, resolve_max_slave_color_resolution,
+    _read_global_ts_us,
 )
 
 
@@ -593,6 +597,125 @@ def test_set_emitter_enabled_returns_false_when_unsupported():
     assert set_emitter_enabled(sensor, False) is False
 
 
+class _FakeSensorDevice:
+    """Fake device exposing just query_sensors() - enough for
+    set_inter_cam_sync_mode, which iterates a device's sensors looking for
+    whichever one supports the genlock option (mirrors resolve_and_group's
+    own list(device.query_sensors()) usage)."""
+
+    def __init__(self, sensors):
+        self._sensors = sensors
+
+    def query_sensors(self):
+        return self._sensors
+
+
+def test_set_inter_cam_sync_mode_writes_option_on_the_supporting_sensor():
+    # Multi-camera genlock (D400-series): a camera can have multiple
+    # sensors, but only the one that actually supports inter_cam_sync_mode
+    # (believed to be the depth/stereo sensor, not color) should be written.
+    non_supporting = FakeOptionSensor(supported_options=set())
+    supporting = FakeOptionSensor(supported_options={rs.option.inter_cam_sync_mode})
+    device = _FakeSensorDevice([non_supporting, supporting])
+
+    assert set_inter_cam_sync_mode(device, INTER_CAM_SYNC_MASTER) is True
+
+    assert supporting.set_options[rs.option.inter_cam_sync_mode] == INTER_CAM_SYNC_MASTER
+    assert non_supporting.set_options == {}
+
+
+def test_set_inter_cam_sync_mode_writes_whatever_raw_value_the_caller_passes():
+    # There is only ONE rs.option (inter_cam_sync_mode) - confirmed via SDK
+    # introspection, not a second differently-named option for D500-series.
+    # What DOES differ per camera generation is which raw integer VALUE
+    # means what: D400-series uses 0=default/1=master/2=slave: D500-series
+    # (e.g. "RealSense D585 Prototype") uses rs.d500_intercam_sync_mode's own
+    # scheme (0=none/1=rgb_master/2=pwm_master/3=external_master) on this
+    # SAME option. Picking the right raw value per camera model is the
+    # CALLER's responsibility (needs real-hardware confirmation before it's
+    # load-bearing - see the multi-camera design doc's Known Risks) - this
+    # function just writes whatever value it's given, generically.
+    supporting = FakeOptionSensor(supported_options={rs.option.inter_cam_sync_mode})
+    device = _FakeSensorDevice([supporting])
+
+    assert set_inter_cam_sync_mode(device, int(rs.d500_intercam_sync_mode.external_master)) is True
+
+    assert supporting.set_options[rs.option.inter_cam_sync_mode] == int(rs.d500_intercam_sync_mode.external_master)
+
+
+def test_set_inter_cam_sync_mode_returns_false_when_no_sensor_supports_it():
+    # Callers rely on this to warn the operator that a device can't be
+    # genlocked, instead of silently proceeding unsynced - same convention
+    # as set_emitter_enabled/enable_auto_exposure.
+    device = _FakeSensorDevice([FakeOptionSensor(supported_options=set())])
+
+    assert set_inter_cam_sync_mode(device, INTER_CAM_SYNC_SLAVE) is False
+
+
+# --- resolve_inter_cam_sync_value: which RAW value a camera's master/slave
+# role maps to is a per-CAMERA-MODEL property (D400-series and D500-series
+# use different value schemes on the same rs.option.inter_cam_sync_mode -
+# see set_inter_cam_sync_mode's own docstring), so it's looked up from
+# settings.yaml's camera.inter_cam_sync section (keyed by exact device
+# name, same convention as camera.stream_options) rather than guessed in
+# code. A camera model with no entry safely skips genlock entirely (returns
+# None) rather than applying a possibly-wrong value for an unconfirmed
+# model/firmware - e.g. D500-series' own rs.d500_intercam_sync_mode enum
+# has no plain "slave" value at all, so blindly reusing D400's scheme
+# would silently misconfigure it. ---
+
+def test_resolve_inter_cam_sync_value_returns_master_value_for_the_master_camera():
+    settings = {"RealSense D455": {"master": 1, "slave": 2}}
+    assert resolve_inter_cam_sync_value(settings, "RealSense D455", is_master=True) == 1
+
+
+def test_resolve_inter_cam_sync_value_returns_slave_value_for_a_slave_camera():
+    settings = {"RealSense D455": {"master": 1, "slave": 2}}
+    assert resolve_inter_cam_sync_value(settings, "RealSense D455", is_master=False) == 2
+
+
+def test_resolve_inter_cam_sync_value_returns_none_for_an_unconfigured_camera_model():
+    settings = {"RealSense D455": {"master": 1, "slave": 2}}
+    assert resolve_inter_cam_sync_value(settings, "RealSense D585 Prototype", is_master=True) is None
+
+
+def test_resolve_inter_cam_sync_value_returns_none_when_section_is_empty():
+    assert resolve_inter_cam_sync_value({}, "RealSense D455", is_master=True) is None
+
+
+# --- resolve_max_slave_color_resolution: the confirmed-safe color-stream
+# resolution ceiling for a camera acting as a genlock SLAVE is a per-
+# CAMERA-MODEL property too (real hardware finding: full 1280x720@30 color
+# blocks BOTH streams entirely once genlocked - a USB bandwidth ceiling,
+# not a hardware/firmware block - see tools/genlock_diag/diag_genlock_
+# quality_test.py), so it's looked up from the same settings.yaml
+# camera.inter_cam_sync entry rather than assumed. An unconfirmed camera
+# model (or a confirmed one with no resolution ceiling recorded yet)
+# returns None - the caller must treat that as "block, don't guess a safe
+# resolution.\""" ---
+
+def test_resolve_max_slave_color_resolution_returns_the_confirmed_tuple():
+    settings = {"RealSense D455": {"master": 1, "slave": 2, "max_slave_color_resolution": {"width": 640, "height": 480}}}
+    assert resolve_max_slave_color_resolution(settings, "RealSense D455") == (640, 480)
+
+
+def test_resolve_max_slave_color_resolution_returns_none_for_an_unconfigured_camera_model():
+    settings = {"RealSense D455": {"master": 1, "slave": 2, "max_slave_color_resolution": {"width": 640, "height": 480}}}
+    assert resolve_max_slave_color_resolution(settings, "RealSense D585 Prototype") is None
+
+
+def test_resolve_max_slave_color_resolution_returns_none_when_entry_has_no_resolution_cap():
+    # A camera model with confirmed master/slave values but no confirmed
+    # resolution ceiling yet - unconfirmed means don't guess, not "assume
+    # any resolution is fine".
+    settings = {"RealSense D455": {"master": 1, "slave": 2}}
+    assert resolve_max_slave_color_resolution(settings, "RealSense D455") is None
+
+
+def test_resolve_max_slave_color_resolution_returns_none_when_section_is_empty():
+    assert resolve_max_slave_color_resolution({}, "RealSense D455") is None
+
+
 def test_set_manual_exposure_sets_exposure_and_disables_auto():
     sensor = FakeOptionSensor(supported_options={rs.option.enable_auto_exposure, rs.option.exposure, rs.option.gain})
     assert set_manual_exposure(sensor, exposure=150) is True
@@ -939,3 +1062,93 @@ def test_continuous_capture_never_changes_which_pick_is_stream_a():
     capture._depth_sync_stream()
     assert capture.pick_a is pick_a
     assert capture.pick_b is pick_b
+
+
+# --- ContinuousCapture.stop() must be safe to call after start() itself
+# raised - confirmed as a REAL bug via real hardware (tools/genlock_diag's
+# probe hit "RuntimeError: stop() cannot be called before start()" from a
+# cleanup finally block, after one of two concurrently-opened D455s' own
+# pipeline.start() failed). Root cause: start() assigned self._pipeline =
+# rs.pipeline() BEFORE the config was actually started on it, so a
+# never-started pipeline object was left behind for stop()'s existing
+# "if self._pipeline is not None" guard to (wrongly) treat as stoppable.
+# This isn't just the diagnostic script's problem - engine/session_engine.py's
+# SessionEngineThread.run() has the exact same "assign self._capture, then
+# call .start(), then unconditionally .stop() in finally" shape, so a failed
+# start() there would hit this too, masking the real error with this
+# secondary one. Doesn't need real hardware to test - only a fake
+# rs.pipeline() whose start() raises, mirroring the real SDK's own behavior
+# of refusing stop() on a pipeline that was never started. ---
+
+class _FakePipelineThatFailsToStart:
+    def start(self, config):
+        raise RuntimeError("Couldn't resolve requests")
+
+    def stop(self):
+        # Mirrors the real pyrealsense2 SDK's own behavior: calling stop() on
+        # a pipeline whose start() never succeeded raises, it doesn't no-op.
+        raise RuntimeError("stop() cannot be called before start()")
+
+
+def test_continuous_capture_stop_is_safe_after_start_raises():
+    capture = ContinuousCapture("SN1", _ir_pick(), _color_pick(), enable_depth_for_ir_sync=False)
+
+    with patch("engine.streams.rs.pipeline", return_value=_FakePipelineThatFailsToStart()):
+        with pytest.raises(RuntimeError, match="Couldn't resolve requests"):
+            capture.start()
+
+    capture.stop()  # must not raise - nothing was ever successfully started
+
+
+# --- ContinuousCapture's opt-in capture_global_ts feature: _read_global_ts_us
+# is a pure validation+conversion helper, testable with a tiny fake exposing
+# only the two rs.frame methods it actually calls - no real pipeline/frameset
+# needed, same "pull the meaningful logic into its own testable function"
+# convention _depth_sync_stream/_build_config already use in this file. ---
+
+class _FakeGlobalTsFrame:
+    def __init__(self, timestamp_ms, domain):
+        self._timestamp_ms = timestamp_ms
+        self._domain = domain
+
+    def get_timestamp(self):
+        return self._timestamp_ms
+
+    def get_frame_timestamp_domain(self):
+        return self._domain
+
+
+def test_read_global_ts_us_converts_ms_to_us_for_both_frames():
+    frame_a = _FakeGlobalTsFrame(1000.5, rs.timestamp_domain.global_time)
+    frame_b = _FakeGlobalTsFrame(2000.25, rs.timestamp_domain.global_time)
+
+    global_ts_a, global_ts_b = _read_global_ts_us(frame_a, frame_b)
+
+    assert global_ts_a == 1_000_500.0
+    assert global_ts_b == 2_000_250.0
+
+
+def test_read_global_ts_us_raises_when_frame_a_is_the_wrong_domain():
+    frame_a = _FakeGlobalTsFrame(1000.0, rs.timestamp_domain.system_time)
+    frame_b = _FakeGlobalTsFrame(2000.0, rs.timestamp_domain.global_time)
+
+    with pytest.raises(RuntimeError, match="GLOBAL_TIME"):
+        _read_global_ts_us(frame_a, frame_b)
+
+
+def test_read_global_ts_us_raises_when_frame_b_is_the_wrong_domain():
+    frame_a = _FakeGlobalTsFrame(1000.0, rs.timestamp_domain.global_time)
+    frame_b = _FakeGlobalTsFrame(2000.0, rs.timestamp_domain.hardware_clock)
+
+    with pytest.raises(RuntimeError, match="GLOBAL_TIME"):
+        _read_global_ts_us(frame_a, frame_b)
+
+
+def test_continuous_capture_capture_global_ts_defaults_to_false():
+    capture = ContinuousCapture("SN1", _ir_pick(), _color_pick())
+    assert capture.capture_global_ts is False
+
+
+def test_continuous_capture_capture_global_ts_can_be_enabled():
+    capture = ContinuousCapture("SN1", _ir_pick(), _color_pick(), capture_global_ts=True)
+    assert capture.capture_global_ts is True

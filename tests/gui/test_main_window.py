@@ -21,6 +21,13 @@ IR1 = {"sensor_index": 0, "stream_type": rs.stream.infrared, "stream_index": 1,
        "format": rs.format.y8, "width": 1280, "height": 720, "fps": 30}
 COLOR0 = {"sensor_index": 1, "stream_type": rs.stream.color, "stream_index": 0,
           "format": rs.format.bgr8, "width": 1280, "height": 720, "fps": 30}
+# Within the confirmed-safe resolution ceiling for a genlock SLAVE's own
+# color stream (see settings.yaml's camera.inter_cam_sync.max_slave_color_
+# resolution) - COLOR0's own 1280x720 exceeds it, which is deliberate for
+# tests that need to trigger gui.main_window._slave_genlock_color_
+# resolution_conflicts.
+COLOR0_SAFE = {"sensor_index": 1, "stream_type": rs.stream.color, "stream_index": 0,
+               "format": rs.format.bgr8, "width": 640, "height": 480, "fps": 30}
 
 
 def _ir_vs_rgb_test(name="IR vs RGB sync", width=1280, height=720, fps=30):
@@ -265,6 +272,42 @@ def _window_after_config_chosen(qapp, monkeypatch, tmp_path, dual_panel=False):
     return window
 
 
+def _configure_one_camera(window, serial, model_name="Intel RealSense D455",
+                           ir_pick=IR1, color_pick=COLOR0, camera_controls=None):
+    """Runs one camera's full sub-flow (Device Select -> Stream Config ->
+    [ROI Select/Calibration skipped, same shorthand as _window_after_config_
+    chosen above] -> Threshold Tuning) against an ALREADY-CONSTRUCTED
+    window - unlike _window_after_config_chosen, which also builds the
+    window and is only ever used for a single camera. This is the shared
+    helper for tests that configure 2+ cameras in a row: call
+    window._on_add_camera_requested() yourself between calls for the
+    second-and-later camera, same as the real hub's Add flow.
+
+    Returns the camera_id this sub-flow was editing, captured before
+    _on_tuning_done() resets window._editing_camera_id back to None.
+    """
+    if camera_controls is None:
+        camera_controls = {
+            "emitter_enabled": False, "auto_exposure": True,
+            "exposure_a": None, "exposure_b": None,
+        }
+    window._on_device_chosen(serial, model_name)
+    window._on_config_chosen((ir_pick, color_pick, camera_controls))
+    window.gui_state.stream_a_roi = [0, 0, 50, 50]
+    window.gui_state.stream_b_roi = [0, 0, 50, 50]
+    window.calibration_page.last_calibration_result = dict(
+        image_a_on=np.full((50, 50), 50, dtype=np.uint8), image_a_off=np.full((50, 50), 50, dtype=np.uint8),
+        image_b_on=np.full((50, 50), 50, dtype=np.uint8), image_b_off=np.full((50, 50), 50, dtype=np.uint8),
+        stream_a_otsu_threshold=127, stream_b_otsu_threshold=127,
+        min_blob_area=5, row_gap_px=15, neighborhood_size=5,
+    )
+    camera_id = window._editing_camera_id
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window._on_tuning_done()
+    return camera_id
+
+
 def test_on_calibration_done_populates_threshold_tuning_page_and_switches_to_it(qapp, monkeypatch, tmp_path):
     window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
 
@@ -307,13 +350,14 @@ def test_on_tuning_done_reads_stream_xy_live_from_threshold_tuning_page_not_a_st
     # gets the PAGE's current value, not the stale pre-tuning one.
     window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
 
+    camera_id = window._editing_camera_id
     with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
         window._on_calibration_done()
         retuned_stream_a_xy = np.array([(9.0, 9.0), (8.0, 8.0), (7.0, 7.0)])  # deliberately a different shape
         window.threshold_tuning_page._context["stream_a_xy"] = retuned_stream_a_xy
         window._on_tuning_done()
 
-    assert window.live_session_page._context["stream_a_xy"] is retuned_stream_a_xy
+    assert window._cameras[camera_id]["config"]["stream_a_xy"] is retuned_stream_a_xy
 
 
 # --- settings.yaml camera_sync: read-through. Deliberately tolerant of a
@@ -322,12 +366,13 @@ def test_on_tuning_done_reads_stream_xy_live_from_threshold_tuning_page_not_a_st
 
 def test_camera_sync_falls_back_to_defaults_when_section_absent(qapp, monkeypatch, tmp_path):
     window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+    camera_id = window._editing_camera_id
 
     with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
         window._on_calibration_done()
         window._on_tuning_done()
 
-    ctx = window.live_session_page._context
+    ctx = window._cameras[camera_id]["config"]
     assert ctx["enable_depth_for_ir_sync"] is True
     assert ctx["hardware_reset_before_start"] is False
     assert ctx["hardware_reset_settle_s"] == 8.0
@@ -335,6 +380,7 @@ def test_camera_sync_falls_back_to_defaults_when_section_absent(qapp, monkeypatc
 
 def test_camera_sync_settings_are_read_and_passed_to_live_session(qapp, monkeypatch, tmp_path):
     window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+    camera_id = window._editing_camera_id
     window.settings["camera_sync"] = {
         "enable_depth_for_ir_sync": False,
         "hardware_reset_before_start": True,
@@ -345,7 +391,7 @@ def test_camera_sync_settings_are_read_and_passed_to_live_session(qapp, monkeypa
         window._on_calibration_done()
         window._on_tuning_done()
 
-    ctx = window.live_session_page._context
+    ctx = window._cameras[camera_id]["config"]
     assert ctx["enable_depth_for_ir_sync"] is False
     assert ctx["hardware_reset_before_start"] is True
     assert ctx["hardware_reset_settle_s"] == 2.5
@@ -365,6 +411,7 @@ def test_camera_sync_enable_depth_for_ir_sync_also_reaches_threshold_tuning(qapp
 
 def test_on_tuning_done_passes_tuned_per_stream_thresholds_to_live_session(qapp, monkeypatch, tmp_path):
     window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+    camera_id = window._editing_camera_id
 
     with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
         window._on_calibration_done()
@@ -374,8 +421,8 @@ def test_on_tuning_done_passes_tuned_per_stream_thresholds_to_live_session(qapp,
         window.threshold_tuning_page.switch_time_spinbox.setValue(5)
         window._on_tuning_done()
 
-    assert window.stack.currentWidget() is window.live_session_page
-    ctx = window.live_session_page._context
+    assert window.stack.currentWidget() is window.camera_hub_page
+    ctx = window._cameras[camera_id]["config"]
     assert list(ctx["stream_a_threshold"]) == [200.0]  # 100 + 0.5*200
     assert list(ctx["stream_b_threshold"]) == [500.0]  # 200 + 0.75*400
     assert ctx["switch_time_ms"] == 5
@@ -383,13 +430,14 @@ def test_on_tuning_done_passes_tuned_per_stream_thresholds_to_live_session(qapp,
 
 def test_on_tuning_done_passes_a_fractional_switch_time_to_live_session(qapp, monkeypatch, tmp_path):
     window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+    camera_id = window._editing_camera_id
 
     with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
         window._on_calibration_done()
         window.threshold_tuning_page.switch_time_spinbox.setValue(0.5)
         window._on_tuning_done()
 
-    ctx = window.live_session_page._context
+    ctx = window._cameras[camera_id]["config"]
     assert ctx["switch_time_ms"] == 0.5
 
 
@@ -414,7 +462,555 @@ def test_dual_panel_config_built_from_settings_when_checkbox_checked(qapp, monke
 
     with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
         window._on_calibration_done()
+        camera_id = window._editing_camera_id
         window._on_tuning_done()
 
     assert window.threshold_tuning_page._context["dual_panel_config"] == window.settings["dual_panel"]
-    assert window.live_session_page._context["dual_panel_config"] == window.settings["dual_panel"]
+    assert window._cameras[camera_id]["config"]["dual_panel_config"] == window.settings["dual_panel"]
+
+
+# --- Multi-camera hub: _on_tuning_done now commits the just-finished
+# camera's config into self._cameras and returns to the new CameraHubPage,
+# rather than populating LiveSessionPage directly - "hub in front of every
+# run, including a single camera" (see docs/superpowers's multi-camera
+# design doc's "Design detail" section 4). LiveSessionPage itself is
+# untouched and still fully covered by its own test file - MainWindow
+# simply no longer routes to it; the new multi-camera Live Session page
+# that eventually will is a later step, not built yet. ---
+
+def test_main_window_starts_on_camera_hub_page(qapp):
+    settings = _minimal_settings({})
+    window = _make_window(qapp, settings)
+
+    assert window.stack.currentWidget() is window.camera_hub_page
+
+
+def test_add_camera_requested_switches_to_device_select_and_assigns_a_slot(qapp):
+    settings = _minimal_settings({})
+    window = _make_window(qapp, settings)
+
+    window._on_add_camera_requested()
+
+    assert window.stack.currentWidget() is window.device_page
+    assert window._editing_camera_id is not None
+
+
+def test_completing_a_cameras_flow_commits_it_and_returns_to_hub(qapp, monkeypatch, tmp_path):
+    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+    camera_id = window._editing_camera_id
+
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window._on_tuning_done()
+
+    assert window.stack.currentWidget() is window.camera_hub_page
+    assert window._editing_camera_id is None
+    assert camera_id in window._cameras
+    assert window._cameras[camera_id]["label"] == "Intel RealSense D455"
+    assert window._cameras[camera_id]["config"]["switch_time_ms"] == 1
+
+
+def test_first_committed_camera_becomes_master_automatically(qapp, monkeypatch, tmp_path):
+    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+    camera_id = window._editing_camera_id
+
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window._on_tuning_done()
+
+    assert window._master_camera_id == camera_id
+
+
+def test_second_committed_camera_is_not_master_by_default(qapp, monkeypatch, tmp_path):
+    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window._on_tuning_done()
+    first_master = window._master_camera_id
+
+    window._on_add_camera_requested()
+    second_camera_id = window._editing_camera_id
+    window._on_device_chosen("SN456", "Intel RealSense D455")
+    window._on_config_chosen((IR1, COLOR0, {
+        "emitter_enabled": False, "auto_exposure": True, "exposure_a": None, "exposure_b": None,
+    }))
+    window.gui_state.stream_a_roi = [0, 0, 50, 50]
+    window.gui_state.stream_b_roi = [0, 0, 50, 50]
+    window.calibration_page.last_calibration_result = dict(
+        image_a_on=np.full((50, 50), 50, dtype=np.uint8), image_a_off=np.full((50, 50), 50, dtype=np.uint8),
+        image_b_on=np.full((50, 50), 50, dtype=np.uint8), image_b_off=np.full((50, 50), 50, dtype=np.uint8),
+        stream_a_otsu_threshold=127, stream_b_otsu_threshold=127,
+        min_blob_area=5, row_gap_px=15, neighborhood_size=5,
+    )
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window._on_tuning_done()
+
+    assert window._master_camera_id == first_master  # unchanged
+    assert second_camera_id in window._cameras
+    assert second_camera_id != first_master
+
+
+def test_two_fully_configured_cameras_both_reach_the_live_session_page(qapp, monkeypatch, tmp_path):
+    # Regression check for a real bug report: "only one camera ran" when
+    # clicking Start Multi-Camera Live Session after configuring 2 cameras
+    # through the hub. Drives the ENTIRE real MainWindow flow for both
+    # cameras (not a hand-built cameras list, unlike
+    # test_multi_camera_live_session_page.py's own tests) to prove the
+    # MainWindow -> MultiCameraLiveSessionPage handoff itself carries BOTH
+    # cameras through correctly.
+    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+    first_camera_id = window._editing_camera_id
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window._on_tuning_done()
+
+    window._on_add_camera_requested()
+    second_camera_id = window._editing_camera_id
+    window._on_device_chosen("SN456", "Intel RealSense D455")
+    window._on_config_chosen((IR1, COLOR0, {
+        "emitter_enabled": False, "auto_exposure": True, "exposure_a": None, "exposure_b": None,
+    }))
+    window.gui_state.stream_a_roi = [0, 0, 50, 50]
+    window.gui_state.stream_b_roi = [0, 0, 50, 50]
+    window.calibration_page.last_calibration_result = dict(
+        image_a_on=np.full((50, 50), 50, dtype=np.uint8), image_a_off=np.full((50, 50), 50, dtype=np.uint8),
+        image_b_on=np.full((50, 50), 50, dtype=np.uint8), image_b_off=np.full((50, 50), 50, dtype=np.uint8),
+        stream_a_otsu_threshold=127, stream_b_otsu_threshold=127,
+        min_blob_area=5, row_gap_px=15, neighborhood_size=5,
+    )
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window._on_tuning_done()
+
+    assert set(window._cameras.keys()) == {first_camera_id, second_camera_id}
+    assert window.camera_hub_page.start_button.isEnabled()
+
+    window._on_start_multi_camera_session_requested()
+
+    page = window.multi_camera_live_session_page
+    # 3, not 2: the Cross-Camera Sync tab (added first) plus one tab per
+    # camera - see test_multi_camera_live_session_page.py's own
+    # test_cross_camera_tab_is_first for the same count.
+    assert page.tabs.count() == 3
+    assert set(page._panels.keys()) == {first_camera_id, second_camera_id}
+    assert len(page._cameras) == 2
+
+
+def test_master_change_requested_updates_master(qapp, monkeypatch, tmp_path):
+    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window._on_tuning_done()
+    window._cameras["some_other_cam"] = {"label": "other", "config": {}}
+
+    window._on_master_change_requested("some_other_cam")
+
+    assert window._master_camera_id == "some_other_cam"
+
+
+def test_remove_camera_requested_removes_it(qapp, monkeypatch, tmp_path):
+    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window._on_tuning_done()
+    camera_id = list(window._cameras.keys())[0]
+
+    window._on_remove_camera_requested(camera_id)
+
+    assert camera_id not in window._cameras
+    assert window._master_camera_id is None  # no cameras left
+
+
+def test_removing_the_master_promotes_a_remaining_camera(qapp, monkeypatch, tmp_path):
+    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window._on_tuning_done()
+    master_id = window._master_camera_id
+    window._cameras["some_other_cam"] = {"label": "other", "config": {}}
+
+    window._on_remove_camera_requested(master_id)
+
+    assert window._master_camera_id == "some_other_cam"
+
+
+def test_edit_camera_requested_switches_to_device_select_reusing_the_camera_id(qapp, monkeypatch, tmp_path):
+    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window._on_tuning_done()
+    camera_id = list(window._cameras.keys())[0]
+
+    window._on_edit_camera_requested(camera_id)
+
+    assert window.stack.currentWidget() is window.device_page
+    assert window._editing_camera_id == camera_id
+
+
+def test_start_multi_camera_session_requested_does_nothing_with_no_cameras(qapp):
+    # Not reachable via the real hub (Start is disabled with 0 cameras -
+    # see CameraHubPage._can_start), but guard defensively rather than crash
+    # if something else ever calls this directly.
+    settings = _minimal_settings({})
+    window = _make_window(qapp, settings)
+
+    window._on_start_multi_camera_session_requested()  # must not raise
+
+    assert window.stack.currentWidget() is window.camera_hub_page
+
+
+def test_start_multi_camera_session_requested_switches_to_live_session_page_with_exactly_one_camera(qapp, monkeypatch, tmp_path):
+    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window._on_tuning_done()
+
+    window._on_start_multi_camera_session_requested()
+
+    assert window.stack.currentWidget() is window.live_session_page
+    assert window.live_session_page._context["device_serial"] == "SN123"
+    assert window.live_session_page._context["pick_a"] == IR1
+    assert window.live_session_page._context["switch_time_ms"] == 1  # from _full_settings's test.switch_time_ms
+
+
+def test_start_multi_camera_session_requested_skips_genlock_resolution_for_one_camera(qapp, monkeypatch, tmp_path):
+    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window._on_tuning_done()
+
+    calls = []
+    monkeypatch.setattr(
+        main_window_module, "resolve_inter_cam_sync_value",
+        lambda *a, **k: calls.append((a, k)) or 1,
+    )
+
+    window._on_start_multi_camera_session_requested()
+
+    assert calls == []
+    # No _slave_genlock_color_resolution_conflicts test is needed here: that
+    # check only ever inspects SLAVE cameras, and a solo camera is always
+    # the master - it's structurally incapable of firing for exactly 1
+    # camera, so there's nothing to test.
+    assert window.stack.currentWidget() is window.live_session_page
+
+
+# --- Solo-camera genlock role self-heal: a camera left stuck in
+# INTER_CAM_SYNC_SLAVE from an earlier crashed/killed multi-camera run would
+# otherwise sit waiting here for a genlock trigger it will never receive when
+# run solo - see engine/multi_camera_session.py's own _reset_genlock_roles
+# for the same self-heal in the 2+-camera path. ---
+
+def test_start_multi_camera_session_requested_resets_genlock_role_to_default_for_one_camera(qapp, monkeypatch, tmp_path):
+    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window._on_tuning_done()
+
+    fake_device = object()
+    lookup_calls = []
+    monkeypatch.setattr(
+        main_window_module, "find_device_by_serial",
+        lambda ctx, serial: lookup_calls.append(serial) or fake_device,
+    )
+    sync_calls = []
+    monkeypatch.setattr(
+        main_window_module, "set_inter_cam_sync_mode",
+        lambda device, mode: sync_calls.append((device, mode)),
+    )
+
+    window._on_start_multi_camera_session_requested()
+
+    assert lookup_calls == ["SN123"]
+    assert sync_calls == [(fake_device, main_window_module.INTER_CAM_SYNC_DEFAULT)]
+    assert window.stack.currentWidget() is window.live_session_page
+
+
+def test_start_multi_camera_session_requested_survives_genlock_reset_failure_for_one_camera(qapp, monkeypatch, tmp_path):
+    # The operator's Start click must still succeed even if this best-effort
+    # reset fails - e.g. because no hardware is connected in a test/offline
+    # environment (FakeCtx.query_devices() returns [] here, same failure
+    # shape find_device_by_serial would hit for real).
+    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window._on_tuning_done()
+
+    def _raise(ctx, serial):
+        raise RuntimeError("no connected device")
+    monkeypatch.setattr(main_window_module, "find_device_by_serial", _raise)
+
+    window._on_start_multi_camera_session_requested()  # must not raise
+
+    assert window.stack.currentWidget() is window.live_session_page
+
+
+# --- Genlock (inter_cam_sync_mode) role resolution: MainWindow embeds the
+# raw per-camera-model value fresh at Start-time (using whichever camera is
+# CURRENTLY master), via engine.streams.resolve_inter_cam_sync_value against
+# settings.yaml's camera.inter_cam_sync section - see that function's own
+# docstring for why the raw value can't be guessed/hardcoded in Python. ---
+
+def test_start_multi_camera_session_requested_embeds_inter_cam_sync_value_for_master_and_slave(qapp, monkeypatch, tmp_path):
+    settings = _full_settings({"Intel RealSense D455": [_ir_vs_rgb_test()]})
+    settings["camera"]["inter_cam_sync"] = {
+        "Intel RealSense D455": {"master": 1, "slave": 2, "max_slave_color_resolution": {"width": 640, "height": 480}},
+    }
+    window = _make_window(qapp, settings)
+    monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [IR1, COLOR0])
+    monkeypatch.setattr(main_window_module, "save_gui_state", lambda state: None)
+    monkeypatch.setattr(window.roi_page, "set_context", lambda *a, **k: None)
+    monkeypatch.setattr(main_window_module, "ensure_output_dir", lambda settings: str(tmp_path))
+    monkeypatch.setattr(
+        main_window_module, "load_led_positions",
+        lambda *a, **k: ({"0": [1.0, 1.0, 300.0, 100.0, 200.0]}, {"0": [2.0, 2.0, 600.0, 200.0, 400.0]}),
+    )
+
+    master_id = _configure_one_camera(window, "SN123")  # master's own color stream is unrestricted - COLOR0 (1280x720) is fine
+    window._on_add_camera_requested()
+    slave_id = _configure_one_camera(window, "SN456", color_pick=COLOR0_SAFE)  # slave must stay within the confirmed cap
+    assert window._master_camera_id == master_id  # first camera stays master
+
+    window._on_start_multi_camera_session_requested()
+
+    page = window.multi_camera_live_session_page
+    configs_by_id = {c["camera_id"]: c["config"] for c in page._cameras}
+    assert configs_by_id[master_id]["inter_cam_sync_value"] == 1
+    assert configs_by_id[slave_id]["inter_cam_sync_value"] == 2
+
+
+def test_start_multi_camera_session_requested_defaults_capture_global_ts_true(qapp, monkeypatch, tmp_path):
+    # No camera_sync section at all in settings.yaml - capture_global_ts must
+    # default to True (mirrors enable_depth_for_ir_sync's own tolerant
+    # .get()-with-default convention elsewhere in this file).
+    settings = _full_settings({"Intel RealSense D455": [_ir_vs_rgb_test()]})
+    settings["camera"]["inter_cam_sync"] = {
+        "Intel RealSense D455": {"master": 1, "slave": 2, "max_slave_color_resolution": {"width": 640, "height": 480}},
+    }
+    window = _make_window(qapp, settings)
+    monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [IR1, COLOR0])
+    monkeypatch.setattr(main_window_module, "save_gui_state", lambda state: None)
+    monkeypatch.setattr(window.roi_page, "set_context", lambda *a, **k: None)
+    monkeypatch.setattr(main_window_module, "ensure_output_dir", lambda settings: str(tmp_path))
+    monkeypatch.setattr(
+        main_window_module, "load_led_positions",
+        lambda *a, **k: ({"0": [1.0, 1.0, 300.0, 100.0, 200.0]}, {"0": [2.0, 2.0, 600.0, 200.0, 400.0]}),
+    )
+
+    master_id = _configure_one_camera(window, "SN123")
+    window._on_add_camera_requested()
+    slave_id = _configure_one_camera(window, "SN456", color_pick=COLOR0_SAFE)
+
+    window._on_start_multi_camera_session_requested()
+
+    page = window.multi_camera_live_session_page
+    configs_by_id = {c["camera_id"]: c["config"] for c in page._cameras}
+    assert configs_by_id[master_id]["capture_global_ts"] is True
+    assert configs_by_id[slave_id]["capture_global_ts"] is True
+
+
+def test_start_multi_camera_session_requested_honors_capture_global_ts_false_override(qapp, monkeypatch, tmp_path):
+    settings = _full_settings({"Intel RealSense D455": [_ir_vs_rgb_test()]})
+    settings["camera"]["inter_cam_sync"] = {
+        "Intel RealSense D455": {"master": 1, "slave": 2, "max_slave_color_resolution": {"width": 640, "height": 480}},
+    }
+    settings["camera_sync"] = {"capture_global_ts": False}
+    window = _make_window(qapp, settings)
+    monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [IR1, COLOR0])
+    monkeypatch.setattr(main_window_module, "save_gui_state", lambda state: None)
+    monkeypatch.setattr(window.roi_page, "set_context", lambda *a, **k: None)
+    monkeypatch.setattr(main_window_module, "ensure_output_dir", lambda settings: str(tmp_path))
+    monkeypatch.setattr(
+        main_window_module, "load_led_positions",
+        lambda *a, **k: ({"0": [1.0, 1.0, 300.0, 100.0, 200.0]}, {"0": [2.0, 2.0, 600.0, 200.0, 400.0]}),
+    )
+
+    master_id = _configure_one_camera(window, "SN123")
+    window._on_add_camera_requested()
+    slave_id = _configure_one_camera(window, "SN456", color_pick=COLOR0_SAFE)
+
+    window._on_start_multi_camera_session_requested()
+
+    page = window.multi_camera_live_session_page
+    configs_by_id = {c["camera_id"]: c["config"] for c in page._cameras}
+    assert configs_by_id[master_id]["capture_global_ts"] is False
+    assert configs_by_id[slave_id]["capture_global_ts"] is False
+
+
+def test_start_multi_camera_session_requested_leaves_inter_cam_sync_value_none_for_unconfigured_camera_model(qapp, monkeypatch, tmp_path):
+    # No camera.inter_cam_sync entry at all for this device name - genlock is
+    # skipped entirely rather than guessing a possibly-wrong raw value. Needs
+    # 2 cameras: with only 1 configured, MainWindow now routes to
+    # LiveSessionPage instead (see test_start_multi_camera_session_requested_
+    # switches_to_live_session_page_with_exactly_one_camera), which never
+    # attempts genlock resolution for a solo camera at all.
+    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+    first_camera_id = window._editing_camera_id
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window._on_tuning_done()
+
+    window._on_add_camera_requested()
+    window._on_device_chosen("SN456", "Intel RealSense D455")
+    window._on_config_chosen((IR1, COLOR0, {
+        "emitter_enabled": False, "auto_exposure": True, "exposure_a": None, "exposure_b": None,
+    }))
+    window.gui_state.stream_a_roi = [0, 0, 50, 50]
+    window.gui_state.stream_b_roi = [0, 0, 50, 50]
+    window.calibration_page.last_calibration_result = dict(
+        image_a_on=np.full((50, 50), 50, dtype=np.uint8), image_a_off=np.full((50, 50), 50, dtype=np.uint8),
+        image_b_on=np.full((50, 50), 50, dtype=np.uint8), image_b_off=np.full((50, 50), 50, dtype=np.uint8),
+        stream_a_otsu_threshold=127, stream_b_otsu_threshold=127,
+        min_blob_area=5, row_gap_px=15, neighborhood_size=5,
+    )
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window._on_tuning_done()
+
+    window._on_start_multi_camera_session_requested()
+
+    page = window.multi_camera_live_session_page
+    configs_by_id = {c["camera_id"]: c["config"] for c in page._cameras}
+    assert configs_by_id[first_camera_id]["inter_cam_sync_value"] is None
+
+
+# --- Slave color-resolution guard: a genlock SLAVE's own color stream
+# genuinely hardware-synchronizes fine up to a confirmed resolution ceiling
+# (real hardware finding - see settings.yaml's camera.inter_cam_sync.
+# max_slave_color_resolution comment) but full resolution blocks BOTH
+# streams entirely. gui.main_window._slave_genlock_color_resolution_
+# conflicts blocks Start with a clear error rather than silently letting
+# the operator reproduce that hang. Master is never restricted - real
+# hardware confirmed RGB always works fine as master regardless of
+# resolution. ---
+
+def _two_camera_window_with_slave_color(qapp, monkeypatch, tmp_path, inter_cam_sync_entry, slave_color_pick):
+    settings = _full_settings({"Intel RealSense D455": [_ir_vs_rgb_test()]})
+    settings["camera"]["inter_cam_sync"] = {"Intel RealSense D455": inter_cam_sync_entry}
+    window = _make_window(qapp, settings)
+    monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [IR1, COLOR0])
+    monkeypatch.setattr(main_window_module, "save_gui_state", lambda state: None)
+    monkeypatch.setattr(window.roi_page, "set_context", lambda *a, **k: None)
+    monkeypatch.setattr(main_window_module, "ensure_output_dir", lambda settings: str(tmp_path))
+    monkeypatch.setattr(
+        main_window_module, "load_led_positions",
+        lambda *a, **k: ({"0": [1.0, 1.0, 300.0, 100.0, 200.0]}, {"0": [2.0, 2.0, 600.0, 200.0, 400.0]}),
+    )
+
+    _configure_one_camera(window, "SN123", color_pick=COLOR0)  # master - unrestricted, full resolution
+    window._on_add_camera_requested()
+    _configure_one_camera(window, "SN456", color_pick=slave_color_pick)  # slave - the one under test
+    return window
+
+
+def test_start_multi_camera_session_requested_blocks_when_slave_color_exceeds_confirmed_resolution_cap(qapp, monkeypatch, tmp_path):
+    window = _two_camera_window_with_slave_color(
+        qapp, monkeypatch, tmp_path,
+        inter_cam_sync_entry={"master": 1, "slave": 2, "max_slave_color_resolution": {"width": 640, "height": 480}},
+        slave_color_pick=COLOR0,  # 1280x720 - exceeds the 640x480 cap
+    )
+    calls = _capture_critical(monkeypatch)
+
+    window._on_start_multi_camera_session_requested()
+
+    assert len(calls) == 1
+    assert window.stack.currentWidget() is window.camera_hub_page
+
+
+def test_start_multi_camera_session_requested_allows_slave_color_within_confirmed_resolution_cap(qapp, monkeypatch, tmp_path):
+    window = _two_camera_window_with_slave_color(
+        qapp, monkeypatch, tmp_path,
+        inter_cam_sync_entry={"master": 1, "slave": 2, "max_slave_color_resolution": {"width": 640, "height": 480}},
+        slave_color_pick=COLOR0_SAFE,  # 640x480 - within the cap
+    )
+    calls = _capture_critical(monkeypatch)
+
+    window._on_start_multi_camera_session_requested()
+
+    assert calls == []
+    assert window.stack.currentWidget() is window.multi_camera_live_session_page
+
+
+def test_start_multi_camera_session_requested_blocks_when_camera_model_has_no_confirmed_resolution_cap_at_all(qapp, monkeypatch, tmp_path):
+    # Genlock master/slave values ARE confirmed for this model, but the
+    # color-resolution ceiling itself isn't - unconfirmed means don't
+    # guess it's safe, even at a resolution that would pass if it WERE
+    # confirmed.
+    window = _two_camera_window_with_slave_color(
+        qapp, monkeypatch, tmp_path,
+        inter_cam_sync_entry={"master": 1, "slave": 2},  # no max_slave_color_resolution key
+        slave_color_pick=COLOR0_SAFE,
+    )
+    calls = _capture_critical(monkeypatch)
+
+    window._on_start_multi_camera_session_requested()
+
+    assert len(calls) == 1
+    assert window.stack.currentWidget() is window.camera_hub_page
+
+
+def test_start_multi_camera_session_requested_never_checks_a_camera_whose_genlock_is_skipped_entirely(qapp, monkeypatch, tmp_path):
+    # The slave's OWN device model has no camera.inter_cam_sync entry at
+    # all (resolve_inter_cam_sync_value already returns None for it), so
+    # genlock is never applied to it - no external trigger, no bandwidth
+    # constraint, regardless of its color resolution.
+    settings = _full_settings({
+        "Intel RealSense D455": [_ir_vs_rgb_test()],
+        "Unconfirmed Camera Model": [_ir_vs_rgb_test()],
+    })
+    settings["camera"]["inter_cam_sync"] = {
+        "Intel RealSense D455": {"master": 1, "slave": 2, "max_slave_color_resolution": {"width": 640, "height": 480}},
+        # "Unconfirmed Camera Model" deliberately has no entry at all.
+    }
+    window = _make_window(qapp, settings)
+    monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [IR1, COLOR0])
+    monkeypatch.setattr(main_window_module, "save_gui_state", lambda state: None)
+    monkeypatch.setattr(window.roi_page, "set_context", lambda *a, **k: None)
+    monkeypatch.setattr(main_window_module, "ensure_output_dir", lambda settings: str(tmp_path))
+    monkeypatch.setattr(
+        main_window_module, "load_led_positions",
+        lambda *a, **k: ({"0": [1.0, 1.0, 300.0, 100.0, 200.0]}, {"0": [2.0, 2.0, 600.0, 200.0, 400.0]}),
+    )
+
+    # color_pick left at the helper's COLOR0 default (full 1280x720) for
+    # both cameras - would conflict if genlock were applied to the slave.
+    _configure_one_camera(window, "SN123", model_name="Intel RealSense D455")  # master
+    window._on_add_camera_requested()
+    _configure_one_camera(window, "SN456", model_name="Unconfirmed Camera Model")  # slave, genlock skipped entirely
+    calls = _capture_critical(monkeypatch)
+
+    window._on_start_multi_camera_session_requested()
+
+    assert calls == []
+    assert window.stack.currentWidget() is window.multi_camera_live_session_page
+
+
+def test_start_multi_camera_session_requested_routes_to_live_session_page_after_removing_down_to_one_camera(qapp, monkeypatch, tmp_path):
+    # Proves the 1-vs-2+-camera routing decision is made fresh off the
+    # CURRENT camera count at Start-time, not cached from an earlier hub
+    # state - 2 cameras get fully configured, then one is removed via the
+    # same _on_remove_camera_requested the Camera Hub's "remove camera"
+    # action calls, before Start is ever clicked.
+    settings = _full_settings({"Intel RealSense D455": [_ir_vs_rgb_test()]})
+    window = _make_window(qapp, settings)
+    monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [IR1, COLOR0])
+    monkeypatch.setattr(main_window_module, "save_gui_state", lambda state: None)
+    monkeypatch.setattr(window.roi_page, "set_context", lambda *a, **k: None)
+    monkeypatch.setattr(main_window_module, "ensure_output_dir", lambda settings: str(tmp_path))
+    monkeypatch.setattr(
+        main_window_module, "load_led_positions",
+        lambda *a, **k: ({"0": [1.0, 1.0, 300.0, 100.0, 200.0]}, {"0": [2.0, 2.0, 600.0, 200.0, 400.0]}),
+    )
+
+    _configure_one_camera(window, "SN123")
+    window._on_add_camera_requested()
+    second_id = _configure_one_camera(window, "SN456")
+    assert len(window._cameras) == 2
+
+    window._on_remove_camera_requested(second_id)
+    assert len(window._cameras) == 1
+
+    window._on_start_multi_camera_session_requested()
+
+    assert window.stack.currentWidget() is window.live_session_page

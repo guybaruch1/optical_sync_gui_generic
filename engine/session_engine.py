@@ -36,6 +36,8 @@ measures:
 """
 
 import os
+import collections
+import threading
 
 import cv2
 import pyrealsense2 as rs
@@ -52,6 +54,14 @@ from domain.realsense_utils import (
     sample_all_neighborhood_brightness, safe_neighborhood_size,
     draw_led_state_overlay, combine_side_by_side,
 )
+
+
+# Sized to match engine.cross_camera_reconciler.CrossCameraReconciler's own
+# default row-buffer depth (fps_hint=30.0, buffer_seconds=1.0, neither
+# currently overridden anywhere) - see SessionEngineThread.get_recent_frame_pair's
+# own docstring for why: an image must stay available at least as long as
+# the reconciler could still have a row buffered waiting to match against it.
+_RECENT_FRAMES_MAXLEN = 30
 
 
 class SessionEngineThread(QThread):
@@ -75,7 +85,8 @@ class SessionEngineThread(QThread):
                  test_session, stream_a_xy=None, stream_b_xy=None, neighborhood_size=5,
                  scan_direction=None, switch_time_ms=None,
                  display_stride=10, position_gap_metric=None, dual_panel_config=None,
-                 enable_depth_for_ir_sync=True, hardware_reset_before_start=False,
+                 enable_depth_for_ir_sync=True, capture_global_ts=False, record_recent_frames=False,
+                 hardware_reset_before_start=False,
                  hardware_reset_settle_s=8.0, output_dir=None,
                  position_gap_outlier_threshold_ms=None, position_gap_outlier_max_snapshots=200,
                  parent=None):
@@ -91,6 +102,18 @@ class SessionEngineThread(QThread):
         # (camera_sync:) - see ContinuousCapture._depth_sync_stream and
         # run()'s reset block below for what each actually does and why.
         self.enable_depth_for_ir_sync = enable_depth_for_ir_sync
+        # Cross-camera-only concept (engine.cross_camera_reconciler's
+        # matching key and its Global TS Latency metric) - see
+        # ContinuousCapture.__init__'s own capture_global_ts docstring for
+        # why single-camera runs never set this.
+        self.capture_global_ts = capture_global_ts
+        # Cross-camera-only concept (backs gui/pages/multi_camera_live_session_page.py's
+        # debug-image feature) - single-camera LiveSessionPage runs never
+        # set this, since nothing there ever reads the buffer; recording
+        # every frame pair unconditionally would cost real memory (~110MB
+        # per camera at this project's typical 1280x720 y8+bgr8 geometry)
+        # for a buffer nothing uses.
+        self.record_recent_frames = record_recent_frames
         self.hardware_reset_before_start = hardware_reset_before_start
         self.hardware_reset_settle_s = hardware_reset_settle_s
         self.stream_a_xy = stream_a_xy
@@ -123,6 +146,16 @@ class SessionEngineThread(QThread):
         self.position_gap_outlier_max_snapshots = position_gap_outlier_max_snapshots
         self._position_gap_outlier_count = 0
         self._stop_requested = False
+        # Ring buffer of recent (pair_index, stream_a_image, stream_b_image)
+        # tuples, populated from the existing unthrottled on_frame_pair
+        # callback (not the throttled display_stride path) - lets
+        # gui/pages/multi_camera_live_session_page.py's cross-camera debug
+        # image feature find the ACTUAL matched frames later, from the GUI
+        # thread, after engine.cross_camera_reconciler.CrossCameraReconciler
+        # resolves a match asynchronously. Lock-protected since it's read
+        # cross-thread.
+        self._recent_frames = collections.deque(maxlen=_RECENT_FRAMES_MAXLEN)
+        self._recent_frames_lock = threading.Lock()
         self._capture = None
         self._start_time = None
 
@@ -130,14 +163,17 @@ class SessionEngineThread(QThread):
         self._stop_requested = True
 
     def _frame_pairs_with_brightness(self):
-        """Adapts ContinuousCapture.frames()'s 4-tuple (image, image, ts, ts)
-        into the 6-tuple AcquisitionLoop/FramePairSample need, by sampling
-        brightness at each calibrated LED position. This is deliberately done
-        here, not inside ContinuousCapture itself: ContinuousCapture is a
-        generic hardware-capture primitive with no notion of LED positions or
-        metrics (gui/pages/calibration_page.py, a later task, consumes its raw
-        4-tuple directly for exactly that reason)."""
-        for stream_a_image, stream_b_image, stream_a_ts_us, stream_b_ts_us in self._capture.frames():
+        """Adapts ContinuousCapture.frames_with_diagnostics()'s 8-tuple into
+        the 8-tuple AcquisitionLoop/FramePairSample need, by sampling
+        brightness at each calibrated LED position and discarding the two
+        frame-number entries this method has no use for. Reads
+        frames_with_diagnostics() directly (not the plain 4-tuple frames()
+        wrapper) specifically so the global-ts values it also carries reach
+        AcquisitionLoop - frames() itself stays unchanged for its own
+        callers (gui/pages/calibration_page.py, gui/pages/roi_select_page.py),
+        which have no notion of metrics/global-ts at all."""
+        for (stream_a_image, stream_b_image, stream_a_ts_us, stream_b_ts_us, _, _,
+             stream_a_global_ts_us, stream_b_global_ts_us) in self._capture.frames_with_diagnostics():
             stream_a_bright = (
                 sample_all_neighborhood_brightness(stream_a_image, self.stream_a_xy, self._stream_a_safe_size)
                 if self.stream_a_xy is not None else None
@@ -146,7 +182,8 @@ class SessionEngineThread(QThread):
                 sample_all_neighborhood_brightness(stream_b_image, self.stream_b_xy, self._stream_b_safe_size)
                 if self.stream_b_xy is not None else None
             )
-            yield stream_a_image, stream_b_image, stream_a_ts_us, stream_b_ts_us, stream_a_bright, stream_b_bright
+            yield (stream_a_image, stream_b_image, stream_a_ts_us, stream_b_ts_us,
+                   stream_a_bright, stream_b_bright, stream_a_global_ts_us, stream_b_global_ts_us)
 
     def _maybe_save_position_gap_outlier(self, stream_a_image, stream_b_image, row):
         """Saves a side-by-side IR/RGB debug image (same on/off overlay style
@@ -183,6 +220,26 @@ class SessionEngineThread(QThread):
         stream_b_debug = draw_led_state_overlay(stream_b_image, self.stream_b_xy, stream_b_mask)
         cv2.imwrite(path, combine_side_by_side(stream_a_debug, stream_b_debug))
         self._position_gap_outlier_count += 1
+
+    def _record_recent_frame(self, pair_index, stream_a_image, stream_b_image):
+        if not self.record_recent_frames:
+            return
+        with self._recent_frames_lock:
+            self._recent_frames.append((pair_index, stream_a_image, stream_b_image))
+
+    def get_recent_frame_pair(self, pair_index):
+        """(stream_a_image, stream_b_image) for the given pair_index if
+        still in the ring buffer, else None. Called from the GUI thread
+        once engine.cross_camera_reconciler.CrossCameraReconciler resolves
+        a cross-camera match, to look up the actual frames that produced
+        it - not an approximation from the throttled frame_ready/display
+        path. Thread-safe: this camera's own background thread keeps
+        appending to the same deque concurrently via _record_recent_frame."""
+        with self._recent_frames_lock:
+            for stored_pair_index, stream_a_image, stream_b_image in self._recent_frames:
+                if stored_pair_index == pair_index:
+                    return stream_a_image, stream_b_image
+        return None
 
     def run(self):
         import time
@@ -253,6 +310,7 @@ class SessionEngineThread(QThread):
             self._capture = ContinuousCapture(
                 self.device_serial, self.pick_a, self.pick_b,
                 enable_depth_for_ir_sync=self.enable_depth_for_ir_sync,
+                capture_global_ts=self.capture_global_ts,
             )
             self._capture.start()
             self._start_time = time.time()
@@ -282,6 +340,7 @@ class SessionEngineThread(QThread):
                 self.stats_ready.emit(stats)
 
             def on_frame_pair(stream_a_image, stream_b_image, row):
+                self._record_recent_frame(row["pair_index"], stream_a_image, stream_b_image)
                 self._maybe_save_position_gap_outlier(stream_a_image, stream_b_image, row)
 
             callbacks = AcquisitionCallbacks(
@@ -297,6 +356,15 @@ class SessionEngineThread(QThread):
             )
             self.session_finished.emit(rows)
         except Exception as exc:  # surfaced to the UI rather than crashing the worker thread silently
+            # Emit whatever rows were successfully buffered before the
+            # failure - without this, a mid-run exception (e.g. a camera's
+            # global-timestamp domain flipping away from GLOBAL_TIME
+            # partway through a run - see engine/streams.py's
+            # _read_global_ts_us) silently discarded the entire run's
+            # already-good data, since TestSession.stop() is normally only
+            # reached at the natural end of run_until_stopped, which a
+            # mid-loop exception never gets to.
+            self.session_finished.emit(self.test_session.stop())
             self.error.emit(str(exc))
         finally:
             if self._capture is not None:
