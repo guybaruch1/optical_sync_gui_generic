@@ -250,8 +250,8 @@ def _window_after_config_chosen(qapp, monkeypatch, tmp_path, dual_panel=False):
         main_window_module, "load_led_positions",
         lambda *a, **k: ({"0": [1.0, 1.0, 300.0, 100.0, 200.0]}, {"0": [2.0, 2.0, 600.0, 200.0, 400.0]}),
     )
-    window.device_page.dual_panel_checkbox.setChecked(dual_panel)
     window._on_device_chosen("SN123", "Intel RealSense D455")
+    window.stream_config_page.dual_panel_checkbox.setChecked(dual_panel)
     window._on_config_chosen((IR1, COLOR0, {
         "emitter_enabled": False, "auto_exposure": True, "exposure_a": None, "exposure_b": None,
     }))

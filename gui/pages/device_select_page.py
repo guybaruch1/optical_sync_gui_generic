@@ -15,7 +15,7 @@ untouched."""
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QComboBox, QPushButton, QApplication,
-    QGroupBox, QRadioButton, QButtonGroup, QCheckBox,
+    QGroupBox, QRadioButton, QButtonGroup,
 )
 
 from engine.streams import list_devices, find_device_by_serial
@@ -58,16 +58,6 @@ class DeviceSelectPage(QWidget):
         mode_layout.addWidget(self.dedicated_radio)
         self.mode_group_box.setVisible(False)
         layout.addWidget(self.mode_group_box)
-
-        # Manual operator toggle, independent of which camera/test gets
-        # picked afterward - the app has no way to know whether the
-        # physical 2-panel rig (2 LED panels sharing one Acroname USB hub +
-        # one external trigger relay) is actually connected right now, so
-        # the operator decides. See engine/dual_panel_control.py and
-        # settings.yaml's dual_panel: section (hub port numbers/relay COM
-        # port - fixed wiring specifics, not a per-run choice).
-        self.dual_panel_checkbox = QCheckBox("Use dual LED panel (Acroname hub + external trigger)")
-        layout.addWidget(self.dual_panel_checkbox)
 
         self.combo.currentIndexChanged.connect(self._on_device_selection_changed)
 

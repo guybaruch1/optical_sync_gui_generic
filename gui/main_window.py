@@ -216,9 +216,6 @@ class MainWindow(QMainWindow):
             self._editing_camera_id = self._new_camera_slot_id()
         self.gui_state.device_serial = serial
         self._device_name = name
-        self._dual_panel_config = (
-            self.settings["dual_panel"] if self.device_page.dual_panel_checkbox.isChecked() else None
-        )
         save_gui_state(self.gui_state)
         camera_settings = self.settings["camera"]
         raw_tests = camera_settings.get("stream_options", {}).get(name)
@@ -282,6 +279,14 @@ class MainWindow(QMainWindow):
         # cares which named test produced this pick, so it's read directly
         # off the still-current page rather than added to the signal payload.
         self.gui_state.last_test_name = self.stream_config_page.current_test_name
+
+        # Manual, per-camera-flow choice (see stream_config_page.py's own
+        # comment on dual_panel_checkbox for why it lives here rather than
+        # on Device Select or as a whole-test setting) - read directly off
+        # the still-current page, same reasoning as current_test_name above.
+        self._dual_panel_config = (
+            self.settings["dual_panel"] if self.stream_config_page.dual_panel_checkbox.isChecked() else None
+        )
 
         # camera_controls' emitter/auto_exposure MODE is one shared choice
         # (GuiState just mirrors the same value into both stream_a_*/

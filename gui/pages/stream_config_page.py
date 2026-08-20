@@ -104,6 +104,19 @@ class StreamConfigPage(QWidget):
         form.addRow(QLabel("Sensor Options:"), self.combo_sensor_options)
         layout.addLayout(form)
 
+        # Manual operator toggle, per-camera-FLOW (this page is revisited
+        # once per camera, and dual-panel need depends on which Test is
+        # picked here - e.g. one D585 doing IR-vs-RGB needs two panels, the
+        # same D585 doing IR-vs-IR needs one) - not a whole-test setting, and
+        # not yet auto-inferred from the Test choice. Moved here from Device
+        # Select so it sits next to the choice it actually depends on, and
+        # so Edit (which skips Device Select) can still reach it. See
+        # engine/dual_panel_control.py and settings.yaml's dual_panel:
+        # section (hub port numbers/relay COM port - fixed wiring specifics,
+        # not a per-run choice).
+        self.dual_panel_checkbox = QCheckBox("Use dual LED panel (Acroname hub + external trigger)")
+        layout.addWidget(self.dual_panel_checkbox)
+
         self.combo_test.currentIndexChanged.connect(self._on_test_changed)
 
         self._camera_controls = self._build_camera_control_group()
@@ -164,7 +177,7 @@ class StreamConfigPage(QWidget):
         return self.combo_test.currentData()
 
     def populate(self, ctx, device_serial, tests, preferred_a=None, preferred_b=None,
-                 preferred_test_name=None, enable_depth_for_ir_sync=True):
+                 preferred_test_name=None, enable_depth_for_ir_sync=True, preferred_dual_panel=False):
         """`tests` is engine.streams.resolve_camera_tests's output, already
         filtered by gui/main_window.py to tests with at least one
         sensor_options entry matching this connected device - each entry is
@@ -182,13 +195,21 @@ class StreamConfigPage(QWidget):
         preselection (only pick_a is matched, same as this project's other
         preselection logic). enable_depth_for_ir_sync is settings.yaml's
         camera_sync.enable_depth_for_ir_sync, forwarded into the pairing-
-        quality preview's own ContinuousCapture - see _on_start_preview_clicked."""
+        quality preview's own ContinuousCapture - see _on_start_preview_clicked.
+        preferred_dual_panel pre-checks dual_panel_checkbox (Edit's own
+        previous choice for this camera); defaults False/unchecked for a
+        fresh Add, and is always applied explicitly (never left as-is) since
+        this page's one instance is reused across every camera's own visit."""
         self.ctx = ctx
         self.device_serial = device_serial
         self._tests = list(tests)
         self._preferred_a = preferred_a
         self._preferred_b = preferred_b
         self._enable_depth_for_ir_sync = enable_depth_for_ir_sync
+        # Always set, never left as-is - this page's SAME instance is reused
+        # across every camera's own sub-flow visit, so a previous camera's
+        # checked state must not silently leak into this one's default.
+        self.dual_panel_checkbox.setChecked(bool(preferred_dual_panel))
 
         self.combo_test.blockSignals(True)
         self.combo_test.clear()

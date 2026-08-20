@@ -280,6 +280,42 @@ def test_on_start_preview_clicked_does_not_start_preview_when_test_picks_are_the
     assert "same physical stream" in page.status_label.text()
 
 
+# --- Use dual LED panel: moved here from Device Select since it depends on
+# which Test/pairing is picked (IR vs RGB needs it, IR vs IR doesn't) -
+# manual, per-camera-flow, not inferred from the test automatically (yet). ---
+
+def test_dual_panel_checkbox_defaults_unchecked(qapp):
+    page = StreamConfigPage()
+    page.populate(ctx=None, device_serial="123", tests=_tests(("IR1 vs IR2 sync", [(IR1, IR2)])))
+    assert not page.dual_panel_checkbox.isChecked()
+
+
+def test_populate_can_preselect_dual_panel_checked(qapp):
+    page = StreamConfigPage()
+    page.populate(
+        ctx=None, device_serial="123", tests=_tests(("IR vs RGB sync", [(IR1, COLOR0)])),
+        preferred_dual_panel=True,
+    )
+    assert page.dual_panel_checkbox.isChecked()
+
+
+def test_populate_resets_dual_panel_checkbox_when_not_preselected(qapp):
+    # Guards against stale carryover: this page's SAME instance is reused
+    # across every camera's own sub-flow visit (see main_window.py's module
+    # docstring) - a previous camera's checked state must not silently leak
+    # into the next camera's default.
+    page = StreamConfigPage()
+    page.populate(
+        ctx=None, device_serial="123", tests=_tests(("IR vs RGB sync", [(IR1, COLOR0)])),
+        preferred_dual_panel=True,
+    )
+    assert page.dual_panel_checkbox.isChecked()
+
+    page.populate(ctx=None, device_serial="456", tests=_tests(("IR1 vs IR2 sync", [(IR1, IR2)])))
+
+    assert not page.dual_panel_checkbox.isChecked()
+
+
 # --- Back button: mirrors Next's own silent auto-stop-preview precedent -
 # no confirmation, since a pairing-quality preview has no work to lose ---
 

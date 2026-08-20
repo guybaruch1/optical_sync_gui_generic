@@ -157,22 +157,9 @@ def test_next_does_not_touch_mode_for_non_family_device(qapp, monkeypatch):
     assert calls == []
     assert emitted == [("SN_D435", "Intel RealSense D435")]
 
-
-# --- Dual LED panel checkbox: a manual, operator-driven choice, independent
-# of which camera/device gets picked - see engine/dual_panel_control.py ---
-
-def test_dual_panel_checkbox_defaults_unchecked(qapp):
-    page = DeviceSelectPage()
-    assert not page.dual_panel_checkbox.isChecked()
-
-
-def test_dual_panel_checkbox_stays_checked_across_device_refresh(qapp):
-    # Confirms the checkbox's state isn't tied to/reset by device
-    # selection - it's an independent, persistent operator choice.
-    page = DeviceSelectPage()
-    page.dual_panel_checkbox.setChecked(True)
-    page.refresh_devices(FakeCtx([D435]))
-    assert page.dual_panel_checkbox.isChecked()
+# Dual LED panel checkbox moved to Stream Config (see that page's own
+# tests) - it depends on which Test/pairing gets picked there, not on
+# Device Select's device choice.
 
 
 # --- Back button: Device Select is the first page of a camera's sub-flow -
