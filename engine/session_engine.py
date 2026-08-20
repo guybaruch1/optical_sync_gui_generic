@@ -36,6 +36,8 @@ measures:
 """
 
 import os
+import collections
+import threading
 
 import cv2
 import pyrealsense2 as rs
@@ -52,6 +54,14 @@ from domain.realsense_utils import (
     sample_all_neighborhood_brightness, safe_neighborhood_size,
     draw_led_state_overlay, combine_side_by_side,
 )
+
+
+# Sized to match engine.cross_camera_reconciler.CrossCameraReconciler's own
+# default row-buffer depth (fps_hint=30.0, buffer_seconds=1.0, neither
+# currently overridden anywhere) - see SessionEngineThread.get_recent_frame_pair's
+# own docstring for why: an image must stay available at least as long as
+# the reconciler could still have a row buffered waiting to match against it.
+_RECENT_FRAMES_MAXLEN = 30
 
 
 class SessionEngineThread(QThread):
@@ -129,6 +139,16 @@ class SessionEngineThread(QThread):
         self.position_gap_outlier_max_snapshots = position_gap_outlier_max_snapshots
         self._position_gap_outlier_count = 0
         self._stop_requested = False
+        # Ring buffer of recent (pair_index, stream_a_image, stream_b_image)
+        # tuples, populated from the existing unthrottled on_frame_pair
+        # callback (not the throttled display_stride path) - lets
+        # gui/pages/multi_camera_live_session_page.py's cross-camera debug
+        # image feature find the ACTUAL matched frames later, from the GUI
+        # thread, after engine.cross_camera_reconciler.CrossCameraReconciler
+        # resolves a match asynchronously. Lock-protected since it's read
+        # cross-thread.
+        self._recent_frames = collections.deque(maxlen=_RECENT_FRAMES_MAXLEN)
+        self._recent_frames_lock = threading.Lock()
         self._capture = None
         self._start_time = None
 
@@ -193,6 +213,24 @@ class SessionEngineThread(QThread):
         stream_b_debug = draw_led_state_overlay(stream_b_image, self.stream_b_xy, stream_b_mask)
         cv2.imwrite(path, combine_side_by_side(stream_a_debug, stream_b_debug))
         self._position_gap_outlier_count += 1
+
+    def _record_recent_frame(self, pair_index, stream_a_image, stream_b_image):
+        with self._recent_frames_lock:
+            self._recent_frames.append((pair_index, stream_a_image, stream_b_image))
+
+    def get_recent_frame_pair(self, pair_index):
+        """(stream_a_image, stream_b_image) for the given pair_index if
+        still in the ring buffer, else None. Called from the GUI thread
+        once engine.cross_camera_reconciler.CrossCameraReconciler resolves
+        a cross-camera match, to look up the actual frames that produced
+        it - not an approximation from the throttled frame_ready/display
+        path. Thread-safe: this camera's own background thread keeps
+        appending to the same deque concurrently via _record_recent_frame."""
+        with self._recent_frames_lock:
+            for stored_pair_index, stream_a_image, stream_b_image in self._recent_frames:
+                if stored_pair_index == pair_index:
+                    return stream_a_image, stream_b_image
+        return None
 
     def run(self):
         import time
@@ -293,6 +331,7 @@ class SessionEngineThread(QThread):
                 self.stats_ready.emit(stats)
 
             def on_frame_pair(stream_a_image, stream_b_image, row):
+                self._record_recent_frame(row["pair_index"], stream_a_image, stream_b_image)
                 self._maybe_save_position_gap_outlier(stream_a_image, stream_b_image, row)
 
             callbacks = AcquisitionCallbacks(
