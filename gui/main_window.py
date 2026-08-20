@@ -571,6 +571,7 @@ class MainWindow(QMainWindow):
         # actually starts the run, so re-resolving off self._master_camera_id
         # every Start is what keeps this correct rather than stale.
         inter_cam_sync_settings = self.settings["camera"].get("inter_cam_sync", {})
+        camera_sync_settings = self.settings.get("camera_sync") or {}
         cameras = [
             {"camera_id": camera_id, "label": camera["label"],
              "is_master": (camera_id == self._master_camera_id),
@@ -580,6 +581,12 @@ class MainWindow(QMainWindow):
                      inter_cam_sync_settings, camera["label"],
                      is_master=(camera_id == self._master_camera_id),
                  ),
+                 # Only ever added here, on the 2+-camera path - never into
+                 # the base camera["config"] dict the 1-camera branch above
+                 # splats directly into LiveSessionPage.set_context(), which
+                 # must never receive this (see settings.yaml's own comment
+                 # for why - a cross-camera-only concept).
+                 "capture_global_ts": camera_sync_settings.get("capture_global_ts", True),
              }}
             for camera_id, camera in self._cameras.items()
         ]

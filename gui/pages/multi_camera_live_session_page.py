@@ -214,13 +214,15 @@ class MultiCameraLiveSessionPage(QWidget):
 
         self._cross_tab_widget = QWidget()
         self._cross_tab_layout = QVBoxLayout(self._cross_tab_widget)
-        # slave_camera_id -> {"pairing_plot": LivePlot, "position_plot": LivePlot,
-        # "stats_panel": StatsPanel} - one full section's worth of widgets per slave.
+        # slave_camera_id -> {"pairing_plot": LivePlot, "global_ts_plot": LivePlot,
+        # "position_plot": LivePlot, "stats_panel": StatsPanel} - one full
+        # section's worth of widgets per slave.
         self._slave_sections = {}
         # (slave_camera_id, stream_identity, metric_name) -> RunningStats,
-        # metric_name is "pairing_gap_us" or "position_gap_ms" - accumulated
-        # unthrottled in _on_cross_pair_ready, pushed to the stats panel only
-        # on the throttled _on_cross_stats_ready tick.
+        # metric_name is "pairing_gap_us", "global_ts_gap_us", or
+        # "position_gap_ms" - accumulated unthrottled in _on_cross_pair_ready,
+        # pushed to the stats panel only on the throttled _on_cross_stats_ready
+        # tick.
         self._cross_running_stats = {}
 
         self.status_label = QLabel("")
@@ -508,10 +510,13 @@ class MultiCameraLiveSessionPage(QWidget):
                 # routes to LiveSessionPage instead - see gui/main_window.py's
                 # _on_start_multi_camera_session_requested) - global
                 # timestamps are only ever needed for CrossCameraReconciler's
-                # matching/Global TS Latency metric, so every camera in a
-                # multi-camera run captures them; LiveSessionPage's own
-                # start_session() never sets this.
-                capture_global_ts=True,
+                # matching/Global TS Latency metric. Sourced from
+                # settings.yaml's camera_sync.capture_global_ts via
+                # gui/main_window.py's _on_start_multi_camera_session_requested
+                # (2+-camera branch only), not hardcoded here - see that
+                # setting's own comment for why a rig might turn it off.
+                # LiveSessionPage's own start_session() never sets this at all.
+                capture_global_ts=config["capture_global_ts"],
             )
 
             camera_specs.append(CameraSessionSpec(
@@ -601,6 +606,17 @@ class MultiCameraLiveSessionPage(QWidget):
         panel = self._panels.get(camera_id)
         if panel is not None:
             panel.on_error(message)
+        # Surface on the page-level status label too - the per-camera
+        # panel alone is easy to miss if the operator is looking at the
+        # (default, first) Cross-Camera Sync tab when a camera's own run
+        # hits a fatal error mid-session. Note: this signal also carries
+        # non-fatal "WARNING: ..." messages from elsewhere in the pipeline
+        # (e.g. camera-control application) - distinguishing fatal from
+        # advisory here is a real, separate improvement, out of scope for
+        # this fix.
+        roles = _camera_roles(self._cameras)
+        role_display = roles.get(camera_id, {}).get("display", camera_id)
+        self.status_label.setText("{}: {}".format(role_display, message))
 
     def _on_cross_pair_ready(self, cross_row):
         # O(1) bookkeeping only - no add_point here. Fires unthrottled, once
@@ -709,6 +725,24 @@ class MultiCameraLiveSessionPage(QWidget):
         # robustness.)
         if self._cross_pair_series_keys:
             export_cross_camera_csv(self._cross_rows, os.path.join(self._run_dir, "cross_camera_sync.csv"))
+
+            # Written unconditionally - even (especially) when self._cross_rows
+            # ended up empty for some spec - so a real-hardware run whose
+            # matching silently never succeeded still leaves behind data
+            # explaining why, rather than just a blank CSV/plot with no clue.
+            # See engine.cross_camera_reconciler.CrossCameraReconciler.
+            # match_diagnostics's own docstring.
+            diagnostics = self._controller.match_diagnostics() if self._controller is not None else []
+            if diagnostics:
+                diagnostics_path = os.path.join(self._run_dir, "cross_camera_match_diagnostics.txt")
+                with open(diagnostics_path, "w") as f:
+                    for entry in diagnostics:
+                        f.write(
+                            "{} / {}: matched={}, unmatched={}\n".format(
+                                entry["slave_camera_id"], entry["stream_identity"],
+                                entry["matched_count"], entry["unmatched_count"],
+                            )
+                        )
 
             roles = _camera_roles(self._cameras)
             master_camera = next(c for c in self._cameras if c["is_master"])

@@ -138,7 +138,13 @@ def _build_cross_camera_figure(cross_rows, title):
     """Two stacked subplots (sharing one x-axis, "Pair index") - HW TS
     Latency and Optical Sync each get their own y-axis, same "wildly
     different scales" reasoning _build_figure's own 3-axis split already
-    uses for the intra-camera plot. One line per stream identity - the
+    uses for the intra-camera plot. Global TS Latency shares the first
+    (HW TS Latency) axis rather than getting a third subplot of its own -
+    both are in the same us-scale range, and the whole point of this line
+    is a direct, same-scale visual comparison against its HW-ts
+    counterpart (see CrossCameraReconciler's own docstring) - plotted
+    dashed, same color as that identity's own HW TS Latency line, so the
+    two are easy to tell apart per identity. One line per stream identity - the
     caller (gui/pages/multi_camera_live_session_page.py) pre-filters
     cross_rows to a single slave camera before calling, since this export
     is now one figure per slave (see that page's own per-slave cross-camera

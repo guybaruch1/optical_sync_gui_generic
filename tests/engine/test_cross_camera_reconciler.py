@@ -1,8 +1,12 @@
 """Pure Python, no Qt/hardware - matches independent per-camera row_ready
-streams by nearest timestamp and reuses PairingGapMetric unmodified to
-produce the new cross-camera (master-vs-slave) HW TS Latency metric for a
-multi-camera sync test. See docs/superpowers's multi-camera design doc's
-"Design detail" section 1 for the full rationale."""
+streams by nearest RealSense GLOBAL_TIME-domain timestamp (not raw HW ts -
+see engine/cross_camera_reconciler.py's own module docstring for why) and
+reuses PairingGapMetric unmodified to produce two cross-camera
+(master-vs-slave) metrics: the original HW TS Latency (still offset-
+corrected against each device's own arbitrary epoch) and the new Global TS
+Latency (never offset-corrected - a drift-free check on the former). See
+docs/superpowers's multi-camera design doc's "Design detail" section 1 for
+the full rationale."""
 
 import numpy as np
 import pytest
@@ -211,6 +215,34 @@ def test_no_cross_row_when_no_counterpart_within_max_match_gap():
     cross_rows = reconciler.ingest_row("cam2", _row(21, 2_500_010.0, global_ts_us=3_500_010.0))  # 500ms away
 
     assert cross_rows == []
+
+
+def test_match_diagnostics_reports_matched_and_unmatched_counts():
+    # Each ingest_row call for a registered camera increments exactly one of
+    # matched_count/unmatched_count for that spec, based on whether THAT
+    # call produced a cross-row - not one increment per logical pair. So a
+    # normal matched pair contributes ONE unmatched increment (the first
+    # side's row, buffered with nothing yet to match) and ONE matched
+    # increment (the second side's row, which finds it) - see
+    # match_diagnostics's own docstring for why this exists: a real-hardware
+    # run whose matching silently never succeeds should still leave behind
+    # data explaining why.
+    spec = _spec()
+    reconciler = CrossCameraReconciler([spec], max_match_gap_us=50_000)
+
+    reconciler.ingest_row("cam1", _row(10, 1_000_000.0))  # buffered, no counterpart yet -> unmatched
+    matched = reconciler.ingest_row("cam2", _row(20, 1_000_010.0))  # finds cam1's row -> matched
+    assert len(matched) == 1
+
+    # A further master row with no counterpart ever arriving -> unmatched again.
+    unmatched = reconciler.ingest_row("cam1", _row(11, 5_000_000.0))
+    assert unmatched == []
+
+    diagnostics = reconciler.match_diagnostics()
+    assert diagnostics == [{
+        "slave_camera_id": "cam2", "stream_identity": "infrared1",
+        "matched_count": 1, "unmatched_count": 2,
+    }]
 
 
 def test_a_matched_master_row_is_not_reused_for_a_second_slave_row():

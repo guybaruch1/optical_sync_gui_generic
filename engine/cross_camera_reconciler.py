@@ -98,6 +98,14 @@ def build_cross_camera_pair_specs(camera_specs, outlier_threshold_us):
                 master_row_role=master_row_role,
                 slave_row_role=slave_row_role,
                 pairing_gap_metric=PairingGapMetric(outlier_threshold_us=outlier_threshold_us),
+                # Asymmetry vs. pairing_gap_metric above, worth noting: at
+                # default settings, matching already guarantees
+                # |global_ts_gap_us| <= max_match_gap_us (50,000us default) <
+                # this outlier_threshold_us (100,000us default), so
+                # global_ts_gap_us_exclude_reason == "syncer_outlier" can
+                # structurally never fire - only frame-drop exclusion can.
+                # pairing_gap_us has no such bound (matching doesn't
+                # constrain it), so its own outlier exclusion CAN fire.
                 global_ts_gap_metric=PairingGapMetric(outlier_threshold_us=outlier_threshold_us),
                 num_leds=master.num_leds,
                 switch_time_ms=master.switch_time_ms,
@@ -128,9 +136,12 @@ class _PendingBuffer:
         buffer is empty). Explicit exclusion rather than a forced/misleading
         match, matching this project's established convention (outlier
         thresholds, frame-drop flags, warmup exclusion) of never silently
-        connecting unrelated data. Returns the matched ts_us too (not just
-        the row) so CrossCameraReconciler can learn a pair's constant
-        calibration offset from it - see that class's own docstring."""
+        connecting unrelated data. Still returns the matched ts_us alongside
+        the row (not just the row alone), but its only caller (_ingest_side)
+        currently discards it (`_, matched_row = match`) - the HW-ts offset
+        CrossCameraReconciler learns for pairing_gap_us is now computed from
+        raw HW ts inside _build_cross_row instead, not from this matched
+        global ts."""
         if not self._items:
             return None
         best_index = min(range(len(self._items)), key=lambda i: abs(self._items[i][0] - ts_us))
@@ -204,6 +215,16 @@ class CrossCameraReconciler:
         # _build_cross_row.
         self._hw_offset_us = [None] * len(pair_specs)
 
+        # Per-spec match/no-match counts - not used for any live behavior,
+        # purely a post-run diagnostic (see match_diagnostics) for the
+        # "matching silently never succeeds" failure mode: if a real-
+        # hardware run produces zero cross-rows for some spec, these
+        # counts are what tells a human afterward whether matching was
+        # even being attempted, rather than leaving them with nothing but
+        # an empty CSV to go on.
+        self._matched_count = [0] * len(pair_specs)
+        self._unmatched_count = [0] * len(pair_specs)
+
         self._specs_by_camera = {}
         for index, spec in enumerate(pair_specs):
             self._specs_by_camera.setdefault(spec.master_camera_id, []).append((index, spec, "master"))
@@ -227,7 +248,10 @@ class CrossCameraReconciler:
                     build=lambda match: self._build_cross_row(index, spec, match, row),
                 )
             if cross_row is not None:
+                self._matched_count[index] += 1
                 cross_rows.append(cross_row)
+            else:
+                self._unmatched_count[index] += 1
         return cross_rows
 
     def _ingest_side(self, row, ts_role, own_buffer, other_buffer, build):
@@ -315,6 +339,21 @@ class CrossCameraReconciler:
             "position_gap_ms_excluded": position_gap_excluded,
             "position_gap_ms_exclude_reason": position_gap_exclude_reason,
         }
+
+    def match_diagnostics(self):
+        """Per-spec match/no-match counts, for post-run diagnosis of a run
+        that produced few or zero cross-rows for some (slave, identity)
+        pair - see __init__'s own comment on why this exists. Returns one
+        dict per pair spec, in the same order pair_specs was given."""
+        return [
+            {
+                "slave_camera_id": spec.slave_camera_id,
+                "stream_identity": spec.stream_identity,
+                "matched_count": self._matched_count[index],
+                "unmatched_count": self._unmatched_count[index],
+            }
+            for index, spec in enumerate(self._pair_specs)
+        ]
 
 
 def _compute_cross_position_gap(spec, master_row, slave_row, master_frame_drop, slave_frame_drop):

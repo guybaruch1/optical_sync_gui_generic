@@ -53,6 +53,7 @@ def _camera_config(tmp_path, **overrides):
         stream_a_label="Infrared 1", stream_b_label="Color",
         dual_panel_config=None, enable_depth_for_ir_sync=True,
         hardware_reset_before_start=False, hardware_reset_settle_s=8.0,
+        capture_global_ts=True,
     )
     config.update(overrides)
     return config
@@ -192,6 +193,41 @@ def test_start_all_sessions_requests_global_ts_capture_for_every_camera(qapp, tm
 
     assert fake_threads["SN1"].kwargs["capture_global_ts"] is True
     assert fake_threads["SN2"].kwargs["capture_global_ts"] is True
+
+
+def test_start_all_sessions_honors_capture_global_ts_false_from_camera_config(qapp, tmp_path):
+    # thread_kwargs["capture_global_ts"] must reflect whatever the per-camera
+    # config actually carries (sourced from settings.yaml's
+    # camera_sync.capture_global_ts by gui/main_window.py), not a hardcoded
+    # True - see settings.yaml's own comment on why a rig might turn it off.
+    page, fake_threads = _page_with_fake_threads()
+    cameras = _two_cameras(tmp_path)
+    for camera in cameras:
+        camera["config"]["capture_global_ts"] = False
+    page.set_cameras(object(), cameras)
+
+    page.start_all_sessions()
+
+    assert fake_threads["SN1"].kwargs["capture_global_ts"] is False
+    assert fake_threads["SN2"].kwargs["capture_global_ts"] is False
+
+
+def test_camera_error_surfaces_on_page_level_status_label(qapp, tmp_path):
+    # Regression coverage: a fatal mid-run error used to only reach the
+    # per-camera panel, easy to miss if the operator is looking at the
+    # (default, first) Cross-Camera Sync tab - see engine/session_engine.py's
+    # mid-run-exception fix for the companion data-loss half of this.
+    page, fake_threads = _page_with_fake_threads()
+    page.set_cameras(object(), _two_cameras(tmp_path))
+    page.start_all_sessions()
+
+    fake_threads["SN2"].error.emit("camera is not reporting frames in the GLOBAL_TIME domain")
+
+    # cam2 ("D455 B", SN2) is the slave in _two_cameras() - the page-level
+    # label must include this camera's own display role, not just the panel.
+    assert "D455 B" in page.status_label.text()
+    assert "SN2" in page.status_label.text()
+    assert "camera is not reporting frames in the GLOBAL_TIME domain" in page.status_label.text()
 
 
 def test_set_cameras_with_one_camera_has_no_cross_series(qapp, tmp_path):
@@ -384,6 +420,44 @@ def test_all_sessions_finished_writes_cross_camera_csv_and_one_plot_per_slave(qa
     assert os.path.exists(plot_path)
     assert os.path.getsize(csv_path) > 0
     assert os.path.getsize(plot_path) > 0
+
+
+def test_all_sessions_finished_writes_cross_camera_match_diagnostics_file(qapp, tmp_path):
+    # See engine.cross_camera_reconciler.CrossCameraReconciler.match_diagnostics's
+    # own docstring: a real-hardware run whose matching silently never
+    # succeeds should still leave behind data explaining why - written
+    # unconditionally alongside the CSV/plot, not just when matches occur.
+    import os
+    page, fake_threads = _page_with_fake_threads()
+    page.set_cameras(object(), _two_cameras(tmp_path))
+    page.start_all_sessions()
+
+    fake_threads["SN1"].row_ready.emit({
+        "pair_index": 1, "stream_a_ts_us": 1_000_000.0, "stream_b_ts_us": 1_000_000.0,
+        "stream_a_global_ts_us": 1_000_000.0, "stream_b_global_ts_us": 1_000_000.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+    })
+    fake_threads["SN2"].row_ready.emit({
+        "pair_index": 1, "stream_a_ts_us": 1_000_010.0, "stream_b_ts_us": 1_000_010.0,
+        "stream_a_global_ts_us": 1_000_010.0, "stream_b_global_ts_us": 1_000_010.0,
+        "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+    })
+    fake_threads["SN1"].session_finished.emit([])
+    fake_threads["SN1"].finished.emit()
+    fake_threads["SN2"].session_finished.emit([])
+    fake_threads["SN2"].finished.emit()
+
+    diagnostics_path = os.path.join(page._run_dir, "cross_camera_match_diagnostics.txt")
+    assert os.path.exists(diagnostics_path)
+    with open(diagnostics_path) as f:
+        content = f.read()
+    # _camera_config's two cameras share both "infrared1" and "color"
+    # identities (see test_set_cameras_with_two_cameras_builds_one_cross_
+    # series_per_shared_identity) - both must be reported, at least one
+    # matched (the pair emitted above).
+    assert "infrared1" in content
+    assert "color" in content
+    assert "matched=1" in content
 
 
 def test_all_sessions_finished_writes_a_separate_plot_per_slave_with_three_cameras(qapp, tmp_path):

@@ -780,6 +780,64 @@ def test_start_multi_camera_session_requested_embeds_inter_cam_sync_value_for_ma
     assert configs_by_id[slave_id]["inter_cam_sync_value"] == 2
 
 
+def test_start_multi_camera_session_requested_defaults_capture_global_ts_true(qapp, monkeypatch, tmp_path):
+    # No camera_sync section at all in settings.yaml - capture_global_ts must
+    # default to True (mirrors enable_depth_for_ir_sync's own tolerant
+    # .get()-with-default convention elsewhere in this file).
+    settings = _full_settings({"Intel RealSense D455": [_ir_vs_rgb_test()]})
+    settings["camera"]["inter_cam_sync"] = {
+        "Intel RealSense D455": {"master": 1, "slave": 2, "max_slave_color_resolution": {"width": 640, "height": 480}},
+    }
+    window = _make_window(qapp, settings)
+    monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [IR1, COLOR0])
+    monkeypatch.setattr(main_window_module, "save_gui_state", lambda state: None)
+    monkeypatch.setattr(window.roi_page, "set_context", lambda *a, **k: None)
+    monkeypatch.setattr(main_window_module, "ensure_output_dir", lambda settings: str(tmp_path))
+    monkeypatch.setattr(
+        main_window_module, "load_led_positions",
+        lambda *a, **k: ({"0": [1.0, 1.0, 300.0, 100.0, 200.0]}, {"0": [2.0, 2.0, 600.0, 200.0, 400.0]}),
+    )
+
+    master_id = _configure_one_camera(window, "SN123")
+    window._on_add_camera_requested()
+    slave_id = _configure_one_camera(window, "SN456", color_pick=COLOR0_SAFE)
+
+    window._on_start_multi_camera_session_requested()
+
+    page = window.multi_camera_live_session_page
+    configs_by_id = {c["camera_id"]: c["config"] for c in page._cameras}
+    assert configs_by_id[master_id]["capture_global_ts"] is True
+    assert configs_by_id[slave_id]["capture_global_ts"] is True
+
+
+def test_start_multi_camera_session_requested_honors_capture_global_ts_false_override(qapp, monkeypatch, tmp_path):
+    settings = _full_settings({"Intel RealSense D455": [_ir_vs_rgb_test()]})
+    settings["camera"]["inter_cam_sync"] = {
+        "Intel RealSense D455": {"master": 1, "slave": 2, "max_slave_color_resolution": {"width": 640, "height": 480}},
+    }
+    settings["camera_sync"] = {"capture_global_ts": False}
+    window = _make_window(qapp, settings)
+    monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [IR1, COLOR0])
+    monkeypatch.setattr(main_window_module, "save_gui_state", lambda state: None)
+    monkeypatch.setattr(window.roi_page, "set_context", lambda *a, **k: None)
+    monkeypatch.setattr(main_window_module, "ensure_output_dir", lambda settings: str(tmp_path))
+    monkeypatch.setattr(
+        main_window_module, "load_led_positions",
+        lambda *a, **k: ({"0": [1.0, 1.0, 300.0, 100.0, 200.0]}, {"0": [2.0, 2.0, 600.0, 200.0, 400.0]}),
+    )
+
+    master_id = _configure_one_camera(window, "SN123")
+    window._on_add_camera_requested()
+    slave_id = _configure_one_camera(window, "SN456", color_pick=COLOR0_SAFE)
+
+    window._on_start_multi_camera_session_requested()
+
+    page = window.multi_camera_live_session_page
+    configs_by_id = {c["camera_id"]: c["config"] for c in page._cameras}
+    assert configs_by_id[master_id]["capture_global_ts"] is False
+    assert configs_by_id[slave_id]["capture_global_ts"] is False
+
+
 def test_start_multi_camera_session_requested_leaves_inter_cam_sync_value_none_for_unconfigured_camera_model(qapp, monkeypatch, tmp_path):
     # No camera.inter_cam_sync entry at all for this device name - genlock is
     # skipped entirely rather than guessing a possibly-wrong raw value. Needs

@@ -308,6 +308,15 @@ class SessionEngineThread(QThread):
             )
             self.session_finished.emit(rows)
         except Exception as exc:  # surfaced to the UI rather than crashing the worker thread silently
+            # Emit whatever rows were successfully buffered before the
+            # failure - without this, a mid-run exception (e.g. a camera's
+            # global-timestamp domain flipping away from GLOBAL_TIME
+            # partway through a run - see engine/streams.py's
+            # _read_global_ts_us) silently discarded the entire run's
+            # already-good data, since TestSession.stop() is normally only
+            # reached at the natural end of run_until_stopped, which a
+            # mid-loop exception never gets to.
+            self.session_finished.emit(self.test_session.stop())
             self.error.emit(str(exc))
         finally:
             if self._capture is not None:

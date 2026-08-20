@@ -244,6 +244,16 @@ camera_sync:
   # per-frame cv2 color conversion instead). No-op for a color+color
   # (Dual RGB) pairing - there's no stereo module in play to sync against.
   enable_depth_for_ir_sync: true
+  # Read+validate each frame's RealSense GLOBAL_TIME-domain timestamp for
+  # cross-camera matching (see engine/streams.py's _read_global_ts_us,
+  # engine/cross_camera_reconciler.py's module docstring) - multi-camera
+  # runs only. Requires global_time_enabled support on every configured
+  # camera; a camera that doesn't report frames in the GLOBAL_TIME domain
+  # raises a clear error rather than silently computing a meaningless
+  # value. Turn this off (losing the "Global TS Latency" cross-camera
+  # metric, and its drift-free comparison against "HW TS Latency") if a
+  # rig's hardware/driver doesn't support it.
+  capture_global_ts: true
   # Hardware-reset the camera and wait for it to re-enumerate before each
   # Live Session run. Independent manual recovery knob, e.g. for a camera
   # left with a stuck manual exposure/gain from before

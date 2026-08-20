@@ -138,6 +138,13 @@ class MultiCameraSessionController(QObject):
     def threads(self):
         return dict(self._threads)
 
+    def match_diagnostics(self):
+        """Per-spec cross-camera match/no-match counts - see
+        CrossCameraReconciler.match_diagnostics. Empty list when no
+        cross-camera pairs exist (no shared stream identities configured,
+        or effectively a single-camera rig)."""
+        return self._reconciler.match_diagnostics() if self._reconciler is not None else []
+
     def start_all(self, ctx):
         """1. Hardware-reset every camera that needs it, sequentially - a
         reset drops the device off USB and plausibly clears whatever
