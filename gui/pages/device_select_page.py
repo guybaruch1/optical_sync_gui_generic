@@ -2,24 +2,28 @@
 
 Device listing is fully generic (engine.streams.list_devices, no PID
 restriction - see Task 3) so any connected RealSense device shows up here,
-not just D535/D585. Layered on top of that: for the subset of devices that
-ARE a D535/D585 Dedicated/Dual RGB variant (engine.rgb_mode.get_mode returns
-non-None for them), a "RGB Mode" choice (Dual RGB / Dedicated RGB radio
-buttons) appears, defaulted to whatever mode the device is actually in
-right now - devices get_mode doesn't recognize (e.g. a D435/D455, where it
-returns None) never show this choice at all. Switching only actually
-happens if the operator picks the OTHER mode than what's currently active;
-picking the mode it's already in is a no-op, same as leaving the choice
-untouched."""
+not just D535/D585. For the subset of devices that ARE a D535/D585
+Dedicated/Dual RGB variant (engine.rgb_mode.get_mode returns non-None for
+them), each combo entry's label carries a "- Dual RGB"/"- Dedicated RGB"
+suffix showing its CURRENT mode - purely informational here, since actually
+switching mode now lives on Stream Config (gui/pages/stream_config_page.py),
+not this page. It moved there because a mode switch changes which streams
+the device exposes, which would invalidate whatever Test/Sensor Options
+Stream Config had already resolved - the switch has to happen (and refresh
+those lists) on the SAME page that shows them, and because Edit (see
+gui/main_window.py's _on_edit_camera_requested) skips this page entirely,
+so a control only reachable here wouldn't be reachable from Edit at all.
+
+This page is now a pure device picker: pick one from the combo, click Next,
+device_chosen fires immediately - no mode business, no per-run rig-wiring
+checkbox (see stream_config_page.py's own dual_panel_checkbox, moved there
+for the same "Edit skips this page" reason)."""
 
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QLabel, QComboBox, QPushButton, QApplication,
-    QGroupBox, QRadioButton, QButtonGroup,
-)
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QComboBox, QPushButton
 
 from engine.streams import list_devices, find_device_by_serial
-from engine.rgb_mode import get_mode, ensure_mode
+from engine.rgb_mode import get_mode
 
 
 def _device_label(device_info, mode):
@@ -46,20 +50,6 @@ class DeviceSelectPage(QWidget):
         layout.addWidget(QLabel("Select a connected RealSense device:"))
         self.combo = QComboBox()
         layout.addWidget(self.combo)
-
-        self.mode_group_box = QGroupBox("RGB Mode")
-        mode_layout = QVBoxLayout(self.mode_group_box)
-        self.dual_radio = QRadioButton("Dual RGB (2C)")
-        self.dedicated_radio = QRadioButton("Dedicated RGB (3C)")
-        mode_button_group = QButtonGroup(self.mode_group_box)
-        mode_button_group.addButton(self.dual_radio)
-        mode_button_group.addButton(self.dedicated_radio)
-        mode_layout.addWidget(self.dual_radio)
-        mode_layout.addWidget(self.dedicated_radio)
-        self.mode_group_box.setVisible(False)
-        layout.addWidget(self.mode_group_box)
-
-        self.combo.currentIndexChanged.connect(self._on_device_selection_changed)
 
         self.status_label = QLabel("")
         layout.addWidget(self.status_label)
@@ -91,26 +81,6 @@ class DeviceSelectPage(QWidget):
                 # suffix" for this entry instead.
                 mode = None
             self.combo.addItem(_device_label(device, mode), userData=device.serial)
-        # currentIndexChanged may or may not have already fired while the
-        # combo was being populated above (Qt's own timing, not relied on) -
-        # call explicitly so the mode box always reflects whatever ends up
-        # selected after a refresh.
-        self._on_device_selection_changed(self.combo.currentIndex())
-
-    def _on_device_selection_changed(self, index):
-        serial = self.combo.itemData(index)
-        mode = None
-        if serial is not None and self.ctx is not None:
-            try:
-                mode = get_mode(find_device_by_serial(self.ctx, serial))
-            except Exception:
-                mode = None  # device vanished between refresh and this lookup
-        if mode is None:
-            self.mode_group_box.setVisible(False)
-            return
-        self.mode_group_box.setVisible(True)
-        self.dual_radio.setChecked(mode == "dual")
-        self.dedicated_radio.setChecked(mode == "dedicated")
 
     def _on_next_clicked(self):
         serial = self.combo.currentData()
@@ -123,48 +93,4 @@ class DeviceSelectPage(QWidget):
         # reach into this page's own _devices list later to look it up (which
         # also meant raising if the device had since disappeared, e.g. the
         # camera was unplugged mid-wizard).
-        name = device_info.name
-
-        try:
-            device = find_device_by_serial(self.ctx, serial)
-            mode = get_mode(device)
-        except Exception as exc:
-            # The device may have vanished (unplugged mid-wizard) between the
-            # last refresh_devices() and this click - fail the same way an
-            # ensure_mode failure below does, instead of raising uncaught
-            # out of a Qt slot.
-            self.status_label.setText("Failed to read device: {}".format(exc))
-            self.next_button.setEnabled(True)
-            self.combo.setEnabled(True)
-            return
-
-        if mode is not None:
-            target_mode = "dual" if self.dual_radio.isChecked() else "dedicated"
-            if target_mode != mode:
-                target_label = "Dual RGB" if target_mode == "dual" else "Dedicated RGB"
-                self.status_label.setText("Switching to {} mode - this takes a few seconds...".format(target_label))
-                self.next_button.setEnabled(False)
-                self.back_button.setEnabled(False)
-                self.combo.setEnabled(False)
-                self.mode_group_box.setEnabled(False)
-                QApplication.processEvents()
-                try:
-                    ensure_mode(self.ctx, device, target_mode)
-                except Exception as exc:
-                    self.status_label.setText("Failed to switch to {} mode: {}".format(target_label, exc))
-                    self.next_button.setEnabled(True)
-                    self.back_button.setEnabled(True)
-                    self.combo.setEnabled(True)
-                    self.mode_group_box.setEnabled(True)
-                    return
-                self.refresh_devices(self.ctx)
-                index = self.combo.findData(serial)
-                if index != -1:
-                    self.combo.setCurrentIndex(index)
-                self.status_label.setText("")
-                self.next_button.setEnabled(True)
-                self.back_button.setEnabled(True)
-                self.combo.setEnabled(True)
-                self.mode_group_box.setEnabled(True)
-
-        self.device_chosen.emit(serial, name)
+        self.device_chosen.emit(serial, device_info.name)

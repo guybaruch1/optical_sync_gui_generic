@@ -39,6 +39,8 @@ from PySide6.QtWidgets import (
 )
 
 from engine.stream_preview_thread import StreamPreviewThread
+from engine.streams import find_device_by_serial
+from engine.rgb_mode import get_mode
 from gui.pages.roi_select_page import stream_label
 from gui.widgets.video_panel import VideoPanel
 
@@ -81,6 +83,7 @@ def _sensor_option_label(option):
 class StreamConfigPage(QWidget):
     config_chosen = Signal(tuple)
     back_requested = Signal()
+    mode_switch_requested = Signal(str)  # target_mode ("dual"/"dedicated")
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -95,6 +98,13 @@ class StreamConfigPage(QWidget):
         # same IR/RGB sync fix (or lack of it) the real run downstream will
         # actually use, rather than always defaulting to depth-on.
         self._enable_depth_for_ir_sync = True
+        # The device's CURRENT RGB mode ("dual"/"dedicated"/None), fetched at
+        # populate() time - None either means an unrecognized device (no
+        # Dual/Dedicated RGB concept at all) or a lookup failure, both of
+        # which hide mode_group_box entirely. _on_next_clicked compares the
+        # radio selection against this to decide whether a switch is even
+        # needed.
+        self._current_rgb_mode = None
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -103,6 +113,26 @@ class StreamConfigPage(QWidget):
         form.addRow(QLabel("Test:"), self.combo_test)
         form.addRow(QLabel("Sensor Options:"), self.combo_sensor_options)
         layout.addLayout(form)
+
+        # Moved here from Device Select: switching RGB mode changes which
+        # streams the device exposes, which would invalidate whatever Test/
+        # Sensor Options this page already resolved - the switch has to
+        # happen (and refresh those lists) on the SAME page that shows them,
+        # not one page earlier where nothing downstream exists to invalidate
+        # yet. Defaulted to whatever mode the device is actually in right
+        # now (populate()); hidden entirely for a device with no recognized
+        # Dual/Dedicated RGB concept (e.g. a D435/D455).
+        self.mode_group_box = QGroupBox("RGB Mode")
+        mode_layout = QVBoxLayout(self.mode_group_box)
+        self.dual_radio = QRadioButton("Dual RGB (2C)")
+        self.dedicated_radio = QRadioButton("Dedicated RGB (3C)")
+        mode_button_group = QButtonGroup(self.mode_group_box)
+        mode_button_group.addButton(self.dual_radio)
+        mode_button_group.addButton(self.dedicated_radio)
+        mode_layout.addWidget(self.dual_radio)
+        mode_layout.addWidget(self.dedicated_radio)
+        self.mode_group_box.setVisible(False)
+        layout.addWidget(self.mode_group_box)
 
         # Manual operator toggle, per-camera-FLOW (this page is revisited
         # once per camera, and dual-panel need depends on which Test is
@@ -210,6 +240,20 @@ class StreamConfigPage(QWidget):
         # across every camera's own sub-flow visit, so a previous camera's
         # checked state must not silently leak into this one's default.
         self.dual_panel_checkbox.setChecked(bool(preferred_dual_panel))
+
+        try:
+            self._current_rgb_mode = get_mode(find_device_by_serial(ctx, device_serial))
+        except Exception:
+            # The device can vanish between MainWindow resolving it and this
+            # lookup (e.g. unplugged mid-wizard) - fall back to "no mode
+            # concept" rather than raise out of populate().
+            self._current_rgb_mode = None
+        if self._current_rgb_mode is None:
+            self.mode_group_box.setVisible(False)
+        else:
+            self.mode_group_box.setVisible(True)
+            self.dual_radio.setChecked(self._current_rgb_mode == "dual")
+            self.dedicated_radio.setChecked(self._current_rgb_mode == "dedicated")
 
         self.combo_test.blockSignals(True)
         self.combo_test.clear()
@@ -431,6 +475,18 @@ class StreamConfigPage(QWidget):
                 "settings.yaml entry."
             )
             return
+        if self._current_rgb_mode is not None:
+            target_mode = "dual" if self.dual_radio.isChecked() else "dedicated"
+            if target_mode != self._current_rgb_mode:
+                # Don't proceed - the switch changes which streams the
+                # device exposes, so whatever Test/Sensor Options are
+                # currently selected may no longer even be valid.
+                # MainWindow.py's own handler applies the switch and calls
+                # populate() again with the refreshed device capabilities;
+                # the operator reviews the (possibly changed) result and
+                # clicks Next again to actually proceed.
+                self.mode_switch_requested.emit(target_mode)
+                return
         self._stop_preview()
         camera_controls = self._read_camera_controls()
         self.config_chosen.emit((pick_a, pick_b, camera_controls))

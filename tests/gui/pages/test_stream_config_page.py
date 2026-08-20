@@ -280,6 +280,101 @@ def test_on_start_preview_clicked_does_not_start_preview_when_test_picks_are_the
     assert "same physical stream" in page.status_label.text()
 
 
+# --- RGB Mode: moved here from Device Select since a mode switch changes
+# which streams the device exposes, invalidating whatever Test/Sensor
+# Options this page already resolved - the switch has to happen (and
+# refresh those lists) on the SAME page that shows them, not one page
+# earlier where nothing downstream exists to invalidate yet. ---
+
+def test_mode_box_hidden_for_a_device_with_no_recognized_rgb_mode(qapp, monkeypatch):
+    import gui.pages.stream_config_page as stream_config_page_module
+    monkeypatch.setattr(stream_config_page_module, "get_mode", lambda device: None)
+    monkeypatch.setattr(stream_config_page_module, "find_device_by_serial", lambda ctx, serial: object())
+    page = StreamConfigPage()
+
+    page.populate(ctx=None, device_serial="SN_D435", tests=_tests(("IR1 vs IR2 sync", [(IR1, IR2)])))
+
+    assert not page.mode_group_box.isVisibleTo(page)
+
+
+def test_mode_box_shown_and_preselected_for_a_dual_rgb_device(qapp, monkeypatch):
+    import gui.pages.stream_config_page as stream_config_page_module
+    monkeypatch.setattr(stream_config_page_module, "get_mode", lambda device: "dual")
+    monkeypatch.setattr(stream_config_page_module, "find_device_by_serial", lambda ctx, serial: object())
+    page = StreamConfigPage()
+
+    page.populate(ctx=None, device_serial="SN_DUAL", tests=_tests(("IR1 vs IR2 sync", [(IR1, IR2)])))
+
+    assert page.mode_group_box.isVisibleTo(page)
+    assert page.dual_radio.isChecked()
+    assert not page.dedicated_radio.isChecked()
+
+
+def test_mode_box_preselected_for_a_dedicated_rgb_device(qapp, monkeypatch):
+    import gui.pages.stream_config_page as stream_config_page_module
+    monkeypatch.setattr(stream_config_page_module, "get_mode", lambda device: "dedicated")
+    monkeypatch.setattr(stream_config_page_module, "find_device_by_serial", lambda ctx, serial: object())
+    page = StreamConfigPage()
+
+    page.populate(ctx=None, device_serial="SN_DEDICATED", tests=_tests(("IR1 vs IR2 sync", [(IR1, IR2)])))
+
+    assert page.dedicated_radio.isChecked()
+    assert not page.dual_radio.isChecked()
+
+
+def test_next_does_not_intercept_when_mode_radio_matches_current_mode(qapp, monkeypatch):
+    import gui.pages.stream_config_page as stream_config_page_module
+    monkeypatch.setattr(stream_config_page_module, "get_mode", lambda device: "dual")
+    monkeypatch.setattr(stream_config_page_module, "find_device_by_serial", lambda ctx, serial: object())
+    page = StreamConfigPage()
+    page.populate(ctx=None, device_serial="SN_DUAL", tests=_tests(("IR1 vs IR2 sync", [(IR1, IR2)])))
+    assert page.dual_radio.isChecked()  # already matches - untouched
+
+    mode_switches = []
+    page.mode_switch_requested.connect(mode_switches.append)
+    configs_chosen = []
+    page.config_chosen.connect(configs_chosen.append)
+    page._on_next_clicked()
+
+    assert mode_switches == []
+    assert len(configs_chosen) == 1
+
+
+def test_next_intercepts_and_emits_mode_switch_when_radio_differs(qapp, monkeypatch):
+    import gui.pages.stream_config_page as stream_config_page_module
+    monkeypatch.setattr(stream_config_page_module, "get_mode", lambda device: "dual")
+    monkeypatch.setattr(stream_config_page_module, "find_device_by_serial", lambda ctx, serial: object())
+    page = StreamConfigPage()
+    page.populate(ctx=None, device_serial="SN_DUAL", tests=_tests(("IR1 vs IR2 sync", [(IR1, IR2)])))
+    page.dedicated_radio.setChecked(True)  # operator picked the OTHER mode
+
+    mode_switches = []
+    page.mode_switch_requested.connect(mode_switches.append)
+    configs_chosen = []
+    page.config_chosen.connect(configs_chosen.append)
+    page._on_next_clicked()
+
+    assert mode_switches == ["dedicated"]
+    assert configs_chosen == []  # does not proceed - the switch may invalidate the current picks
+
+
+def test_next_does_not_check_mode_for_a_device_with_no_recognized_rgb_mode(qapp, monkeypatch):
+    import gui.pages.stream_config_page as stream_config_page_module
+    monkeypatch.setattr(stream_config_page_module, "get_mode", lambda device: None)
+    monkeypatch.setattr(stream_config_page_module, "find_device_by_serial", lambda ctx, serial: object())
+    page = StreamConfigPage()
+    page.populate(ctx=None, device_serial="SN_D435", tests=_tests(("IR1 vs IR2 sync", [(IR1, IR2)])))
+
+    mode_switches = []
+    page.mode_switch_requested.connect(mode_switches.append)
+    configs_chosen = []
+    page.config_chosen.connect(configs_chosen.append)
+    page._on_next_clicked()
+
+    assert mode_switches == []
+    assert len(configs_chosen) == 1
+
+
 # --- Use dual LED panel: moved here from Device Select since it depends on
 # which Test/pairing is picked (IR vs RGB needs it, IR vs IR doesn't) -
 # manual, per-camera-flow, not inferred from the test automatically (yet). ---

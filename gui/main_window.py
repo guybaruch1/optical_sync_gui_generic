@@ -38,7 +38,7 @@ other, since both are now independently reachable.
 
 import numpy as np
 import pyrealsense2 as rs
-from PySide6.QtWidgets import QMainWindow, QStackedWidget, QMessageBox
+from PySide6.QtWidgets import QMainWindow, QStackedWidget, QMessageBox, QApplication
 
 from gui.pages.device_select_page import DeviceSelectPage
 from gui.pages.stream_config_page import StreamConfigPage
@@ -55,6 +55,7 @@ from engine.streams import (
     resolve_inter_cam_sync_value, resolve_max_slave_color_resolution,
     find_device_by_serial, set_inter_cam_sync_mode, INTER_CAM_SYNC_DEFAULT,
 )
+from engine.rgb_mode import ensure_mode
 from domain.calibration import load_led_positions
 from settings import ensure_output_dir
 
@@ -176,6 +177,7 @@ class MainWindow(QMainWindow):
 
         self.device_page.device_chosen.connect(self._on_device_chosen)
         self.stream_config_page.config_chosen.connect(self._on_config_chosen)
+        self.stream_config_page.mode_switch_requested.connect(self._on_stream_config_mode_switch_requested)
         self.roi_page.roi_chosen.connect(self._on_roi_chosen)
         self.calibration_page.calibration_done.connect(self._on_calibration_done)
         self.threshold_tuning_page.tuning_done.connect(self._on_tuning_done)
@@ -207,16 +209,18 @@ class MainWindow(QMainWindow):
 
         self.stack.setCurrentWidget(self.camera_hub_page)
 
-    def _on_device_chosen(self, serial, name):
-        # Device Select is always the entry point into a camera's sub-flow -
-        # ensure an editing camera_id exists even if we got here without
-        # going through the hub's Add/Edit actions first (e.g. a direct
-        # call, same as every pre-existing test in this file does).
-        if self._editing_camera_id is None:
-            self._editing_camera_id = self._new_camera_slot_id()
-        self.gui_state.device_serial = serial
-        self._device_name = name
-        save_gui_state(self.gui_state)
+    def _populate_stream_config_page(self, serial, name, preferred_a=None, preferred_b=None,
+                                      preferred_test_name=None, preferred_dual_panel=False):
+        """Builds this device/name's usable_tests (settings.yaml's
+        camera.stream_options entry, resolved+filtered against what the
+        device actually reports) and populates stream_config_page with them.
+        Returns True on success; shows a QMessageBox.critical and returns
+        False on any resolution failure. Shared by _on_device_chosen (Add's
+        first-ever populate), _on_stream_config_mode_switch_requested (a
+        mode switch changes which streams the device exposes, so the
+        already-shown Test/Sensor Options need re-resolving against the NEW
+        capabilities), and _on_edit_camera_requested (Edit jumps straight
+        here with that camera's own previous choices as preferred_*)."""
         camera_settings = self.settings["camera"]
         raw_tests = camera_settings.get("stream_options", {}).get(name)
         if not raw_tests:
@@ -225,7 +229,7 @@ class MainWindow(QMainWindow):
                 "settings.yaml's camera.stream_options has no entry for camera {!r} - add one "
                 "with its own named tests before using Stream Select with this camera.".format(name),
             )
-            return
+            return False
         try:
             parsed_tests = parse_camera_tests_config(raw_tests)
         except (KeyError, ValueError) as exc:
@@ -235,7 +239,7 @@ class MainWindow(QMainWindow):
                 "({}: {}) - fix its test entries before using Stream Select with this "
                 "camera.".format(name, type(exc).__name__, exc),
             )
-            return
+            return False
 
         device_options = list_video_stream_options(self.ctx, serial)
         resolved_tests = resolve_camera_tests(device_options, parsed_tests)
@@ -250,12 +254,11 @@ class MainWindow(QMainWindow):
                 "matched anything this connected device actually reports - check those tests' "
                 "sensor_options against what this specific device/firmware supports.".format(name),
             )
-            return
+            return False
 
         self.stream_config_page.populate(
             self.ctx, serial, usable_tests,
-            preferred_a=camera_settings["stream_a"], preferred_b=camera_settings["stream_b"],
-            preferred_test_name=self.gui_state.last_test_name,
+            preferred_a=preferred_a, preferred_b=preferred_b, preferred_test_name=preferred_test_name,
             # settings.yaml camera_sync.enable_depth_for_ir_sync - read here
             # (rather than only later in _on_calibration_done, where the rest
             # of camera_sync is read) so Stream Select's own pairing-quality
@@ -264,8 +267,72 @@ class MainWindow(QMainWindow):
             enable_depth_for_ir_sync=(self.settings.get("camera_sync") or {}).get(
                 "enable_depth_for_ir_sync", True
             ),
+            preferred_dual_panel=preferred_dual_panel,
         )
+        return True
+
+    def _on_device_chosen(self, serial, name):
+        # Device Select is always the entry point into a camera's sub-flow -
+        # ensure an editing camera_id exists even if we got here without
+        # going through the hub's Add/Edit actions first (e.g. a direct
+        # call, same as every pre-existing test in this file does).
+        if self._editing_camera_id is None:
+            self._editing_camera_id = self._new_camera_slot_id()
+        self.gui_state.device_serial = serial
+        self._device_name = name
+        save_gui_state(self.gui_state)
+        camera_settings = self.settings["camera"]
+        if not self._populate_stream_config_page(
+            serial, name,
+            preferred_a=camera_settings["stream_a"], preferred_b=camera_settings["stream_b"],
+            preferred_test_name=self.gui_state.last_test_name,
+        ):
+            return
         self.stack.setCurrentWidget(self.stream_config_page)
+
+    def _on_stream_config_mode_switch_requested(self, target_mode):
+        # RGB mode moved here from Device Select: a switch changes which
+        # streams the device exposes, which would invalidate whatever Test/
+        # Sensor Options this page already resolved - so this re-resolves
+        # and re-populates in place rather than just relocating the raw
+        # ensure_mode() call. The operator reviews the (possibly changed)
+        # result and clicks Next again to actually proceed - see
+        # stream_config_page.py's own _on_next_clicked comment.
+        serial = self.gui_state.device_serial
+        name = self._device_name
+        page = self.stream_config_page
+        device = find_device_by_serial(self.ctx, serial)
+        target_label = "Dual RGB" if target_mode == "dual" else "Dedicated RGB"
+        page.status_label.setText("Switching to {} mode - this takes a few seconds...".format(target_label))
+        page.next_button.setEnabled(False)
+        page.back_button.setEnabled(False)
+        page.combo_test.setEnabled(False)
+        page.mode_group_box.setEnabled(False)
+        QApplication.processEvents()
+        try:
+            ensure_mode(self.ctx, device, target_mode)
+        except Exception as exc:
+            page.status_label.setText("Failed to switch to {} mode: {}".format(target_label, exc))
+            page.next_button.setEnabled(True)
+            page.back_button.setEnabled(True)
+            page.combo_test.setEnabled(True)
+            page.mode_group_box.setEnabled(True)
+            return
+        # Preserve the current picks/test/dual-panel choice as "preferred" so
+        # an unaffected selection survives the refresh; anything genuinely
+        # invalidated by the mode change just falls back to the first
+        # available option (populate()'s own tolerant fallback for any
+        # preferred_* that no longer matches).
+        self._populate_stream_config_page(
+            serial, name,
+            preferred_a=page.pick_a, preferred_b=page.pick_b, preferred_test_name=page.current_test_name,
+            preferred_dual_panel=page.dual_panel_checkbox.isChecked(),
+        )
+        page.next_button.setEnabled(True)
+        page.back_button.setEnabled(True)
+        page.combo_test.setEnabled(True)
+        page.mode_group_box.setEnabled(True)
+        page.status_label.setText("")
 
     def _on_config_chosen(self, config):
         pick_a, pick_b, camera_controls = config

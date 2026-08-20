@@ -182,6 +182,89 @@ def test_on_device_chosen_still_shows_no_entry_error_for_unconfigured_camera(qap
     assert window.stack.currentWidget() is not window.stream_config_page
 
 
+# --- RGB Mode moved from Device Select to Stream Config: a switch changes
+# which streams the device exposes, so MainWindow's own handler re-resolves
+# and re-populates Stream Config's Test/Sensor Options in place, rather than
+# just relocating the raw ensure_mode() call. ---
+
+def test_mode_switch_requested_applies_switch_and_repopulates(qapp, monkeypatch):
+    settings = _minimal_settings({"Intel RealSense D455": [_ir_vs_rgb_test()]})
+    window = _make_window(qapp, settings)
+    monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [IR1, COLOR0])
+    monkeypatch.setattr(main_window_module, "find_device_by_serial", lambda ctx, serial: "the-device")
+    import gui.pages.stream_config_page as stream_config_page_module
+    monkeypatch.setattr(stream_config_page_module, "find_device_by_serial", lambda ctx, serial: "the-device")
+    monkeypatch.setattr(stream_config_page_module, "get_mode", lambda device: "dual")
+    window._on_device_chosen("SN123", "Intel RealSense D455")
+
+    ensure_mode_calls = []
+    monkeypatch.setattr(
+        main_window_module, "ensure_mode",
+        lambda ctx, device, target_mode: ensure_mode_calls.append((device, target_mode)),
+    )
+
+    window._on_stream_config_mode_switch_requested("dedicated")
+
+    assert ensure_mode_calls == [("the-device", "dedicated")]
+    # Re-populated (not left showing the pre-switch state) - same test/pick
+    # still resolves against these unchanged fake device options, so it
+    # survives the refresh.
+    assert window.stream_config_page.pick_a == IR1
+    assert window.stream_config_page.pick_b == COLOR0
+    assert window.stream_config_page.next_button.isEnabled()
+    assert window.stream_config_page.back_button.isEnabled()
+
+
+def test_mode_switch_requested_shows_error_and_reenables_on_failure(qapp, monkeypatch):
+    settings = _minimal_settings({"Intel RealSense D455": [_ir_vs_rgb_test()]})
+    window = _make_window(qapp, settings)
+    monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [IR1, COLOR0])
+    monkeypatch.setattr(main_window_module, "find_device_by_serial", lambda ctx, serial: "the-device")
+    import gui.pages.stream_config_page as stream_config_page_module
+    monkeypatch.setattr(stream_config_page_module, "find_device_by_serial", lambda ctx, serial: "the-device")
+    monkeypatch.setattr(stream_config_page_module, "get_mode", lambda device: "dual")
+    window._on_device_chosen("SN123", "Intel RealSense D455")
+
+    def _raise(ctx, device, target_mode):
+        raise RuntimeError("hardware reset timed out")
+
+    monkeypatch.setattr(main_window_module, "ensure_mode", _raise)
+
+    window._on_stream_config_mode_switch_requested("dedicated")
+
+    assert "Failed to switch" in window.stream_config_page.status_label.text()
+    assert window.stream_config_page.next_button.isEnabled()
+    assert window.stream_config_page.back_button.isEnabled()
+    assert window.stream_config_page.combo_test.isEnabled()
+    assert window.stream_config_page.mode_group_box.isEnabled()
+
+
+def test_mode_switch_requested_disables_stream_config_widgets_during_switch(qapp, monkeypatch):
+    settings = _minimal_settings({"Intel RealSense D455": [_ir_vs_rgb_test()]})
+    window = _make_window(qapp, settings)
+    monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [IR1, COLOR0])
+    monkeypatch.setattr(main_window_module, "find_device_by_serial", lambda ctx, serial: "the-device")
+    import gui.pages.stream_config_page as stream_config_page_module
+    monkeypatch.setattr(stream_config_page_module, "find_device_by_serial", lambda ctx, serial: "the-device")
+    monkeypatch.setattr(stream_config_page_module, "get_mode", lambda device: "dual")
+    window._on_device_chosen("SN123", "Intel RealSense D455")
+
+    observed = []
+
+    def _ensure_mode(ctx, device, target_mode):
+        page = window.stream_config_page
+        observed.append((
+            page.next_button.isEnabled(), page.back_button.isEnabled(),
+            page.combo_test.isEnabled(), page.mode_group_box.isEnabled(),
+        ))
+
+    monkeypatch.setattr(main_window_module, "ensure_mode", _ensure_mode)
+
+    window._on_stream_config_mode_switch_requested("dedicated")
+
+    assert observed == [(False, False, False, False)]
+
+
 def test_on_config_chosen_persists_last_test_name(qapp, monkeypatch):
     settings = _minimal_settings({"Intel RealSense D455": [_ir_vs_rgb_test("IR vs RGB sync")]})
     settings["calibration"] = {"settle_frames": 15}
