@@ -421,6 +421,36 @@ def test_next_does_not_check_mode_for_a_device_with_no_recognized_rgb_mode(qapp,
     assert len(configs_chosen) == 1
 
 
+# --- note_mode_switch_applied: MainWindow calls this after a real
+# ensure_mode() succeeds even when the subsequent Test/Sensor Options
+# re-populate then fails (e.g. no configured test matches this camera's new
+# mode) - without it, _current_rgb_mode would stay stale at the PRE-switch
+# value, making the next Next click think another switch is still needed
+# and re-trigger ensure_mode() for a switch that already succeeded, in an
+# unrecoverable retry loop. ---
+
+def test_note_mode_switch_applied_updates_current_mode_and_radios(qapp, monkeypatch):
+    import gui.pages.stream_config_page as stream_config_page_module
+    monkeypatch.setattr(stream_config_page_module, "get_mode", lambda device: "dual")
+    monkeypatch.setattr(stream_config_page_module, "find_device_by_serial", lambda ctx, serial: object())
+    page = StreamConfigPage()
+    page.populate(ctx=None, device_serial="SN_DUAL", tests=_tests(("IR1 vs IR2 sync", [(IR1, IR2)])))
+
+    page.note_mode_switch_applied("dedicated")
+
+    assert page.dedicated_radio.isChecked()
+    assert not page.dual_radio.isChecked()
+    # A subsequent Next click must not think another switch is still
+    # needed, now that the radio and _current_rgb_mode agree.
+    mode_switches = []
+    page.mode_switch_requested.connect(mode_switches.append)
+    configs_chosen = []
+    page.config_chosen.connect(configs_chosen.append)
+    page._on_next_clicked()
+    assert mode_switches == []
+    assert len(configs_chosen) == 1
+
+
 # --- Use dual LED panel: moved here from Device Select since it depends on
 # which Test/pairing is picked (IR vs RGB needs it, IR vs IR doesn't) -
 # manual, per-camera-flow, not inferred from the test automatically (yet). ---

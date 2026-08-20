@@ -405,7 +405,7 @@ class StreamConfigPage(QWidget):
             "Exposure ({}):".format(stream_label(pick_b)) if pick_b is not None else "Exposure B:"
         )
 
-    def _read_camera_controls(self):
+    def read_camera_controls(self):
         """Returns the single global camera-control dict - applied
         uniformly to every resolved sensor group (see
         gui.pages.roi_select_page._apply_camera_controls), which then picks
@@ -413,7 +413,12 @@ class StreamConfigPage(QWidget):
         exposure_for_group depending on which stream that group actually
         contains. No "gain" key - manual exposure mode never touches gain
         at all (see engine.streams.set_manual_exposure's docstring for
-        why), so there is nothing for this dict to carry for it."""
+        why), so there is nothing for this dict to carry for it. Public
+        (unlike most of this page's helpers) - part of this page's
+        documented produced interface alongside pick_a/pick_b/
+        current_test_name: gui/main_window.py's own mode-switch handler
+        reads this to carry the operator's current camera-control choices
+        through a Test/Sensor Options refresh."""
         w = self._camera_controls
         auto_exposure = w["auto_radio"].isChecked()
         return {
@@ -424,7 +429,7 @@ class StreamConfigPage(QWidget):
         }
 
     def _apply_camera_controls_to_widgets(self, camera_controls):
-        """The inverse of _read_camera_controls - lets populate() prefill
+        """The inverse of read_camera_controls - lets populate() prefill
         this page's camera-control widgets from a previously-read dict
         (Edit's own previous choice for this camera), rather than always
         starting from the hardcoded widget defaults DEFAULT_CAMERA_CONTROLS
@@ -498,6 +503,22 @@ class StreamConfigPage(QWidget):
         self._stop_preview()
         self.back_requested.emit()
 
+    def note_mode_switch_applied(self, new_mode):
+        """Called by gui/main_window.py's _on_stream_config_mode_switch_
+        requested after a real ensure_mode() call has already succeeded,
+        even on the branch where the subsequent Test/Sensor Options
+        re-populate then fails (e.g. no configured test matches this
+        camera's new mode, so populate() - and therefore the fresh
+        get_mode() lookup that would normally refresh _current_rgb_mode -
+        never runs). Without this, _current_rgb_mode would stay stale at
+        the PRE-switch value, making the next Next click think another
+        switch is still needed and re-trigger ensure_mode() for a switch
+        that already succeeded - an unrecoverable retry loop, since
+        nothing about the device's real mode would ever change again."""
+        self._current_rgb_mode = new_mode
+        self.dual_radio.setChecked(new_mode == "dual")
+        self.dedicated_radio.setChecked(new_mode == "dedicated")
+
     def _on_next_clicked(self):
         pick_a = self.pick_a
         pick_b = self.pick_b
@@ -522,5 +543,5 @@ class StreamConfigPage(QWidget):
                 self.mode_switch_requested.emit(target_mode)
                 return
         self._stop_preview()
-        camera_controls = self._read_camera_controls()
+        camera_controls = self.read_camera_controls()
         self.config_chosen.emit((pick_a, pick_b, camera_controls))

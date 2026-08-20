@@ -329,16 +329,27 @@ class MainWindow(QMainWindow):
             page.combo_test.setEnabled(True)
             page.mode_group_box.setEnabled(True)
             return
-        # Preserve the current picks/test/dual-panel choice as "preferred" so
-        # an unaffected selection survives the refresh; anything genuinely
-        # invalidated by the mode change just falls back to the first
-        # available option (populate()'s own tolerant fallback for any
-        # preferred_* that no longer matches).
-        self._populate_stream_config_page(
+        # Preserve the current picks/test/dual-panel/camera-controls choice
+        # as "preferred" so an unaffected selection survives the refresh -
+        # a mode switch invalidates Test/Sensor Options, not camera
+        # controls; anything genuinely invalidated by the mode change just
+        # falls back to the first available option (populate()'s own
+        # tolerant fallback for any preferred_* that no longer matches).
+        populated = self._populate_stream_config_page(
             serial, name,
             preferred_a=page.pick_a, preferred_b=page.pick_b, preferred_test_name=page.current_test_name,
             preferred_dual_panel=page.dual_panel_checkbox.isChecked(),
+            preferred_camera_controls=page.read_camera_controls(),
         )
+        if not populated:
+            # ensure_mode() already succeeded above - the device really did
+            # switch, even though no configured test matches its new mode
+            # (populate() was never reached, so its own fresh get_mode()
+            # lookup never ran to update this). Without this, the next Next
+            # click would think another switch is still needed and
+            # re-trigger ensure_mode() for a switch that already succeeded,
+            # forever - see note_mode_switch_applied's own docstring.
+            page.note_mode_switch_applied(target_mode)
         page.next_button.setEnabled(True)
         page.back_button.setEnabled(True)
         page.combo_test.setEnabled(True)
@@ -660,6 +671,13 @@ class MainWindow(QMainWindow):
             preferred_dual_panel=config["dual_panel_config"] is not None,
             preferred_camera_controls=config["camera_controls"],
         ):
+            # Leave this camera's own committed config untouched (as the
+            # comment above already guarantees) but don't leave MainWindow
+            # itself thinking a sub-flow is still in progress for it -
+            # nothing else currently branches on this, but a stuck
+            # non-None value here is exactly the kind of stale state this
+            # class works hard to avoid elsewhere.
+            self._editing_camera_id = None
             return
         self.stack.setCurrentWidget(self.stream_config_page)
 
