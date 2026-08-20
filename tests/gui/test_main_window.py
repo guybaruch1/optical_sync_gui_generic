@@ -741,17 +741,95 @@ def test_add_camera_requested_excludes_already_configured_serials(qapp, monkeypa
     assert calls == [{"SN123"}]
 
 
-def test_edit_camera_requested_switches_to_device_select_reusing_the_camera_id(qapp, monkeypatch, tmp_path):
-    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
-    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
-        window._on_calibration_done()
-        window._on_tuning_done()
-    camera_id = list(window._cameras.keys())[0]
+# --- Edit jumps straight to Stream Config, skipping Device Select entirely
+# (the device is already known) - prefilled with that camera's own previous
+# choices, not global settings.yaml defaults, so it's a genuine "continue
+# editing" rather than "redo from scratch". ---
+
+def test_edit_camera_requested_jumps_directly_to_stream_config(qapp, monkeypatch, tmp_path):
+    settings = _full_settings({"Intel RealSense D455": [_ir_vs_rgb_test()]})
+    window = _make_window(qapp, settings)
+    monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [IR1, COLOR0])
+    monkeypatch.setattr(main_window_module, "save_gui_state", lambda state: None)
+    monkeypatch.setattr(window.roi_page, "set_context", lambda *a, **k: None)
+    monkeypatch.setattr(main_window_module, "ensure_output_dir", lambda settings: str(tmp_path))
+    monkeypatch.setattr(
+        main_window_module, "load_led_positions",
+        lambda *a, **k: ({"0": [1.0, 1.0, 300.0, 100.0, 200.0]}, {"0": [2.0, 2.0, 600.0, 200.0, 400.0]}),
+    )
+    camera_id = _configure_one_camera(window, "SN123")
 
     window._on_edit_camera_requested(camera_id)
 
-    assert window.stack.currentWidget() is window.device_page
+    assert window.stack.currentWidget() is window.stream_config_page
     assert window._editing_camera_id == camera_id
+
+
+def test_edit_camera_requested_prefills_stream_config_with_this_cameras_own_choices(qapp, monkeypatch, tmp_path):
+    settings = _full_settings({"Intel RealSense D455": [_ir_vs_rgb_test()]})
+    window = _make_window(qapp, settings)
+    monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [IR1, COLOR0])
+    monkeypatch.setattr(main_window_module, "save_gui_state", lambda state: None)
+    monkeypatch.setattr(window.roi_page, "set_context", lambda *a, **k: None)
+    monkeypatch.setattr(main_window_module, "ensure_output_dir", lambda settings: str(tmp_path))
+    monkeypatch.setattr(
+        main_window_module, "load_led_positions",
+        lambda *a, **k: ({"0": [1.0, 1.0, 300.0, 100.0, 200.0]}, {"0": [2.0, 2.0, 600.0, 200.0, 400.0]}),
+    )
+    camera_id = _configure_one_camera(window, "SN123", camera_controls={
+        "emitter_enabled": True, "auto_exposure": False, "exposure_a": 1234, "exposure_b": 5678,
+    })
+
+    window._on_edit_camera_requested(camera_id)
+
+    page = window.stream_config_page
+    assert page.pick_a == IR1
+    assert page.pick_b == COLOR0
+    assert page.current_test_name == "IR vs RGB sync"
+    # emitter_checkbox is labeled "Disable IR emitter" - emitter_enabled
+    # True means the emitter is ON, i.e. the checkbox is UNCHECKED.
+    assert not page._camera_controls["emitter_checkbox"].isChecked()
+    assert page._camera_controls["manual_radio"].isChecked()
+    assert page._camera_controls["exposure_a_spin"].value() == 1234
+    assert page._camera_controls["exposure_b_spin"].value() == 5678
+
+
+def test_edit_camera_requested_prefills_dual_panel_checkbox(qapp, monkeypatch, tmp_path):
+    settings = _full_settings({"Intel RealSense D455": [_ir_vs_rgb_test()]})
+    window = _make_window(qapp, settings)
+    monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [IR1, COLOR0])
+    monkeypatch.setattr(main_window_module, "save_gui_state", lambda state: None)
+    monkeypatch.setattr(window.roi_page, "set_context", lambda *a, **k: None)
+    monkeypatch.setattr(main_window_module, "ensure_output_dir", lambda settings: str(tmp_path))
+    monkeypatch.setattr(
+        main_window_module, "load_led_positions",
+        lambda *a, **k: ({"0": [1.0, 1.0, 300.0, 100.0, 200.0]}, {"0": [2.0, 2.0, 600.0, 200.0, 400.0]}),
+    )
+    # Not via _configure_one_camera - the checkbox must be set AFTER
+    # _on_device_chosen's own populate() call (which resets it) but BEFORE
+    # _on_config_chosen reads it, same ordering _window_after_config_chosen
+    # already uses for this exact reason.
+    window._on_device_chosen("SN123", "Intel RealSense D455")
+    window.stream_config_page.dual_panel_checkbox.setChecked(True)
+    window._on_config_chosen((IR1, COLOR0, {
+        "emitter_enabled": False, "auto_exposure": True, "exposure_a": None, "exposure_b": None,
+    }))
+    window.gui_state.stream_a_roi = [0, 0, 50, 50]
+    window.gui_state.stream_b_roi = [0, 0, 50, 50]
+    window.calibration_page.last_calibration_result = dict(
+        image_a_on=np.full((50, 50), 50, dtype=np.uint8), image_a_off=np.full((50, 50), 50, dtype=np.uint8),
+        image_b_on=np.full((50, 50), 50, dtype=np.uint8), image_b_off=np.full((50, 50), 50, dtype=np.uint8),
+        stream_a_otsu_threshold=127, stream_b_otsu_threshold=127,
+        min_blob_area=5, row_gap_px=15, neighborhood_size=5,
+    )
+    camera_id = window._editing_camera_id
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window._on_tuning_done()
+
+    window._on_edit_camera_requested(camera_id)
+
+    assert window.stream_config_page.dual_panel_checkbox.isChecked()
 
 
 def test_start_multi_camera_session_requested_does_nothing_with_no_cameras(qapp):

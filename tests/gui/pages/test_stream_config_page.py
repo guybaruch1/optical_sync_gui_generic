@@ -159,6 +159,52 @@ def test_camera_controls_group_always_present_regardless_of_picks(qapp):
     assert page._camera_controls["group_box"] is not None
 
 
+# --- preferred_camera_controls: lets Edit continue with this camera's own
+# previous camera-control choices instead of the hardcoded widget defaults -
+# always applied explicitly (never left as-is), same reasoning as
+# preferred_dual_panel, since this page's one instance is reused across
+# every camera's own sub-flow visit. ---
+
+def test_populate_defaults_camera_controls_when_none_given(qapp):
+    page = StreamConfigPage()
+    page.populate(ctx=None, device_serial="123", tests=_tests(("IR1 vs IR2 sync", [(IR1, IR2)])))
+    assert page._camera_controls["emitter_checkbox"].isChecked()  # default: emitter disabled
+    assert page._camera_controls["auto_radio"].isChecked()
+
+
+def test_populate_applies_preferred_camera_controls(qapp):
+    page = StreamConfigPage()
+    page.populate(
+        ctx=None, device_serial="123", tests=_tests(("IR1 vs IR2 sync", [(IR1, IR2)])),
+        preferred_camera_controls={
+            "emitter_enabled": True, "auto_exposure": False, "exposure_a": 1234, "exposure_b": 5678,
+        },
+    )
+    # emitter_checkbox is labeled "Disable IR emitter" - emitter_enabled
+    # True means the emitter is ON, i.e. the checkbox is UNCHECKED.
+    assert not page._camera_controls["emitter_checkbox"].isChecked()
+    assert page._camera_controls["manual_radio"].isChecked()
+    assert page._camera_controls["exposure_a_spin"].value() == 1234
+    assert page._camera_controls["exposure_b_spin"].value() == 5678
+
+
+def test_populate_resets_camera_controls_when_not_preselected(qapp):
+    # Guards against stale carryover, same reasoning as the equivalent
+    # dual-panel test above.
+    page = StreamConfigPage()
+    page.populate(
+        ctx=None, device_serial="123", tests=_tests(("IR1 vs IR2 sync", [(IR1, IR2)])),
+        preferred_camera_controls={
+            "emitter_enabled": True, "auto_exposure": False, "exposure_a": 1234, "exposure_b": 5678,
+        },
+    )
+    assert page._camera_controls["manual_radio"].isChecked()
+
+    page.populate(ctx=None, device_serial="456", tests=_tests(("IR1 vs IR2 sync", [(IR1, IR2)])))
+
+    assert page._camera_controls["auto_radio"].isChecked()
+
+
 # --- config_chosen payload: (pick_a, pick_b, camera_controls) - no "test"
 # concept in the emitted payload at all ---
 

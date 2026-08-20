@@ -47,6 +47,16 @@ from gui.widgets.video_panel import VideoPanel
 
 _STREAM_TYPE_SHORT_LABELS = {"infrared": "IR", "color": "RGB"}
 
+# Matches _build_camera_control_group's own hardcoded widget defaults
+# (emitter_checkbox - "Disable IR emitter" - checked by default, i.e.
+# emitter_enabled False; auto_radio checked by default; exposure spins
+# default to 8500) - populate() applies this explicitly for a fresh Add (no
+# preferred_camera_controls given), same reasoning as preferred_dual_panel's
+# own explicit reset.
+DEFAULT_CAMERA_CONTROLS = {
+    "emitter_enabled": False, "auto_exposure": True, "exposure_a": 8500, "exposure_b": 8500,
+}
+
 
 def _side_short_label(pick):
     return _STREAM_TYPE_SHORT_LABELS.get(pick["stream_type"].name, pick["stream_type"].name.capitalize())
@@ -207,7 +217,8 @@ class StreamConfigPage(QWidget):
         return self.combo_test.currentData()
 
     def populate(self, ctx, device_serial, tests, preferred_a=None, preferred_b=None,
-                 preferred_test_name=None, enable_depth_for_ir_sync=True, preferred_dual_panel=False):
+                 preferred_test_name=None, enable_depth_for_ir_sync=True, preferred_dual_panel=False,
+                 preferred_camera_controls=None):
         """`tests` is engine.streams.resolve_camera_tests's output, already
         filtered by gui/main_window.py to tests with at least one
         sensor_options entry matching this connected device - each entry is
@@ -229,7 +240,12 @@ class StreamConfigPage(QWidget):
         preferred_dual_panel pre-checks dual_panel_checkbox (Edit's own
         previous choice for this camera); defaults False/unchecked for a
         fresh Add, and is always applied explicitly (never left as-is) since
-        this page's one instance is reused across every camera's own visit."""
+        this page's one instance is reused across every camera's own visit.
+        preferred_camera_controls is the same idea for the camera-control
+        widgets (emitter/exposure) - a dict shaped like _read_camera_
+        controls' own output (Edit's own previous choice); None falls back
+        to DEFAULT_CAMERA_CONTROLS, always applied explicitly for the same
+        stale-carryover reason."""
         self.ctx = ctx
         self.device_serial = device_serial
         self._tests = list(tests)
@@ -240,6 +256,7 @@ class StreamConfigPage(QWidget):
         # across every camera's own sub-flow visit, so a previous camera's
         # checked state must not silently leak into this one's default.
         self.dual_panel_checkbox.setChecked(bool(preferred_dual_panel))
+        self._apply_camera_controls_to_widgets(preferred_camera_controls or DEFAULT_CAMERA_CONTROLS)
 
         try:
             self._current_rgb_mode = get_mode(find_device_by_serial(ctx, device_serial))
@@ -405,6 +422,23 @@ class StreamConfigPage(QWidget):
             "exposure_a": None if auto_exposure else w["exposure_a_spin"].value(),
             "exposure_b": None if auto_exposure else w["exposure_b_spin"].value(),
         }
+
+    def _apply_camera_controls_to_widgets(self, camera_controls):
+        """The inverse of _read_camera_controls - lets populate() prefill
+        this page's camera-control widgets from a previously-read dict
+        (Edit's own previous choice for this camera), rather than always
+        starting from the hardcoded widget defaults DEFAULT_CAMERA_CONTROLS
+        below."""
+        w = self._camera_controls
+        w["emitter_checkbox"].setChecked(not camera_controls["emitter_enabled"])
+        if camera_controls["auto_exposure"]:
+            w["auto_radio"].setChecked(True)
+        else:
+            w["manual_radio"].setChecked(True)
+            if camera_controls["exposure_a"] is not None:
+                w["exposure_a_spin"].setValue(camera_controls["exposure_a"])
+            if camera_controls["exposure_b"] is not None:
+                w["exposure_b_spin"].setValue(camera_controls["exposure_b"])
 
     def _streams_are_identical(self, pick_a, pick_b):
         return pick_a["stream_type"] == pick_b["stream_type"] and pick_a["stream_index"] == pick_b["stream_index"]

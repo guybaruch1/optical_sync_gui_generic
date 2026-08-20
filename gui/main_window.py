@@ -3,9 +3,11 @@ camera - see docs/superpowers's multi-camera design doc's "Design detail"
 section 4; the hub still fronts every run regardless of camera count, only
 its Start destination now depends on camera count - see the paragraph
 below) that fans out into the existing per-camera sub-flow (Device
-select -> Stream config -> ROI select -> Calibration -> Threshold tuning),
-in a QStackedWidget, persisting choices to state.gui_state as the user
-moves through the wizard.
+select -> Stream config -> ROI select -> Calibration -> Threshold tuning)
+for Add, or straight into Stream config for Edit (see
+_on_edit_camera_requested - the device is already known, so re-picking it
+would be pointless), in a QStackedWidget, persisting choices to
+state.gui_state as the user moves through the wizard.
 
 Per-camera sub-flow pages stay single, SHARED instances re-entered once per
 configured camera (via the hub's Add/Edit actions) - none of their own
@@ -19,7 +21,13 @@ JSON-friendly prefill record for the NEXT app launch's Stream Config
 defaults (now reflecting whichever camera was edited most recently, a
 known, deliberately-deferred limitation - see the design doc's "Explicitly
 deferred to v2" list); self._cameras is this run's actual source of truth
-for every configured camera's full config.
+for every configured camera's full config, INCLUDING a "test_name" key
+alongside (not inside) each entry's "config" dict - kept separate because
+"config" is **-splatted directly into LiveSessionPage.set_context() (the
+1-configured-camera path below), which has no test_name parameter of its
+own; test_name exists purely so Edit can re-select the same test as its
+preferred_test_name instead of falling back to GuiState's global last-used
+one.
 
 CameraHubPage's "Start Multi-Camera Live Session" switches to
 gui/pages/multi_camera_live_session_page.py's MultiCameraLiveSessionPage
@@ -210,7 +218,8 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(self.camera_hub_page)
 
     def _populate_stream_config_page(self, serial, name, preferred_a=None, preferred_b=None,
-                                      preferred_test_name=None, preferred_dual_panel=False):
+                                      preferred_test_name=None, preferred_dual_panel=False,
+                                      preferred_camera_controls=None):
         """Builds this device/name's usable_tests (settings.yaml's
         camera.stream_options entry, resolved+filtered against what the
         device actually reports) and populates stream_config_page with them.
@@ -220,7 +229,8 @@ class MainWindow(QMainWindow):
         mode switch changes which streams the device exposes, so the
         already-shown Test/Sensor Options need re-resolving against the NEW
         capabilities), and _on_edit_camera_requested (Edit jumps straight
-        here with that camera's own previous choices as preferred_*)."""
+        here with that camera's own previous choices - including
+        preferred_camera_controls - as preferred_*)."""
         camera_settings = self.settings["camera"]
         raw_tests = camera_settings.get("stream_options", {}).get(name)
         if not raw_tests:
@@ -268,6 +278,7 @@ class MainWindow(QMainWindow):
                 "enable_depth_for_ir_sync", True
             ),
             preferred_dual_panel=preferred_dual_panel,
+            preferred_camera_controls=preferred_camera_controls,
         )
         return True
 
@@ -575,7 +586,18 @@ class MainWindow(QMainWindow):
 
         camera_id = self._editing_camera_id
         is_first_camera = not self._cameras
-        self._cameras[camera_id] = {"label": pending["camera_name"], "config": config}
+        self._cameras[camera_id] = {
+            "label": pending["camera_name"], "config": config,
+            # Sibling of "config", not inside it - "config" is **-splatted
+            # directly into LiveSessionPage.set_context() (see
+            # _on_start_multi_camera_session_requested's 1-camera branch),
+            # which has no test_name parameter. Read live off the
+            # still-current page (unchanged since Stream Config ran, earlier
+            # in this same sub-flow) - lets Edit re-select this same test as
+            # its own preferred_test_name instead of falling back to
+            # GuiState's global last-used one.
+            "test_name": self.stream_config_page.current_test_name,
+        }
         if is_first_camera:
             self._master_camera_id = camera_id
         self._editing_camera_id = None
@@ -613,15 +635,33 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(self.device_page)
 
     def _on_edit_camera_requested(self, camera_id):
-        # Simplest v1 behavior: re-run that camera's ENTIRE sub-flow from
-        # Device Select, same as adding a new one - no pre-population of
-        # its previous choices beyond whatever GuiState's own lossy prefill
-        # already offers. The camera's previously-committed config is left
-        # in self._cameras untouched until the sub-flow completes again
-        # (_on_tuning_done overwrites it under the same camera_id).
+        # Skips Device Select entirely - the device is already known, and
+        # re-picking it would be pointless (worse: Device Select would need
+        # to special-case NOT hiding this camera's own device from itself,
+        # since _on_add_camera_requested's exclude_serials would otherwise
+        # hide every already-configured camera including this one). Jumps
+        # straight to Stream Config, prefilled with this camera's own
+        # previous choices (not global settings.yaml defaults) - a genuine
+        # "continue editing", not "redo from scratch". The camera's
+        # previously-committed config is left in self._cameras untouched
+        # until the sub-flow completes again (_on_tuning_done overwrites it
+        # under the same camera_id).
         self._editing_camera_id = camera_id
-        self.device_page.refresh_devices(self.ctx)
-        self.stack.setCurrentWidget(self.device_page)
+        camera = self._cameras[camera_id]
+        config = camera["config"]
+        serial, name = config["device_serial"], camera["label"]
+        self.gui_state.device_serial = serial
+        self._device_name = name
+        save_gui_state(self.gui_state)
+        if not self._populate_stream_config_page(
+            serial, name,
+            preferred_a=config["pick_a"], preferred_b=config["pick_b"],
+            preferred_test_name=camera.get("test_name"),
+            preferred_dual_panel=config["dual_panel_config"] is not None,
+            preferred_camera_controls=config["camera_controls"],
+        ):
+            return
+        self.stack.setCurrentWidget(self.stream_config_page)
 
     def _on_master_change_requested(self, camera_id):
         self._master_camera_id = camera_id
