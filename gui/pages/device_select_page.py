@@ -80,9 +80,15 @@ class DeviceSelectPage(QWidget):
         self.next_button.clicked.connect(self._on_next_clicked)
         layout.addWidget(self.next_button)
 
-    def refresh_devices(self, ctx):
+    def refresh_devices(self, ctx, exclude_serials=None):
+        # exclude_serials: every already-configured camera's serial (Camera
+        # Hub's Add flow) - hides it here so the same physical camera can't
+        # accidentally be added to the test twice. None/empty means nothing
+        # excluded (MainWindow.__init__'s own unconditional first call, and
+        # any direct-call test/tooling that doesn't go through the hub).
+        exclude_serials = exclude_serials or set()
         self.ctx = ctx
-        self._devices = list_devices(ctx)
+        self._devices = [d for d in list_devices(ctx) if d.serial not in exclude_serials]
         self.combo.clear()
         for device in self._devices:
             try:

@@ -635,6 +635,29 @@ def test_removing_the_master_promotes_a_remaining_camera(qapp, monkeypatch, tmp_
     assert window._master_camera_id == "some_other_cam"
 
 
+def test_add_camera_requested_excludes_already_configured_serials(qapp, monkeypatch, tmp_path):
+    settings = _full_settings({"Intel RealSense D455": [_ir_vs_rgb_test()]})
+    window = _make_window(qapp, settings)
+    monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [IR1, COLOR0])
+    monkeypatch.setattr(main_window_module, "save_gui_state", lambda state: None)
+    monkeypatch.setattr(window.roi_page, "set_context", lambda *a, **k: None)
+    monkeypatch.setattr(main_window_module, "ensure_output_dir", lambda settings: str(tmp_path))
+    monkeypatch.setattr(
+        main_window_module, "load_led_positions",
+        lambda *a, **k: ({"0": [1.0, 1.0, 300.0, 100.0, 200.0]}, {"0": [2.0, 2.0, 600.0, 200.0, 400.0]}),
+    )
+    _configure_one_camera(window, "SN123")
+    calls = []
+    monkeypatch.setattr(
+        window.device_page, "refresh_devices",
+        lambda ctx, exclude_serials=None: calls.append(exclude_serials),
+    )
+
+    window._on_add_camera_requested()
+
+    assert calls == [{"SN123"}]
+
+
 def test_edit_camera_requested_switches_to_device_select_reusing_the_camera_id(qapp, monkeypatch, tmp_path):
     window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
     with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):

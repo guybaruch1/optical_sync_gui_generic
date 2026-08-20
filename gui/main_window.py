@@ -532,7 +532,12 @@ class MainWindow(QMainWindow):
 
     def _on_add_camera_requested(self):
         self._editing_camera_id = self._new_camera_slot_id()
-        self.device_page.refresh_devices(self.ctx)
+        # Hides every already-configured camera's device from the picker -
+        # the same physical camera can't be added to the test twice.
+        already_configured_serials = {
+            camera["config"]["device_serial"] for camera in self._cameras.values()
+        }
+        self.device_page.refresh_devices(self.ctx, exclude_serials=already_configured_serials)
         self.stack.setCurrentWidget(self.device_page)
 
     def _on_edit_camera_requested(self, camera_id):

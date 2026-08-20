@@ -211,6 +211,24 @@ def test_back_button_disabled_during_mode_switch(qapp, monkeypatch):
     assert page.back_button.isEnabled()  # restored once the switch completes
 
 
+# --- exclude_serials: hides an already-configured camera from the picker,
+# so adding a new camera can't accidentally re-select one already in use ---
+
+def test_refresh_devices_excludes_already_configured_serials(qapp):
+    page = DeviceSelectPage()
+    page.refresh_devices(FakeCtx([D585_DUAL, D585_DEDICATED, D435]), exclude_serials={"SN_DEDICATED"})
+
+    serials = [page.combo.itemData(i) for i in range(page.combo.count())]
+    assert serials == ["SN_DUAL", "SN_D435"]
+
+
+def test_refresh_devices_excludes_nothing_by_default(qapp):
+    page = DeviceSelectPage()
+    page.refresh_devices(FakeCtx([D585_DUAL, D435]))
+
+    assert page.combo.count() == 2
+
+
 def test_back_button_reenabled_after_failed_mode_switch(qapp, monkeypatch):
     def _raise(ctx, device, target_mode):
         raise RuntimeError("hardware reset timed out")
