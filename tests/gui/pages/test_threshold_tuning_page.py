@@ -96,6 +96,12 @@ def test_set_context_prefills_both_threshold_fraction_spinboxes_independently(qa
     assert page.stream_b_threshold_fraction_spinbox.value() == 0.6
 
 
+def test_set_context_titles_include_the_devices_serial(qapp):
+    page = _page_with_context(device_serial="SN789", camera_name="Intel RealSense D455")
+    assert page.stream_a_title_label.text() == "D455 [SN789] - Infrared 1"
+    assert page.stream_b_title_label.text() == "D455 [SN789] - Color"
+
+
 def test_set_context_prefills_switch_time_spinbox(qapp):
     page = _page_with_context(switch_time_ms=7)
     assert page.switch_time_spinbox.value() == 7

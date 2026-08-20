@@ -146,6 +146,13 @@ def _short_camera_name(camera_name):
     return parts[-1] if parts else camera_name
 
 
+def _camera_display_name(camera_name, device_serial):
+    # Two connected cameras of the same model (e.g. two D585s) are otherwise
+    # indistinguishable in this title - the serial is what actually tells
+    # them apart on a real multi-camera rig.
+    return "{} [{}]".format(_short_camera_name(camera_name), device_serial)
+
+
 class LiveSessionPage(QWidget):
     back_requested = Signal()
 
@@ -534,9 +541,9 @@ class LiveSessionPage(QWidget):
         self._last_confirmed_switch_time_ms = float(switch_time_ms)
         self.switch_time_spinbox.setValue(float(switch_time_ms))
         self._update_confirm_switch_time_button_state()
-        short_name = _short_camera_name(camera_name)
-        self.stream_a_title_label.setText("{} - {}".format(short_name, stream_a_label))
-        self.stream_b_title_label.setText("{} - {}".format(short_name, stream_b_label))
+        display_name = _camera_display_name(camera_name, device_serial)
+        self.stream_a_title_label.setText("{} - {}".format(display_name, stream_a_label))
+        self.stream_b_title_label.setText("{} - {}".format(display_name, stream_b_label))
 
     def _begin_new_run_output(self, suffix=None):
         # Mints a fresh timestamped output/live_session_<timestamp>[_<config

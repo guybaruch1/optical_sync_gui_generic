@@ -602,7 +602,7 @@ def test_master_change_requested_updates_master(qapp, monkeypatch, tmp_path):
     with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
         window._on_calibration_done()
         window._on_tuning_done()
-    window._cameras["some_other_cam"] = {"label": "other", "config": {}}
+    window._cameras["some_other_cam"] = {"label": "other", "config": {"device_serial": "SN_OTHER"}}
 
     window._on_master_change_requested("some_other_cam")
 
@@ -628,7 +628,7 @@ def test_removing_the_master_promotes_a_remaining_camera(qapp, monkeypatch, tmp_
         window._on_calibration_done()
         window._on_tuning_done()
     master_id = window._master_camera_id
-    window._cameras["some_other_cam"] = {"label": "other", "config": {}}
+    window._cameras["some_other_cam"] = {"label": "other", "config": {"device_serial": "SN_OTHER"}}
 
     window._on_remove_camera_requested(master_id)
 
@@ -1071,6 +1071,27 @@ def test_live_session_back_returns_to_camera_hub(qapp):
     window.live_session_page.back_requested.emit()
 
     assert window.stack.currentWidget() is window.camera_hub_page
+
+
+def test_configured_camera_hub_card_shows_the_devices_serial(qapp, monkeypatch, tmp_path):
+    # Two configured cameras of the same model are otherwise indistinguishable
+    # on the hub - the serial is what actually tells them apart.
+    settings = _full_settings({"Intel RealSense D455": [_ir_vs_rgb_test()]})
+    window = _make_window(qapp, settings)
+    monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [IR1, COLOR0])
+    monkeypatch.setattr(main_window_module, "save_gui_state", lambda state: None)
+    monkeypatch.setattr(window.roi_page, "set_context", lambda *a, **k: None)
+    monkeypatch.setattr(main_window_module, "ensure_output_dir", lambda settings: str(tmp_path))
+    monkeypatch.setattr(
+        main_window_module, "load_led_positions",
+        lambda *a, **k: ({"0": [1.0, 1.0, 300.0, 100.0, 200.0]}, {"0": [2.0, 2.0, 600.0, 200.0, 400.0]}),
+    )
+
+    camera_id = _configure_one_camera(window, "SN123")
+
+    label_text = window.camera_hub_page._cards[camera_id].label_widget.text()
+    assert "SN123" in label_text
+    assert "Intel RealSense D455" in label_text
 
 
 def test_multi_camera_live_session_back_returns_to_camera_hub(qapp):

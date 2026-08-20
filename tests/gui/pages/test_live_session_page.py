@@ -5,7 +5,7 @@ import cv2
 import numpy as np
 from PySide6.QtWidgets import QMessageBox, QScrollArea
 
-from gui.pages.live_session_page import LiveSessionPage, _short_camera_name
+from gui.pages.live_session_page import LiveSessionPage, _short_camera_name, _camera_display_name
 
 
 def test_short_camera_name_returns_model_designator():
@@ -18,6 +18,14 @@ def test_short_camera_name_handles_single_word_input():
 
 def test_short_camera_name_handles_empty_string():
     assert _short_camera_name("") == ""
+
+
+# --- _camera_display_name: same short model name, plus the serial - two
+# identical-model cameras (D585 + D585) are otherwise indistinguishable in
+# every title/card this app shows. ---
+
+def test_camera_display_name_appends_serial_in_brackets():
+    assert _camera_display_name("Intel RealSense D455", "123456789") == "D455 [123456789]"
 
 
 # --- Regression test: on a screen too small to fit two video panels + three
@@ -37,6 +45,13 @@ def test_page_content_lives_inside_a_resizable_scroll_area(qapp):
     # confirms they're actually wrapped inside the scrollable area.
     assert scroll_area.widget() is not None
     assert page.stream_a_panel in scroll_area.widget().findChildren(type(page.stream_a_panel))
+
+
+def test_set_context_titles_include_the_devices_serial(qapp, tmp_path):
+    page = LiveSessionPage()
+    page.set_context(**_minimal_context(tmp_path, device_serial="SN789", camera_name="Intel RealSense D455"))
+    assert page.stream_a_title_label.text() == "D455 [SN789] - Infrared 1"
+    assert page.stream_b_title_label.text() == "D455 [SN789] - Color"
 
 
 def _minimal_context(tmp_path, **overrides):

@@ -132,7 +132,7 @@ def _camera_roles(cameras):
     slave_number = 0
     for camera in cameras:
         camera_id = camera["camera_id"]
-        display = "{} (SN {})".format(camera["label"], camera["config"]["device_serial"])
+        display = "{} [{}]".format(camera["label"], camera["config"]["device_serial"])
         if camera["is_master"]:
             roles[camera_id] = {"tag": "MASTER", "slug": "master", "display": display}
         else:
@@ -291,7 +291,9 @@ class MultiCameraLiveSessionPage(QWidget):
         for camera in cameras:
             panel = CameraLiveSessionPanel(camera["camera_id"])
             config = camera["config"]
-            panel.set_camera_labels(camera["label"], config["stream_a_label"], config["stream_b_label"])
+            panel.set_camera_labels(
+                camera["label"], config["device_serial"], config["stream_a_label"], config["stream_b_label"]
+            )
             tab_label = "{} [{}]".format(camera["label"], roles[camera["camera_id"]]["tag"])
             self.tabs.addTab(panel, tab_label)
             self._panels[camera["camera_id"]] = panel

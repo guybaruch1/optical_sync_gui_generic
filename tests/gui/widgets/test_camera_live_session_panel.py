@@ -21,9 +21,9 @@ def test_panel_content_lives_inside_a_resizable_scroll_area(qapp):
 
 def test_set_camera_labels_sets_panel_titles(qapp):
     panel = CameraLiveSessionPanel("cam1")
-    panel.set_camera_labels("Intel RealSense D455", "Infrared 1", "Color")
-    assert panel.stream_a_title_label.text() == "D455 - Infrared 1"
-    assert panel.stream_b_title_label.text() == "D455 - Color"
+    panel.set_camera_labels("Intel RealSense D455", "SN789", "Infrared 1", "Color")
+    assert panel.stream_a_title_label.text() == "D455 [SN789] - Infrared 1"
+    assert panel.stream_b_title_label.text() == "D455 [SN789] - Color"
 
 
 def _prepared_panel(qapp, tmp_path, **overrides):

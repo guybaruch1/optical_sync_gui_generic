@@ -64,7 +64,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Signal, Qt, QTimer
 
 from gui.widgets.video_panel import VideoPanel
-from gui.pages.live_session_page import _short_camera_name
+from gui.pages.live_session_page import _camera_display_name
 from engine.threshold_preview_thread import ThresholdPreviewThread
 from engine.led_panel import LEDPanel
 from engine.dual_panel_control import start_scanning
@@ -462,9 +462,9 @@ class ThresholdTuningPage(QWidget):
         self._last_applied_switch_time_ms = float(switch_time_ms)
         self.switch_time_spinbox.setValue(float(switch_time_ms))
         self._update_confirm_switch_time_button_state()
-        short_name = _short_camera_name(camera_name)
-        self.stream_a_title_label.setText("{} - {}".format(short_name, stream_a_label))
-        self.stream_b_title_label.setText("{} - {}".format(short_name, stream_b_label))
+        display_name = _camera_display_name(camera_name, device_serial)
+        self.stream_a_title_label.setText("{} - {}".format(display_name, stream_a_label))
+        self.stream_b_title_label.setText("{} - {}".format(display_name, stream_b_label))
         self.status_label.setText("")
 
         self._stream_a_last_detected_count = None

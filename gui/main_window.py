@@ -519,7 +519,11 @@ class MainWindow(QMainWindow):
     def _refresh_camera_hub(self):
         summaries = [
             CameraSummary(
-                camera_id=camera_id, label=camera["label"],
+                camera_id=camera_id,
+                # Two configured cameras of the same model are otherwise
+                # indistinguishable on this page - the serial is what
+                # actually tells them apart on a real multi-camera rig.
+                label="{} [{}]".format(camera["label"], camera["config"]["device_serial"]),
                 is_master=(camera_id == self._master_camera_id), configured=True,
             )
             for camera_id, camera in self._cameras.items()

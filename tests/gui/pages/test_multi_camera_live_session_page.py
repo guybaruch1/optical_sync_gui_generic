@@ -106,9 +106,9 @@ def test_camera_roles_tags_master_and_numbers_slaves_in_order():
 
     roles = _camera_roles(cameras)
 
-    assert roles["cam1"] == {"tag": "MASTER", "slug": "master", "display": "D455 A (SN SN1)"}
-    assert roles["cam2"] == {"tag": "SLAVE 1", "slug": "slave1", "display": "D455 B (SN SN2)"}
-    assert roles["cam3"] == {"tag": "SLAVE 2", "slug": "slave2", "display": "D455 C (SN SN3)"}
+    assert roles["cam1"] == {"tag": "MASTER", "slug": "master", "display": "D455 A [SN1]"}
+    assert roles["cam2"] == {"tag": "SLAVE 1", "slug": "slave1", "display": "D455 B [SN2]"}
+    assert roles["cam3"] == {"tag": "SLAVE 2", "slug": "slave2", "display": "D455 C [SN3]"}
 
 
 def _page_with_fake_threads():
