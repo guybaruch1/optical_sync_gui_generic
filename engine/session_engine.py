@@ -85,7 +85,7 @@ class SessionEngineThread(QThread):
                  test_session, stream_a_xy=None, stream_b_xy=None, neighborhood_size=5,
                  scan_direction=None, switch_time_ms=None,
                  display_stride=10, position_gap_metric=None, dual_panel_config=None,
-                 enable_depth_for_ir_sync=True, capture_global_ts=False,
+                 enable_depth_for_ir_sync=True, capture_global_ts=False, record_recent_frames=False,
                  hardware_reset_before_start=False,
                  hardware_reset_settle_s=8.0, output_dir=None,
                  position_gap_outlier_threshold_ms=None, position_gap_outlier_max_snapshots=200,
@@ -107,6 +107,13 @@ class SessionEngineThread(QThread):
         # ContinuousCapture.__init__'s own capture_global_ts docstring for
         # why single-camera runs never set this.
         self.capture_global_ts = capture_global_ts
+        # Cross-camera-only concept (backs gui/pages/multi_camera_live_session_page.py's
+        # debug-image feature) - single-camera LiveSessionPage runs never
+        # set this, since nothing there ever reads the buffer; recording
+        # every frame pair unconditionally would cost real memory (~110MB
+        # per camera at this project's typical 1280x720 y8+bgr8 geometry)
+        # for a buffer nothing uses.
+        self.record_recent_frames = record_recent_frames
         self.hardware_reset_before_start = hardware_reset_before_start
         self.hardware_reset_settle_s = hardware_reset_settle_s
         self.stream_a_xy = stream_a_xy
@@ -215,6 +222,8 @@ class SessionEngineThread(QThread):
         self._position_gap_outlier_count += 1
 
     def _record_recent_frame(self, pair_index, stream_a_image, stream_b_image):
+        if not self.record_recent_frames:
+            return
         with self._recent_frames_lock:
             self._recent_frames.append((pair_index, stream_a_image, stream_b_image))
 

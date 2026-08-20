@@ -1,5 +1,6 @@
 from unittest.mock import MagicMock
 
+import cv2
 import numpy as np
 import pyrealsense2 as rs
 import pytest
@@ -587,8 +588,12 @@ def test_cross_debug_image_counts_registered_per_slave_identity(qapp, tmp_path):
 
     page.set_cameras(object(), _two_cameras(tmp_path))
 
-    assert page._cross_debug_image_counts[("cam2", "infrared1")] == {"periodic_count": 0, "outlier_count": 0}
-    assert page._cross_debug_image_counts[("cam2", "color")] == {"periodic_count": 0, "outlier_count": 0}
+    assert page._cross_debug_image_counts[("cam2", "infrared1")] == {
+        "periodic_count": 0, "outlier_count": 0, "seen_count": 0,
+    }
+    assert page._cross_debug_image_counts[("cam2", "color")] == {
+        "periodic_count": 0, "outlier_count": 0, "seen_count": 0,
+    }
 
 
 def test_outlier_cross_row_saves_a_debug_image_with_the_actual_matched_frames(qapp, tmp_path):
@@ -623,6 +628,25 @@ def test_outlier_cross_row_saves_a_debug_image_with_the_actual_matched_frames(qa
     assert len(saved) == 1
     assert "slave1" in saved[0].name
     assert "infrared1" in saved[0].name
+
+    # Confirms the saved image actually contains the two cameras' real
+    # matched frames, not just correct bookkeeping around it.
+    # combine_side_by_side puts the master (playing "Stream A") on the
+    # left and the slave (playing "Stream B") on the right, separated by
+    # its own default gap_px=10 gap column - each side here is only this
+    # fixture's own 4px-wide fake frame, so the slave's own pixels are
+    # exactly the last 4 columns, not a literal image-width bisection.
+    # The triggering identity is "infrared1", which for both cameras'
+    # identical stream_a=infrared1 pick maps to each side's own stream_a
+    # frame - i.e. master's infrared fill (10) on the left, slave's
+    # infrared fill (30) on the right (verified directly against the real
+    # saved-image pixel content below, not assumed - the slave's OTHER
+    # frame, its color-stream fill of 40, is not what this identity's
+    # debug image shows).
+    combined = cv2.imread(str(saved[0]))
+    right_half = combined[:, -4:]
+    assert (right_half == 30).all()
+    assert not (right_half == 10).any()
 
 
 def test_periodic_cross_row_saves_a_debug_image_every_nth_pair_per_spec(qapp, tmp_path):
@@ -676,8 +700,10 @@ def test_no_debug_image_saved_when_the_matched_frame_has_aged_out_of_the_buffer(
         "stream_a_frame_drop": False, "stream_b_frame_drop": False,
     })
 
-    saved = list(tmp_path.glob("**/cross_camera_periodic_*.png"))
-    assert saved == []
+    periodic_saved = list(tmp_path.glob("**/cross_camera_periodic_*.png"))
+    outlier_saved = list(tmp_path.glob("**/cross_camera_optical_sync_outlier_*.png"))
+    assert periodic_saved == []
+    assert outlier_saved == []
 
 
 def test_periodic_debug_images_stop_once_max_snapshots_reached_per_spec(qapp, tmp_path):
@@ -715,6 +741,46 @@ def test_periodic_debug_images_stop_once_max_snapshots_reached_per_spec(qapp, tm
     assert len(saved) == 1
 
 
+def test_periodic_trigger_uses_a_per_spec_counter_not_the_shared_pair_index(qapp, tmp_path):
+    # Regression test for a real bug: triggering off CrossCameraReconciler's
+    # shared pair_index counter (rather than a per-spec counter) meant only
+    # ONE of several shared identities would ever hit a multiple of
+    # snapshot_every_n_pairs, forever starving the others. This drives the
+    # REAL default (20), not the artificially-easy every_n=1 the other
+    # periodic tests use, and asserts BOTH shared identities ("infrared1"
+    # and "color") get their own periodic image within 20 matched pairs.
+    page, fake_threads = _page_with_fake_threads()
+    cameras = _two_cameras(tmp_path)
+    # snapshot_every_n_pairs left at _camera_config's own default (20).
+    page.set_cameras(object(), cameras)
+    page.start_all_sessions()
+
+    master_thread = fake_threads["SN1"]
+    slave_thread = fake_threads["SN2"]
+    for pair in range(1, 21):
+        master_thread.set_recent_frame_pair(
+            pair, np.zeros((4, 4), dtype=np.uint8), np.zeros((4, 4, 3), dtype=np.uint8)
+        )
+        slave_thread.set_recent_frame_pair(
+            pair, np.zeros((4, 4), dtype=np.uint8), np.zeros((4, 4, 3), dtype=np.uint8)
+        )
+        master_thread.row_ready.emit({
+            "pair_index": pair, "stream_a_ts_us": 1_000_000.0 + pair, "stream_b_ts_us": 1_000_000.0 + pair,
+            "stream_a_global_ts_us": 1_000_000.0 + pair, "stream_b_global_ts_us": 1_000_000.0 + pair,
+            "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+        })
+        slave_thread.row_ready.emit({
+            "pair_index": pair, "stream_a_ts_us": 1_000_010.0 + pair, "stream_b_ts_us": 1_000_010.0 + pair,
+            "stream_a_global_ts_us": 1_000_010.0 + pair, "stream_b_global_ts_us": 1_000_010.0 + pair,
+            "stream_a_frame_drop": False, "stream_b_frame_drop": False,
+        })
+
+    infrared_saved = list(tmp_path.glob("**/cross_camera_periodic_slave1_infrared1_*.png"))
+    color_saved = list(tmp_path.glob("**/cross_camera_periodic_slave1_color_*.png"))
+    assert len(infrared_saved) == 1
+    assert len(color_saved) == 1
+
+
 def test_reset_cross_run_state_resets_debug_image_counters_on_a_second_run(qapp, tmp_path):
     page, fake_threads = _page_with_fake_threads()
     cameras = _two_cameras(tmp_path)
@@ -724,6 +790,7 @@ def test_reset_cross_run_state_resets_debug_image_counters_on_a_second_run(qapp,
     key = ("cam2", "infrared1")
     page._cross_debug_image_counts[key]["periodic_count"] = 5
     page._cross_debug_image_counts[key]["outlier_count"] = 3
+    page._cross_debug_image_counts[key]["seen_count"] = 7
 
     fake_threads["SN1"].session_finished.emit([])
     fake_threads["SN1"].finished.emit()
@@ -732,7 +799,9 @@ def test_reset_cross_run_state_resets_debug_image_counters_on_a_second_run(qapp,
 
     page.start_all_sessions()
 
-    assert page._cross_debug_image_counts[key] == {"periodic_count": 0, "outlier_count": 0}
+    assert page._cross_debug_image_counts[key] == {
+        "periodic_count": 0, "outlier_count": 0, "seen_count": 0,
+    }
 
 
 def test_cross_camera_tab_is_first(qapp, tmp_path):

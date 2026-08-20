@@ -187,6 +187,12 @@ gets its own line:
   state; `_reset_cross_run_state` clears the new counters and any
   previous run's debug-image files from `self._run_dir` (mirroring
   `_clear_periodic_snapshots`'s own glob-and-delete pattern).
+  **Correction (implementation time):** the file-clearing half of this
+  never got implemented, on purpose - `self._run_dir` is built fresh via
+  `domain.run_output.create_run_dir` on every single `start_all_sessions()`
+  call, so there is never anything stale inside it to delete; only the
+  in-memory counters actually need resetting. See the plan document's own
+  "Note on `_reset_cross_run_state`" for the full reasoning.
 - No changes: `engine/multi_camera_session.py` (its existing public
   `threads` property already provides everything needed - see Section 2),
   `domain/plot_export.py`, `domain/csv_export.py`, intra-camera debug
@@ -218,3 +224,9 @@ gets its own line:
   file written, no exception; per-spec periodic/outlier caps are
   respected; `_reset_cross_run_state` clears stale files from a previous
   run in the same page visit.
+  **Correction (implementation time):** there is no test for
+  `_reset_cross_run_state` clearing stale files, because it doesn't do
+  that - `self._run_dir` is fresh every run, so there are never stale
+  files to clear (see the Critical files section's own correction note
+  above). The implemented test for this method instead only covers the
+  in-memory counter reset.

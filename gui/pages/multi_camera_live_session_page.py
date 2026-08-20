@@ -237,9 +237,15 @@ class MultiCameraLiveSessionPage(QWidget):
         # tick.
         self._cross_running_stats = {}
         # (slave_camera_id, stream_identity) -> {"periodic_count": int,
-        # "outlier_count": int} - independent per-spec caps for
-        # _maybe_save_cross_camera_debug_image, mirroring
-        # self._cross_running_stats' own per-spec independence.
+        # "outlier_count": int, "seen_count": int} - independent per-spec
+        # caps for _maybe_save_cross_camera_debug_image, mirroring
+        # self._cross_running_stats' own per-spec independence. seen_count
+        # is what the periodic trigger's modulo actually runs against (see
+        # that method) - CrossCameraReconciler's own shared pair_index
+        # counter can't be used for this, since it's shared across every
+        # spec: with 2+ shared identities, only whichever spec happens to
+        # land on a multiple of every_n would ever get a periodic image,
+        # the rest starved forever.
         self._cross_debug_image_counts = {}
 
         self.status_label = QLabel("")
@@ -293,6 +299,7 @@ class MultiCameraLiveSessionPage(QWidget):
         self._cross_pair_series_keys = {}
         self._slave_sections = {}
         self._cross_running_stats = {}
+        self._cross_debug_image_counts = {}
 
         self._cross_tab_layout.addWidget(QLabel("Cross-Camera Sync (master vs. each slave)"))
 
@@ -423,7 +430,7 @@ class MultiCameraLiveSessionPage(QWidget):
             self._cross_running_stats[(slave_camera_id, identity, "global_ts_gap_us")] = RunningStats()
             self._cross_running_stats[(slave_camera_id, identity, "position_gap_ms")] = RunningStats()
             self._cross_debug_image_counts[(slave_camera_id, identity)] = {
-                "periodic_count": 0, "outlier_count": 0,
+                "periodic_count": 0, "outlier_count": 0, "seen_count": 0,
             }
 
         self._slave_sections[slave_camera_id] = {
@@ -464,7 +471,7 @@ class MultiCameraLiveSessionPage(QWidget):
         for key in self._cross_running_stats:
             self._cross_running_stats[key] = RunningStats()
         for key in self._cross_debug_image_counts:
-            self._cross_debug_image_counts[key] = {"periodic_count": 0, "outlier_count": 0}
+            self._cross_debug_image_counts[key] = {"periodic_count": 0, "outlier_count": 0, "seen_count": 0}
 
     def start_all_sessions(self):
         if not self._cameras:
@@ -539,6 +546,12 @@ class MultiCameraLiveSessionPage(QWidget):
                 # setting's own comment for why a rig might turn it off.
                 # LiveSessionPage's own start_session() never sets this at all.
                 capture_global_ts=config["capture_global_ts"],
+                # Backs _maybe_save_cross_camera_debug_image's frame lookup -
+                # this page's own cameras always number >= 2, so always
+                # record (unlike capture_global_ts, this isn't settings-
+                # driven since it costs memory, not a hardware requirement
+                # an operator might need to disable).
+                record_recent_frames=True,
             )
 
             camera_specs.append(CameraSessionSpec(
@@ -692,13 +705,28 @@ class MultiCameraLiveSessionPage(QWidget):
         if master_config is None:
             return
 
+        # position_gap_outlier_max_snapshots/max_snapshots below are read
+        # from the MASTER's config but applied independently PER (slave,
+        # identity) spec (counts is this spec's own dict) - a rig with
+        # several slaves and/or shared identities can therefore produce a
+        # MULTIPLE of the configured cap in total output files across the
+        # whole run, not a single run-wide cap. Not a bug, just worth
+        # knowing for disk-space planning.
         is_outlier = (
             is_position_gap_debug_outlier(cross_row, master_config["position_gap_outlier_threshold_ms"])
             and counts["outlier_count"] < master_config["position_gap_outlier_max_snapshots"]
         )
+        # Triggered off this spec's OWN seen_count, not CrossCameraReconciler's
+        # shared cross_row["pair_index"] counter - that counter increments
+        # once per cross-row across EVERY spec, so with 2+ shared identities
+        # only whichever spec happens to land on a multiple of every_n would
+        # ever get a periodic image, starving the rest forever (a real bug,
+        # confirmed at this project's real default of every_n=20 with 2
+        # shared identities - see this file's own regression test).
+        counts["seen_count"] += 1
         every_n = master_config["snapshot_every_n_pairs"]
         is_periodic = (
-            every_n > 0 and cross_row["pair_index"] % every_n == 0
+            every_n > 0 and counts["seen_count"] % every_n == 0
             and counts["periodic_count"] < master_config["max_snapshots"]
         )
         if not is_outlier and not is_periodic:

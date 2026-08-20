@@ -422,7 +422,7 @@ def test_draw_bundle_overlay_does_not_mutate_bgr_input():
 
 
 def test_draw_cross_camera_debug_overlay_converts_grayscale_and_draws_text():
-    image = np.zeros((100, 300), dtype=np.uint8)
+    image = np.zeros((200, 400), dtype=np.uint8)
 
     result = draw_cross_camera_debug_overlay(
         image, cross_pair_index=42, master_pair_index=100, slave_pair_index=98,
@@ -431,9 +431,14 @@ def test_draw_cross_camera_debug_overlay_converts_grayscale_and_draws_text():
         pairing_gap_us=-5.0, global_ts_gap_us=-12.0, position_gap_ms=1.5,
     )
 
-    assert result.shape == (100, 300, 3)  # grayscale input converted to BGR for drawing
+    assert result.shape == (200, 400, 3)  # grayscale input converted to BGR for drawing
     assert result is not image  # never mutates the caller's array
-    assert (result > 0).any()  # some text pixels were actually drawn
+    # All 7 lines actually drew, not just one - each line's own 25px band
+    # (y=25, 50, 75, ..., 175) has at least one non-zero pixel.
+    for line_number in range(1, 8):
+        y = line_number * 25
+        band = result[max(0, y - 15):y + 5, :]
+        assert (band > 0).any(), "line {} did not draw any pixels".format(line_number)
 
 
 def test_draw_cross_camera_debug_overlay_does_not_mutate_bgr_input():

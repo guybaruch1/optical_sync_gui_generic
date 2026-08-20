@@ -13,6 +13,7 @@ from engine.session_engine import SessionEngineThread, _RECENT_FRAMES_MAXLEN
 def _make_thread(qapp):
     return SessionEngineThread(
         ctx=None, device_serial="SN1", pick_a={}, pick_b={}, camera_controls={}, test_session=None,
+        record_recent_frames=True,
     )
 
 
@@ -51,3 +52,28 @@ def test_recent_frame_buffer_evicts_oldest_past_its_maxlen(qapp):
     assert thread.get_recent_frame_pair(5) == ("a5", "b5")
     last_index = _RECENT_FRAMES_MAXLEN + 4
     assert thread.get_recent_frame_pair(last_index) == ("a{}".format(last_index), "b{}".format(last_index))
+
+
+def test_record_recent_frame_is_a_noop_when_not_enabled(qapp):
+    thread = SessionEngineThread(
+        ctx=None, device_serial="SN1", pick_a={}, pick_b={}, camera_controls={}, test_session=None,
+    )  # record_recent_frames defaults to False
+    thread._record_recent_frame(1, "a1", "b1")
+    assert thread.get_recent_frame_pair(1) is None
+
+
+def test_recent_frames_maxlen_matches_or_exceeds_the_reconcilers_own_buffer_depth():
+    # Documented invariant (see _RECENT_FRAMES_MAXLEN's own comment): the
+    # ring buffer must stay at least as deep as CrossCameraReconciler's own
+    # row-buffer window, or a genuine match could find its row still
+    # buffered but its image already evicted. Recomputes the reconciler's
+    # own default formula directly via inspect.signature (fps_hint *
+    # buffer_seconds) rather than hardcoding "30" a second time, so a
+    # future change to either constructor's defaults is caught here
+    # instead of silently drifting apart.
+    import inspect
+    from engine.cross_camera_reconciler import CrossCameraReconciler
+
+    params = inspect.signature(CrossCameraReconciler.__init__).parameters
+    reconciler_buffer_len = max(1, int(params["fps_hint"].default * params["buffer_seconds"].default))
+    assert _RECENT_FRAMES_MAXLEN >= reconciler_buffer_len
