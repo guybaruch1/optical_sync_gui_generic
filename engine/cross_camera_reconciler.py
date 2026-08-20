@@ -329,6 +329,8 @@ class CrossCameraReconciler:
             "slave_pair_index": slave_row.get("pair_index"),
             "master_ts_us": master_hw_ts,  # RAW, unadjusted - for CSV/debugging transparency
             "slave_ts_us": slave_hw_ts,    # RAW, unadjusted
+            "master_global_ts_us": master_global_ts,  # RAW, unadjusted
+            "slave_global_ts_us": slave_global_ts,    # RAW, unadjusted
             "pairing_gap_us": hw_result.value,
             "pairing_gap_us_excluded": hw_result.excluded,
             "pairing_gap_us_exclude_reason": hw_result.exclude_reason,

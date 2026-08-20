@@ -119,6 +119,17 @@ def test_master_row_then_slave_row_produces_a_matched_cross_row():
     assert row["global_ts_gap_us_excluded"] is False
 
 
+def test_cross_row_carries_the_raw_global_timestamps_too():
+    spec = _spec()
+    reconciler = CrossCameraReconciler([spec])
+
+    reconciler.ingest_row("cam1", _row(10, 1_000_000.0, global_ts_us=2_000_000.0))
+    cross_rows = reconciler.ingest_row("cam2", _row(20, 1_000_050.0, global_ts_us=2_000_060.0))
+
+    assert cross_rows[0]["master_global_ts_us"] == 2_000_000.0
+    assert cross_rows[0]["slave_global_ts_us"] == 2_000_060.0
+
+
 def test_slave_row_then_master_row_produces_the_same_matched_cross_row():
     # Order must not matter - the two cameras' AcquisitionLoops run on
     # independent threads at independent cadences, either side's row can
