@@ -625,9 +625,14 @@ class MultiCameraLiveSessionPage(QWidget):
             # stop_all() only requests each thread stop (non-blocking) - wait
             # for every one to actually finish (hardware cleanup included)
             # before leaving, same reasoning as LiveSessionPage's own wait.
+            # Disabled for the same cheap, consistent insurance reasoning as
+            # that page's own equivalent span (fully blocks the event loop,
+            # so this isn't a real reentrancy fix).
+            self.back_button.setEnabled(False)
             if self._controller is not None:
                 for thread in self._controller.threads.values():
                     thread.wait()
+            self.back_button.setEnabled(True)
         self.back_requested.emit()
 
     def _on_switch_time_spinbox_changed(self, value):

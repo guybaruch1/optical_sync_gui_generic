@@ -515,6 +515,28 @@ def test_back_button_confirms_before_stopping_a_running_session(qapp, tmp_path, 
     assert emitted == [True]
 
 
+def test_back_button_disabled_while_waiting_for_the_engine_thread_to_stop(qapp, tmp_path, monkeypatch):
+    # engine_thread.wait() fully blocks the event loop (no processEvents()
+    # runs during it), so this is defensive insurance rather than a real
+    # reentrancy fix - but the same insurance already exists on every other
+    # page's own blocking span (ROI Select, Calibration), so this page
+    # shouldn't be the one exception.
+    page = LiveSessionPage()
+    page.set_context(**_minimal_context(tmp_path))
+    with patch("gui.pages.live_session_page.SessionEngineThread", _FakeEngineThread):
+        page.start_session()
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.Yes))
+    observed_enabled_during_wait = []
+    page.engine_thread.wait = MagicMock(
+        side_effect=lambda: observed_enabled_during_wait.append(page.back_button.isEnabled())
+    )
+
+    page.back_button.click()
+
+    assert observed_enabled_during_wait == [False]
+    assert page.back_button.isEnabled()
+
+
 def test_back_button_declining_confirmation_leaves_session_running(qapp, tmp_path, monkeypatch):
     page = LiveSessionPage()
     page.set_context(**_minimal_context(tmp_path))

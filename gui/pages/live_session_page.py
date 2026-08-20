@@ -701,9 +701,15 @@ class LiveSessionPage(QWidget):
             # inside run()'s try block, before its finally block has actually
             # torn down the camera/LED panel) - block here the same way
             # start_session()'s own defensive wait does, so hardware is
-            # genuinely free before this page is left.
+            # genuinely free before this page is left. wait() fully blocks
+            # the event loop, so back_button can't really be re-clicked
+            # during it - disabled anyway as the same cheap, consistent
+            # insurance ROI Select/Calibration already apply to their own
+            # blocking spans.
+            self.back_button.setEnabled(False)
             if self.engine_thread is not None:
                 self.engine_thread.wait()
+            self.back_button.setEnabled(True)
         self.back_requested.emit()
 
     def _on_switch_time_spinbox_changed(self, value):

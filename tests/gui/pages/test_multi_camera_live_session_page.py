@@ -1151,6 +1151,27 @@ def test_back_button_confirms_before_stopping_all_running_sessions(qapp, tmp_pat
     assert emitted == [True]
 
 
+def test_back_button_disabled_while_waiting_for_threads_to_stop(qapp, tmp_path, monkeypatch):
+    # Same defensive insurance as LiveSessionPage's own equivalent test -
+    # wait() fully blocks the event loop, so this isn't a real reentrancy
+    # fix, just consistency with ROI Select/Calibration's own blocking spans.
+    page, fake_threads = _page_with_fake_threads()
+    page.set_cameras(object(), _two_cameras(tmp_path))
+    page.start_all_sessions()
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.Yes))
+    observed_enabled_during_wait = []
+    for thread in fake_threads.values():
+        thread.request_stop = MagicMock()
+        thread.wait = MagicMock(
+            side_effect=lambda: observed_enabled_during_wait.append(page.back_button.isEnabled())
+        )
+
+    page.back_button.click()
+
+    assert observed_enabled_during_wait == [False] * len(fake_threads)
+    assert page.back_button.isEnabled()
+
+
 def test_back_button_declining_confirmation_leaves_sessions_running(qapp, tmp_path, monkeypatch):
     page, fake_threads = _page_with_fake_threads()
     page.set_cameras(object(), _two_cameras(tmp_path))
