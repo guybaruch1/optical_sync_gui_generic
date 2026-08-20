@@ -10,6 +10,7 @@ from domain.realsense_utils import (
     save_debug_detection_image,
     draw_detected_centroids,
     draw_bundle_overlay,
+    draw_cross_camera_debug_overlay,
     draw_led_state_overlay,
     combine_side_by_side,
     decode_frame,
@@ -418,6 +419,48 @@ def test_draw_bundle_overlay_does_not_mutate_bgr_input():
 
     assert (image == 0).all()  # original untouched
     assert (result > 0).any()  # the copy has the drawn text
+
+
+def test_draw_cross_camera_debug_overlay_converts_grayscale_and_draws_text():
+    image = np.zeros((100, 300), dtype=np.uint8)
+
+    result = draw_cross_camera_debug_overlay(
+        image, cross_pair_index=42, master_pair_index=100, slave_pair_index=98,
+        master_ts_us=1_000_000.0, slave_ts_us=1_000_010.0,
+        master_global_ts_us=2_000_000.0, slave_global_ts_us=2_000_012.0,
+        pairing_gap_us=-5.0, global_ts_gap_us=-12.0, position_gap_ms=1.5,
+    )
+
+    assert result.shape == (100, 300, 3)  # grayscale input converted to BGR for drawing
+    assert result is not image  # never mutates the caller's array
+    assert (result > 0).any()  # some text pixels were actually drawn
+
+
+def test_draw_cross_camera_debug_overlay_does_not_mutate_bgr_input():
+    image = np.zeros((100, 300, 3), dtype=np.uint8)
+
+    result = draw_cross_camera_debug_overlay(
+        image, cross_pair_index=0, master_pair_index=0, slave_pair_index=0,
+        master_ts_us=0.0, slave_ts_us=0.0, master_global_ts_us=0.0, slave_global_ts_us=0.0,
+        pairing_gap_us=0.0, global_ts_gap_us=0.0, position_gap_ms=0.0,
+    )
+
+    assert (image == 0).all()  # original untouched
+    assert (result > 0).any()  # the copy has the drawn text
+
+
+def test_draw_cross_camera_debug_overlay_handles_none_position_gap():
+    image = np.zeros((50, 200), dtype=np.uint8)
+
+    # Must not raise when Optical Sync is a "miss" (position_gap_ms=None) -
+    # a real, common case (no clear on-LED detected that frame).
+    result = draw_cross_camera_debug_overlay(
+        image, cross_pair_index=1, master_pair_index=1, slave_pair_index=1,
+        master_ts_us=0.0, slave_ts_us=0.0, master_global_ts_us=0.0, slave_global_ts_us=0.0,
+        pairing_gap_us=0.0, global_ts_gap_us=0.0, position_gap_ms=None,
+    )
+
+    assert result.shape == (50, 200, 3)
 
 
 def test_decode_frame_y8_reshapes_correctly():
