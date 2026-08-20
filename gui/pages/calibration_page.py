@@ -60,6 +60,7 @@ from gui.pages.roi_select_page import stream_label, _apply_camera_controls
 
 class CalibrationPage(QWidget):
     calibration_done = Signal()
+    back_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -70,6 +71,9 @@ class CalibrationPage(QWidget):
         self.run_button = QPushButton("Run Calibration")
         self.run_button.clicked.connect(self._on_run_clicked)
         layout.addWidget(self.run_button)
+        self.back_button = QPushButton("Back")
+        self.back_button.clicked.connect(self.back_requested.emit)
+        layout.addWidget(self.back_button)
         self._pending_args = None
         # None until a run completes successfully - read by MainWindow to
         # thread the already-captured on/off frames (plus the Otsu threshold
@@ -112,12 +116,18 @@ class CalibrationPage(QWidget):
         if self._pending_args is None:
             return
         self.run_button.setEnabled(False)
+        # _run_calibration pumps processEvents() via _log() while it runs,
+        # so Back is genuinely clickable mid-run unless disabled here too -
+        # there's no clean way to cancel a run partway through, so this just
+        # prevents leaving mid-run rather than attempting that.
+        self.back_button.setEnabled(False)
         try:
             self._run_calibration(**self._pending_args)
         except Exception as exc:
             self._log("Calibration failed: {}".format(exc))
         finally:
             self.run_button.setEnabled(True)
+            self.back_button.setEnabled(True)
 
     def _run_calibration(self, ctx, device_serial, pick_a, pick_b, camera_controls, stream_a_roi, stream_b_roi,
                           config_path, camera_name, output_dir, settle_frames,

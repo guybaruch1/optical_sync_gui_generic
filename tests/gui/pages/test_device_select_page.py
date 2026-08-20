@@ -173,3 +173,53 @@ def test_dual_panel_checkbox_stays_checked_across_device_refresh(qapp):
     page.dual_panel_checkbox.setChecked(True)
     page.refresh_devices(FakeCtx([D435]))
     assert page.dual_panel_checkbox.isChecked()
+
+
+# --- Back button: Device Select is the first page of a camera's sub-flow -
+# nothing running here to stop, so Back just emits back_requested (MainWindow
+# routes it to the Camera Hub) ---
+
+def test_back_button_emits_back_requested(qapp):
+    page = DeviceSelectPage()
+    emitted = []
+    page.back_requested.connect(lambda: emitted.append(True))
+
+    page.back_button.click()
+
+    assert emitted == [True]
+
+
+def test_back_button_disabled_during_mode_switch(qapp, monkeypatch):
+    # _on_next_clicked's mode-switch branch pumps processEvents() while
+    # ensure_mode() runs, so Back must be disabled for that span the same
+    # way next_button/combo/mode_group_box already are - otherwise it could
+    # be clicked reentrantly mid-switch.
+    page = DeviceSelectPage()
+    page.refresh_devices(FakeCtx([D585_DUAL]))
+    page.dedicated_radio.setChecked(True)  # differs from current mode -> triggers a switch
+
+    observed_enabled_during_switch = []
+
+    def _ensure_mode(ctx, device, target_mode):
+        observed_enabled_during_switch.append(page.back_button.isEnabled())
+
+    monkeypatch.setattr(device_select_page_module, "ensure_mode", _ensure_mode)
+
+    page._on_next_clicked()
+
+    assert observed_enabled_during_switch == [False]
+    assert page.back_button.isEnabled()  # restored once the switch completes
+
+
+def test_back_button_reenabled_after_failed_mode_switch(qapp, monkeypatch):
+    def _raise(ctx, device, target_mode):
+        raise RuntimeError("hardware reset timed out")
+
+    monkeypatch.setattr(device_select_page_module, "ensure_mode", _raise)
+    page = DeviceSelectPage()
+    page.refresh_devices(FakeCtx([D585_DUAL]))
+    page.dedicated_radio.setChecked(True)
+
+    page._on_next_clicked()
+
+    assert page.back_button.isEnabled()

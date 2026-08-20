@@ -80,6 +80,7 @@ def _sensor_option_label(option):
 
 class StreamConfigPage(QWidget):
     config_chosen = Signal(tuple)
+    back_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -124,9 +125,14 @@ class StreamConfigPage(QWidget):
         self.status_label = QLabel("")
         layout.addWidget(self.status_label)
 
+        nav_row = QHBoxLayout()
+        self.back_button = QPushButton("Back")
+        self.back_button.clicked.connect(self._on_back_clicked)
+        nav_row.addWidget(self.back_button)
         self.next_button = QPushButton("Next")
         self.next_button.clicked.connect(self._on_next_clicked)
-        layout.addWidget(self.next_button)
+        nav_row.addWidget(self.next_button)
+        layout.addLayout(nav_row)
 
     @property
     def pick_a(self):
@@ -385,6 +391,13 @@ class StreamConfigPage(QWidget):
     def _on_preview_error(self, message):
         self.status_label.setText("Error: {}".format(message))
         self._stop_preview()
+
+    def _on_back_clicked(self):
+        # Same silent auto-stop precedent _on_next_clicked already uses - a
+        # pairing-quality preview has no work to lose, so Back doesn't need
+        # to ask before stopping it, only before leaving with it still open.
+        self._stop_preview()
+        self.back_requested.emit()
 
     def _on_next_clicked(self):
         pick_a = self.pick_a

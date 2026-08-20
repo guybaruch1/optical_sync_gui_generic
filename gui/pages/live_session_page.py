@@ -82,11 +82,11 @@ import glob
 import os
 
 import cv2
-from PySide6.QtCore import Qt, QSize, QRectF
+from PySide6.QtCore import Qt, QSize, QRectF, Signal
 from PySide6.QtGui import QIcon, QPixmap, QPainter, QPen, QColor
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QSpinBox, QDoubleSpinBox, QLabel, QCheckBox, QFrame,
-    QApplication, QScrollArea,
+    QApplication, QScrollArea, QMessageBox,
 )
 
 from gui.widgets.video_panel import VideoPanel
@@ -147,6 +147,8 @@ def _short_camera_name(camera_name):
 
 
 class LiveSessionPage(QWidget):
+    back_requested = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.engine_thread = None
@@ -301,6 +303,9 @@ class LiveSessionPage(QWidget):
         )
         control_row = QHBoxLayout(toolbar_frame)
         control_row.setContentsMargins(10, 8, 10, 8)
+        self.back_button = QPushButton("Back")
+        self.back_button.clicked.connect(self._on_back_clicked)
+        control_row.addWidget(self.back_button)
         control_row.addWidget(QLabel("Duration (s, 0 = manual stop):"))
         self.duration_spinbox = QSpinBox()
         self.duration_spinbox.setRange(0, 3600)
@@ -676,6 +681,30 @@ class LiveSessionPage(QWidget):
     def stop_session(self):
         if self.engine_thread is not None:
             self.engine_thread.request_stop()
+
+    def _on_back_clicked(self):
+        # Unlike a preview (Stream Config/Threshold Tuning), an active live
+        # session is a deliberate, real timed test - interrupting it isn't
+        # obviously reversible the way stopping a preview is, so this asks
+        # first rather than silently stopping it the way those pages' own
+        # Back does.
+        if self._session_running:
+            answer = QMessageBox.question(
+                self, "Live session running",
+                "A live session is currently running. Going back will stop it now. Continue?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
+            self.stop_session()
+            # request_stop() is non-blocking (session_finished/error fire
+            # inside run()'s try block, before its finally block has actually
+            # torn down the camera/LED panel) - block here the same way
+            # start_session()'s own defensive wait does, so hardware is
+            # genuinely free before this page is left.
+            if self.engine_thread is not None:
+                self.engine_thread.wait()
+        self.back_requested.emit()
 
     def _on_switch_time_spinbox_changed(self, value):
         # No hardware call here - typing into the box only updates the GATE

@@ -1,3 +1,5 @@
+from unittest.mock import MagicMock
+
 import pyrealsense2 as rs
 
 from gui.pages.stream_config_page import StreamConfigPage, _sensor_option_label
@@ -276,3 +278,33 @@ def test_on_start_preview_clicked_does_not_start_preview_when_test_picks_are_the
     assert constructed == []
     assert page.preview_thread is None
     assert "same physical stream" in page.status_label.text()
+
+
+# --- Back button: mirrors Next's own silent auto-stop-preview precedent -
+# no confirmation, since a pairing-quality preview has no work to lose ---
+
+def test_back_button_emits_back_requested(qapp):
+    page = StreamConfigPage()
+    page.populate(ctx=None, device_serial="123", tests=_tests(("IR1 vs IR2 sync", [(IR1, IR2)])))
+    emitted = []
+    page.back_requested.connect(lambda: emitted.append(True))
+
+    page.back_button.click()
+
+    assert emitted == [True]
+
+
+def test_back_button_stops_a_running_preview_first(qapp, monkeypatch):
+    page = StreamConfigPage()
+    page.populate(ctx=None, device_serial="123", tests=_tests(("IR1 vs IR2 sync", [(IR1, IR2)])))
+    fake_thread = MagicMock()
+    page.preview_thread = fake_thread
+
+    emitted = []
+    page.back_requested.connect(lambda: emitted.append(True))
+    page.back_button.click()
+
+    fake_thread.request_stop.assert_called_once()
+    fake_thread.wait.assert_called_once()
+    assert page.preview_thread is None
+    assert emitted == [True]  # still navigates away, same as Next does

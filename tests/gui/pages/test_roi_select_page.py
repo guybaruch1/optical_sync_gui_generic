@@ -1,6 +1,7 @@
 import pyrealsense2 as rs
 
-from gui.pages.roi_select_page import _apply_camera_controls, stream_label
+import gui.pages.roi_select_page as roi_select_page_module
+from gui.pages.roi_select_page import RoiSelectPage, _apply_camera_controls, stream_label
 
 
 class FakeOptionRange:
@@ -209,3 +210,35 @@ def test_apply_camera_controls_shared_sensor_gets_stream_as_exposure():
     )
 
     assert shared_sensor.set_options[rs.option.exposure] == 1111
+
+
+# --- Back button: capture is a real blocking call (no processEvents), so
+# nothing can run concurrently with it - Back is disabled for its span
+# defensively, same as capture_button, then re-enabled either way ---
+
+def test_back_button_emits_back_requested(qapp):
+    page = RoiSelectPage()
+    emitted = []
+    page.back_requested.connect(lambda: emitted.append(True))
+
+    page.back_button.click()
+
+    assert emitted == [True]
+
+
+def test_back_button_disabled_during_capture(qapp, monkeypatch):
+    page = RoiSelectPage()
+    page.set_context(ctx=None, device_serial="123", pick_a={}, pick_b={}, camera_controls={})
+
+    observed_enabled_during_capture = []
+
+    def _find_device_by_serial(ctx, serial):
+        observed_enabled_during_capture.append(page.back_button.isEnabled())
+        raise RuntimeError("stop here - only care about mid-call state")
+
+    monkeypatch.setattr(roi_select_page_module, "find_device_by_serial", _find_device_by_serial)
+
+    page._on_capture_clicked()
+
+    assert observed_enabled_during_capture == [False]
+    assert page.back_button.isEnabled()  # restored afterward, even on failure

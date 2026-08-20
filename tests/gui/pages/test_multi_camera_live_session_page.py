@@ -5,6 +5,7 @@ import numpy as np
 import pyrealsense2 as rs
 import pytest
 from PySide6.QtCore import QObject, Signal
+from PySide6.QtWidgets import QMessageBox
 
 from gui.pages.multi_camera_live_session_page import MultiCameraLiveSessionPage
 
@@ -30,6 +31,9 @@ class _FakeSessionEngineThread(QObject):
         self.started = True
 
     def request_stop(self):
+        pass
+
+    def wait(self):
         pass
 
     def set_recent_frame_pair(self, pair_index, stream_a_image, stream_b_image):
@@ -1112,3 +1116,53 @@ def test_cross_stats_panel_shows_latest_pair_index_and_running_stats(qapp, tmp_p
     assert stats_panel._value_labels["infrared1_hw_ts_latency_avg"].text() != "-"
     assert stats_panel._value_labels["infrared1_global_ts_latency_min"].text() != "-"
     assert stats_panel._value_labels["infrared1_global_ts_latency_avg"].text() != "-"
+
+
+# --- Back button: mirrors LiveSessionPage's own confirm-before-stopping
+# behavior for an active run - N cameras instead of one doesn't change that. ---
+
+def test_back_button_emits_back_requested_when_idle(qapp, tmp_path):
+    page, _ = _page_with_fake_threads()
+    page.set_cameras(object(), _two_cameras(tmp_path))
+    emitted = []
+    page.back_requested.connect(lambda: emitted.append(True))
+
+    page.back_button.click()
+
+    assert emitted == [True]
+
+
+def test_back_button_confirms_before_stopping_all_running_sessions(qapp, tmp_path, monkeypatch):
+    page, fake_threads = _page_with_fake_threads()
+    page.set_cameras(object(), _two_cameras(tmp_path))
+    page.start_all_sessions()
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.Yes))
+    for thread in fake_threads.values():
+        thread.request_stop = MagicMock()
+        thread.wait = MagicMock()
+
+    emitted = []
+    page.back_requested.connect(lambda: emitted.append(True))
+    page.back_button.click()
+
+    for thread in fake_threads.values():
+        thread.request_stop.assert_called_once()
+        thread.wait.assert_called_once()
+    assert emitted == [True]
+
+
+def test_back_button_declining_confirmation_leaves_sessions_running(qapp, tmp_path, monkeypatch):
+    page, fake_threads = _page_with_fake_threads()
+    page.set_cameras(object(), _two_cameras(tmp_path))
+    page.start_all_sessions()
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.No))
+    for thread in fake_threads.values():
+        thread.request_stop = MagicMock()
+
+    emitted = []
+    page.back_requested.connect(lambda: emitted.append(True))
+    page.back_button.click()
+
+    for thread in fake_threads.values():
+        thread.request_stop.assert_not_called()
+    assert emitted == []

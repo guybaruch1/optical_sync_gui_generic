@@ -77,6 +77,7 @@ from domain.realsense_utils import (
 
 class ThresholdTuningPage(QWidget):
     tuning_done = Signal()
+    back_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -240,6 +241,9 @@ class ThresholdTuningPage(QWidget):
         control_row.addWidget(self.frame_sample_interval_spinbox)
 
         control_row.addStretch(1)
+        self.back_button = QPushButton("Back")
+        self.back_button.clicked.connect(self._on_back_clicked)
+        control_row.addWidget(self.back_button)
         self.continue_button = QPushButton("Continue to Live Test")
         self.continue_button.setStyleSheet(
             "QPushButton { background-color: #2f6fed; color: white; border: 1px solid #2f6fed;"
@@ -712,6 +716,13 @@ class ThresholdTuningPage(QWidget):
     @property
     def switch_time_ms(self):
         return self.switch_time_spinbox.value()
+
+    def _on_back_clicked(self):
+        # Same silent auto-stop precedent _on_continue_clicked already uses -
+        # a preview has no work to lose, so Back doesn't need to ask before
+        # stopping it, only before leaving with it still open.
+        self._stop_preview_blocking()
+        self.back_requested.emit()
 
     def _on_continue_clicked(self):
         ctx = self._context

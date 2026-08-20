@@ -35,6 +35,7 @@ def _device_label(device_info, mode):
 
 class DeviceSelectPage(QWidget):
     device_chosen = Signal(str, str)  # (serial, name)
+    back_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -72,6 +73,9 @@ class DeviceSelectPage(QWidget):
 
         self.status_label = QLabel("")
         layout.addWidget(self.status_label)
+        self.back_button = QPushButton("Back")
+        self.back_button.clicked.connect(self.back_requested.emit)
+        layout.addWidget(self.back_button)
         self.next_button = QPushButton("Next")
         self.next_button.clicked.connect(self._on_next_clicked)
         layout.addWidget(self.next_button)
@@ -144,6 +148,7 @@ class DeviceSelectPage(QWidget):
                 target_label = "Dual RGB" if target_mode == "dual" else "Dedicated RGB"
                 self.status_label.setText("Switching to {} mode - this takes a few seconds...".format(target_label))
                 self.next_button.setEnabled(False)
+                self.back_button.setEnabled(False)
                 self.combo.setEnabled(False)
                 self.mode_group_box.setEnabled(False)
                 QApplication.processEvents()
@@ -152,6 +157,7 @@ class DeviceSelectPage(QWidget):
                 except Exception as exc:
                     self.status_label.setText("Failed to switch to {} mode: {}".format(target_label, exc))
                     self.next_button.setEnabled(True)
+                    self.back_button.setEnabled(True)
                     self.combo.setEnabled(True)
                     self.mode_group_box.setEnabled(True)
                     return
@@ -161,6 +167,7 @@ class DeviceSelectPage(QWidget):
                     self.combo.setCurrentIndex(index)
                 self.status_label.setText("")
                 self.next_button.setEnabled(True)
+                self.back_button.setEnabled(True)
                 self.combo.setEnabled(True)
                 self.mode_group_box.setEnabled(True)
 

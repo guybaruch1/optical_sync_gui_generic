@@ -1014,3 +1014,69 @@ def test_start_multi_camera_session_requested_routes_to_live_session_page_after_
     window._on_start_multi_camera_session_requested()
 
     assert window.stack.currentWidget() is window.live_session_page
+
+
+# --- Back button wiring: each page's back_requested just switches the stack
+# to the previous page in the flow - no set_context()/populate() call, so
+# whatever that page already holds is exactly what's shown (see this
+# session's brainstorming: "keep it as you left it"). Tested independently
+# of any full forward flow, since the handler itself doesn't depend on prior
+# navigation state. ---
+
+def test_device_select_back_returns_to_camera_hub(qapp):
+    window = _make_window(qapp, _minimal_settings({}))
+    window.stack.setCurrentWidget(window.device_page)  # MainWindow starts on the hub by default
+
+    window.device_page.back_requested.emit()
+
+    assert window.stack.currentWidget() is window.camera_hub_page
+
+
+def test_stream_config_back_returns_to_device_select(qapp):
+    window = _make_window(qapp, _minimal_settings({}))
+
+    window.stream_config_page.back_requested.emit()
+
+    assert window.stack.currentWidget() is window.device_page
+
+
+def test_roi_select_back_returns_to_stream_config(qapp):
+    window = _make_window(qapp, _minimal_settings({}))
+
+    window.roi_page.back_requested.emit()
+
+    assert window.stack.currentWidget() is window.stream_config_page
+
+
+def test_calibration_back_returns_to_roi_select(qapp):
+    window = _make_window(qapp, _minimal_settings({}))
+
+    window.calibration_page.back_requested.emit()
+
+    assert window.stack.currentWidget() is window.roi_page
+
+
+def test_threshold_tuning_back_returns_to_calibration(qapp):
+    window = _make_window(qapp, _minimal_settings({}))
+
+    window.threshold_tuning_page.back_requested.emit()
+
+    assert window.stack.currentWidget() is window.calibration_page
+
+
+def test_live_session_back_returns_to_camera_hub(qapp):
+    window = _make_window(qapp, _minimal_settings({}))
+    window.stack.setCurrentWidget(window.live_session_page)  # MainWindow starts on the hub by default
+
+    window.live_session_page.back_requested.emit()
+
+    assert window.stack.currentWidget() is window.camera_hub_page
+
+
+def test_multi_camera_live_session_back_returns_to_camera_hub(qapp):
+    window = _make_window(qapp, _minimal_settings({}))
+    window.stack.setCurrentWidget(window.multi_camera_live_session_page)  # starts on the hub by default
+
+    window.multi_camera_live_session_page.back_requested.emit()
+
+    assert window.stack.currentWidget() is window.camera_hub_page

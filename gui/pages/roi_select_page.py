@@ -119,6 +119,7 @@ def _apply_camera_controls(groups, camera_controls, pick_a, pick_b):
 
 class RoiSelectPage(QWidget):
     roi_chosen = Signal(tuple)
+    back_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -134,6 +135,9 @@ class RoiSelectPage(QWidget):
         layout.addWidget(self.capture_button)
         self.status_label = QLabel("")
         layout.addWidget(self.status_label)
+        self.back_button = QPushButton("Back")
+        self.back_button.clicked.connect(self.back_requested.emit)
+        layout.addWidget(self.back_button)
 
     def set_context(self, ctx, device_serial, pick_a, pick_b, camera_controls, settle_frames=15,
                      dual_panel_config=None):
@@ -148,12 +152,17 @@ class RoiSelectPage(QWidget):
         if self._pending_args is None:
             return
         self.capture_button.setEnabled(False)
+        # No processEvents() runs during this call (unlike Calibration's own
+        # synchronous run), so Back can't actually be clicked mid-capture -
+        # disabled anyway as cheap, consistent insurance.
+        self.back_button.setEnabled(False)
         try:
             self._capture_and_select(**self._pending_args)
         except Exception as exc:
             self.status_label.setText("Error: {}".format(exc))
         finally:
             self.capture_button.setEnabled(True)
+            self.back_button.setEnabled(True)
 
     def _capture_and_select(self, ctx, device_serial, pick_a, pick_b, camera_controls, settle_frames,
                              dual_panel_config):

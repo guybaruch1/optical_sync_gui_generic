@@ -181,3 +181,43 @@ def test_last_calibration_result_unchanged_after_a_failed_run(qapp, tmp_path):
         page._on_run_clicked()
 
     assert page.last_calibration_result is None
+
+
+# --- Back button: _run_calibration is synchronous but pumps processEvents()
+# via _log(), so Back must be disabled for its whole span (mirroring
+# run_button) rather than trying to cancel a run partway through ---
+
+def test_back_button_emits_back_requested(qapp, tmp_path):
+    page = CalibrationPage()
+    page.set_context(**_minimal_context(str(tmp_path)))
+    emitted = []
+    page.back_requested.connect(lambda: emitted.append(True))
+
+    page.back_button.click()
+
+    assert emitted == [True]
+
+
+def test_back_button_disabled_during_calibration_run(qapp, tmp_path):
+    page = CalibrationPage()
+    page.set_context(**_minimal_context(str(tmp_path)))
+    observed_enabled_during_run = []
+
+    def _fake_run_calibration(**kwargs):
+        observed_enabled_during_run.append(page.back_button.isEnabled())
+
+    with patch.object(page, "_run_calibration", side_effect=_fake_run_calibration):
+        page._on_run_clicked()
+
+    assert observed_enabled_during_run == [False]
+    assert page.back_button.isEnabled()
+
+
+def test_back_button_reenabled_after_failed_calibration_run(qapp, tmp_path):
+    page = CalibrationPage()
+    page.set_context(**_minimal_context(str(tmp_path)))
+
+    with patch.object(page, "_run_calibration", side_effect=RuntimeError("boom")):
+        page._on_run_clicked()
+
+    assert page.back_button.isEnabled()

@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 
 import cv2
 import numpy as np
-from PySide6.QtWidgets import QScrollArea
+from PySide6.QtWidgets import QMessageBox, QScrollArea
 
 from gui.pages.live_session_page import LiveSessionPage, _short_camera_name
 
@@ -190,11 +190,10 @@ class _FakeEngineThread:
         self.session_finished = MagicMock()
         self.error = MagicMock()
         self.finished = MagicMock()
+        self.request_stop = MagicMock()
+        self.wait = MagicMock()
 
     def start(self):
-        pass
-
-    def wait(self):
         pass
 
 
@@ -483,3 +482,49 @@ def test_save_chart_images_writes_three_named_png_files(qapp, tmp_path):
         path = os.path.join(str(tmp_path), filename)
         assert os.path.exists(path)
         assert os.path.getsize(path) > 0
+
+
+# --- Back button: unlike a preview (Stream Config/Threshold Tuning), an
+# active live session is a deliberate, real timed test - Back must confirm
+# before interrupting it, not silently stop it the way a preview does. ---
+
+def test_back_button_emits_back_requested_when_idle(qapp, tmp_path):
+    page = LiveSessionPage()
+    page.set_context(**_minimal_context(tmp_path))
+    emitted = []
+    page.back_requested.connect(lambda: emitted.append(True))
+
+    page.back_button.click()
+
+    assert emitted == [True]
+
+
+def test_back_button_confirms_before_stopping_a_running_session(qapp, tmp_path, monkeypatch):
+    page = LiveSessionPage()
+    page.set_context(**_minimal_context(tmp_path))
+    with patch("gui.pages.live_session_page.SessionEngineThread", _FakeEngineThread):
+        page.start_session()
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.Yes))
+
+    emitted = []
+    page.back_requested.connect(lambda: emitted.append(True))
+    page.back_button.click()
+
+    page.engine_thread.request_stop.assert_called_once()
+    page.engine_thread.wait.assert_called_once()
+    assert emitted == [True]
+
+
+def test_back_button_declining_confirmation_leaves_session_running(qapp, tmp_path, monkeypatch):
+    page = LiveSessionPage()
+    page.set_context(**_minimal_context(tmp_path))
+    with patch("gui.pages.live_session_page.SessionEngineThread", _FakeEngineThread):
+        page.start_session()
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.No))
+
+    emitted = []
+    page.back_requested.connect(lambda: emitted.append(True))
+    page.back_button.click()
+
+    page.engine_thread.request_stop.assert_not_called()
+    assert emitted == []

@@ -179,6 +179,24 @@ class MainWindow(QMainWindow):
         self.roi_page.roi_chosen.connect(self._on_roi_chosen)
         self.calibration_page.calibration_done.connect(self._on_calibration_done)
         self.threshold_tuning_page.tuning_done.connect(self._on_tuning_done)
+        # Back: each page just switches the stack to the previous page in the
+        # flow - no set_context()/populate() call, so whatever that page
+        # already holds (picks, ROI, calibration log, ...) is exactly what's
+        # shown, no work redone. Each page's own back_requested handler is
+        # responsible for stopping/confirming whatever it has running first
+        # (see each page's own _on_back_clicked) - by the time the signal
+        # reaches here it's already safe to switch away.
+        self.device_page.back_requested.connect(lambda: self.stack.setCurrentWidget(self.camera_hub_page))
+        self.stream_config_page.back_requested.connect(lambda: self.stack.setCurrentWidget(self.device_page))
+        self.roi_page.back_requested.connect(lambda: self.stack.setCurrentWidget(self.stream_config_page))
+        self.calibration_page.back_requested.connect(lambda: self.stack.setCurrentWidget(self.roi_page))
+        self.threshold_tuning_page.back_requested.connect(
+            lambda: self.stack.setCurrentWidget(self.calibration_page)
+        )
+        self.live_session_page.back_requested.connect(lambda: self.stack.setCurrentWidget(self.camera_hub_page))
+        self.multi_camera_live_session_page.back_requested.connect(
+            lambda: self.stack.setCurrentWidget(self.camera_hub_page)
+        )
         self.camera_hub_page.add_camera_requested.connect(self._on_add_camera_requested)
         self.camera_hub_page.edit_camera_requested.connect(self._on_edit_camera_requested)
         self.camera_hub_page.master_change_requested.connect(self._on_master_change_requested)
