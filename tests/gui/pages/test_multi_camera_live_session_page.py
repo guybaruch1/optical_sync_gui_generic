@@ -5,6 +5,7 @@ import numpy as np
 import pyrealsense2 as rs
 import pytest
 from PySide6.QtCore import QObject, Signal
+from PySide6.QtWidgets import QMessageBox
 
 from gui.pages.multi_camera_live_session_page import MultiCameraLiveSessionPage
 
@@ -30,6 +31,9 @@ class _FakeSessionEngineThread(QObject):
         self.started = True
 
     def request_stop(self):
+        pass
+
+    def wait(self):
         pass
 
     def set_recent_frame_pair(self, pair_index, stream_a_image, stream_b_image):
@@ -102,9 +106,9 @@ def test_camera_roles_tags_master_and_numbers_slaves_in_order():
 
     roles = _camera_roles(cameras)
 
-    assert roles["cam1"] == {"tag": "MASTER", "slug": "master", "display": "D455 A (SN SN1)"}
-    assert roles["cam2"] == {"tag": "SLAVE 1", "slug": "slave1", "display": "D455 B (SN SN2)"}
-    assert roles["cam3"] == {"tag": "SLAVE 2", "slug": "slave2", "display": "D455 C (SN SN3)"}
+    assert roles["cam1"] == {"tag": "MASTER", "slug": "master", "display": "D455 A [SN1]"}
+    assert roles["cam2"] == {"tag": "SLAVE 1", "slug": "slave1", "display": "D455 B [SN2]"}
+    assert roles["cam3"] == {"tag": "SLAVE 2", "slug": "slave2", "display": "D455 C [SN3]"}
 
 
 def _page_with_fake_threads():
@@ -1112,3 +1116,74 @@ def test_cross_stats_panel_shows_latest_pair_index_and_running_stats(qapp, tmp_p
     assert stats_panel._value_labels["infrared1_hw_ts_latency_avg"].text() != "-"
     assert stats_panel._value_labels["infrared1_global_ts_latency_min"].text() != "-"
     assert stats_panel._value_labels["infrared1_global_ts_latency_avg"].text() != "-"
+
+
+# --- Back button: mirrors LiveSessionPage's own confirm-before-stopping
+# behavior for an active run - N cameras instead of one doesn't change that. ---
+
+def test_back_button_emits_back_requested_when_idle(qapp, tmp_path):
+    page, _ = _page_with_fake_threads()
+    page.set_cameras(object(), _two_cameras(tmp_path))
+    emitted = []
+    page.back_requested.connect(lambda: emitted.append(True))
+
+    page.back_button.click()
+
+    assert emitted == [True]
+
+
+def test_back_button_confirms_before_stopping_all_running_sessions(qapp, tmp_path, monkeypatch):
+    page, fake_threads = _page_with_fake_threads()
+    page.set_cameras(object(), _two_cameras(tmp_path))
+    page.start_all_sessions()
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.Yes))
+    for thread in fake_threads.values():
+        thread.request_stop = MagicMock()
+        thread.wait = MagicMock()
+
+    emitted = []
+    page.back_requested.connect(lambda: emitted.append(True))
+    page.back_button.click()
+
+    for thread in fake_threads.values():
+        thread.request_stop.assert_called_once()
+        thread.wait.assert_called_once()
+    assert emitted == [True]
+
+
+def test_back_button_disabled_while_waiting_for_threads_to_stop(qapp, tmp_path, monkeypatch):
+    # Same defensive insurance as LiveSessionPage's own equivalent test -
+    # wait() fully blocks the event loop, so this isn't a real reentrancy
+    # fix, just consistency with ROI Select/Calibration's own blocking spans.
+    page, fake_threads = _page_with_fake_threads()
+    page.set_cameras(object(), _two_cameras(tmp_path))
+    page.start_all_sessions()
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.Yes))
+    observed_enabled_during_wait = []
+    for thread in fake_threads.values():
+        thread.request_stop = MagicMock()
+        thread.wait = MagicMock(
+            side_effect=lambda: observed_enabled_during_wait.append(page.back_button.isEnabled())
+        )
+
+    page.back_button.click()
+
+    assert observed_enabled_during_wait == [False] * len(fake_threads)
+    assert page.back_button.isEnabled()
+
+
+def test_back_button_declining_confirmation_leaves_sessions_running(qapp, tmp_path, monkeypatch):
+    page, fake_threads = _page_with_fake_threads()
+    page.set_cameras(object(), _two_cameras(tmp_path))
+    page.start_all_sessions()
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.No))
+    for thread in fake_threads.values():
+        thread.request_stop = MagicMock()
+
+    emitted = []
+    page.back_requested.connect(lambda: emitted.append(True))
+    page.back_button.click()
+
+    for thread in fake_threads.values():
+        thread.request_stop.assert_not_called()
+    assert emitted == []

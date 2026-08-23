@@ -96,6 +96,12 @@ def test_set_context_prefills_both_threshold_fraction_spinboxes_independently(qa
     assert page.stream_b_threshold_fraction_spinbox.value() == 0.6
 
 
+def test_set_context_titles_include_the_devices_serial(qapp):
+    page = _page_with_context(device_serial="SN789", camera_name="Intel RealSense D455")
+    assert page.stream_a_title_label.text() == "D455 [SN789] - Infrared 1"
+    assert page.stream_b_title_label.text() == "D455 [SN789] - Color"
+
+
 def test_set_context_prefills_switch_time_spinbox(qapp):
     page = _page_with_context(switch_time_ms=7)
     assert page.switch_time_spinbox.value() == 7
@@ -559,3 +565,29 @@ def test_continue_button_warns_on_led_count_mismatch(qapp):
         page._on_continue_clicked()
 
     mock_message_box.warning.assert_called_once()
+
+
+# --- Back button: same silent auto-stop precedent "Continue to Live Test"
+# already uses (_stop_preview_blocking) - no confirmation, since a preview
+# has no work to lose ---
+
+def test_back_button_emits_back_requested(qapp):
+    page = _page_with_context()
+    emitted = []
+    page.back_requested.connect(lambda: emitted.append(True))
+
+    page.back_button.click()
+
+    assert emitted == [True]
+
+
+def test_back_button_stops_a_running_preview_first(qapp):
+    page = _started_page()
+    assert page.preview_thread is not None
+
+    emitted = []
+    page.back_requested.connect(lambda: emitted.append(True))
+    page.back_button.click()
+
+    assert page.preview_thread is None
+    assert emitted == [True]  # still navigates away, same as Continue does

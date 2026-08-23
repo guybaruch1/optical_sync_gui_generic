@@ -60,6 +60,7 @@ from gui.pages.roi_select_page import stream_label, _apply_camera_controls
 
 class CalibrationPage(QWidget):
     calibration_done = Signal()
+    back_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -70,6 +71,19 @@ class CalibrationPage(QWidget):
         self.run_button = QPushButton("Run Calibration")
         self.run_button.clicked.connect(self._on_run_clicked)
         layout.addWidget(self.run_button)
+        # Enabled only once last_calibration_result holds a result for the
+        # CURRENT context (see set_context()'s own reset) - lets the operator
+        # return here via Back from Threshold Tuning and continue straight on
+        # with the already-captured/already-saved-to-config.yaml result,
+        # instead of being forced to re-run a real capture just to leave
+        # this page again.
+        self.continue_button = QPushButton("Continue to Threshold Tuning")
+        self.continue_button.setEnabled(False)
+        self.continue_button.clicked.connect(self.calibration_done.emit)
+        layout.addWidget(self.continue_button)
+        self.back_button = QPushButton("Back")
+        self.back_button.clicked.connect(self.back_requested.emit)
+        layout.addWidget(self.back_button)
         self._pending_args = None
         # None until a run completes successfully - read by MainWindow to
         # thread the already-captured on/off frames (plus the Otsu threshold
@@ -98,6 +112,15 @@ class CalibrationPage(QWidget):
         # Calibration" click - a user re-clicking Run a few times while
         # tuning ROI/threshold within one visit shares that one folder
         # rather than scattering a throwaway subfolder per click.
+        # A fresh visit means genuinely new pending args (different picks/ROI
+        # from a prior visit, or the operator went further back to ROI Select
+        # and changed something) that haven't been calibrated yet - any
+        # cached result from a DIFFERENT context must not be reusable via
+        # Continue. Back navigation from Threshold Tuning never calls
+        # set_context() again (see gui/main_window.py's wiring), so this
+        # doesn't clear anything for that case.
+        self.last_calibration_result = None
+        self.continue_button.setEnabled(False)
         output_dir = create_run_dir(output_root, "calibration")
         self._pending_args = dict(
             ctx=ctx, device_serial=device_serial, pick_a=pick_a, pick_b=pick_b,
@@ -112,12 +135,18 @@ class CalibrationPage(QWidget):
         if self._pending_args is None:
             return
         self.run_button.setEnabled(False)
+        # _run_calibration pumps processEvents() via _log() while it runs,
+        # so Back is genuinely clickable mid-run unless disabled here too -
+        # there's no clean way to cancel a run partway through, so this just
+        # prevents leaving mid-run rather than attempting that.
+        self.back_button.setEnabled(False)
         try:
             self._run_calibration(**self._pending_args)
         except Exception as exc:
             self._log("Calibration failed: {}".format(exc))
         finally:
             self.run_button.setEnabled(True)
+            self.back_button.setEnabled(True)
 
     def _run_calibration(self, ctx, device_serial, pick_a, pick_b, camera_controls, stream_a_roi, stream_b_roi,
                           config_path, camera_name, output_dir, settle_frames,
@@ -278,6 +307,10 @@ class CalibrationPage(QWidget):
             stream_a_otsu_threshold=int(round(otsu_a)), stream_b_otsu_threshold=int(round(otsu_b)),
             min_blob_area=min_blob_area, row_gap_px=row_gap_px, neighborhood_size=neighborhood_size,
         )
+        # Lets a later Back-from-Threshold-Tuning visit click Continue
+        # straight through instead of re-running a real capture - see
+        # continue_button's own comment in __init__.
+        self.continue_button.setEnabled(True)
         self.calibration_done.emit()
 
     def _capture_on_off_for_stream(self, groups, pick, stream_name, dual_panel_config, settle_frames):

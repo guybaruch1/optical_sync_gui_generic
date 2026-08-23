@@ -182,6 +182,146 @@ def test_on_device_chosen_still_shows_no_entry_error_for_unconfigured_camera(qap
     assert window.stack.currentWidget() is not window.stream_config_page
 
 
+# --- RGB Mode moved from Device Select to Stream Config: a switch changes
+# which streams the device exposes, so MainWindow's own handler re-resolves
+# and re-populates Stream Config's Test/Sensor Options in place, rather than
+# just relocating the raw ensure_mode() call. ---
+
+def test_mode_switch_requested_applies_switch_and_repopulates(qapp, monkeypatch):
+    settings = _minimal_settings({"Intel RealSense D455": [_ir_vs_rgb_test()]})
+    window = _make_window(qapp, settings)
+    monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [IR1, COLOR0])
+    monkeypatch.setattr(main_window_module, "find_device_by_serial", lambda ctx, serial: "the-device")
+    import gui.pages.stream_config_page as stream_config_page_module
+    monkeypatch.setattr(stream_config_page_module, "find_device_by_serial", lambda ctx, serial: "the-device")
+    monkeypatch.setattr(stream_config_page_module, "get_mode", lambda device: "dual")
+    window._on_device_chosen("SN123", "Intel RealSense D455")
+
+    ensure_mode_calls = []
+    monkeypatch.setattr(
+        main_window_module, "ensure_mode",
+        lambda ctx, device, target_mode: ensure_mode_calls.append((device, target_mode)),
+    )
+
+    window._on_stream_config_mode_switch_requested("dedicated")
+
+    assert ensure_mode_calls == [("the-device", "dedicated")]
+    # Re-populated (not left showing the pre-switch state) - same test/pick
+    # still resolves against these unchanged fake device options, so it
+    # survives the refresh.
+    assert window.stream_config_page.pick_a == IR1
+    assert window.stream_config_page.pick_b == COLOR0
+    assert window.stream_config_page.next_button.isEnabled()
+    assert window.stream_config_page.back_button.isEnabled()
+
+
+def test_mode_switch_requested_shows_error_and_reenables_on_failure(qapp, monkeypatch):
+    settings = _minimal_settings({"Intel RealSense D455": [_ir_vs_rgb_test()]})
+    window = _make_window(qapp, settings)
+    monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [IR1, COLOR0])
+    monkeypatch.setattr(main_window_module, "find_device_by_serial", lambda ctx, serial: "the-device")
+    import gui.pages.stream_config_page as stream_config_page_module
+    monkeypatch.setattr(stream_config_page_module, "find_device_by_serial", lambda ctx, serial: "the-device")
+    monkeypatch.setattr(stream_config_page_module, "get_mode", lambda device: "dual")
+    window._on_device_chosen("SN123", "Intel RealSense D455")
+
+    def _raise(ctx, device, target_mode):
+        raise RuntimeError("hardware reset timed out")
+
+    monkeypatch.setattr(main_window_module, "ensure_mode", _raise)
+
+    window._on_stream_config_mode_switch_requested("dedicated")
+
+    assert "Failed to switch" in window.stream_config_page.status_label.text()
+    assert window.stream_config_page.next_button.isEnabled()
+    assert window.stream_config_page.back_button.isEnabled()
+    assert window.stream_config_page.combo_test.isEnabled()
+    assert window.stream_config_page.mode_group_box.isEnabled()
+
+
+def test_mode_switch_requested_disables_stream_config_widgets_during_switch(qapp, monkeypatch):
+    settings = _minimal_settings({"Intel RealSense D455": [_ir_vs_rgb_test()]})
+    window = _make_window(qapp, settings)
+    monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [IR1, COLOR0])
+    monkeypatch.setattr(main_window_module, "find_device_by_serial", lambda ctx, serial: "the-device")
+    import gui.pages.stream_config_page as stream_config_page_module
+    monkeypatch.setattr(stream_config_page_module, "find_device_by_serial", lambda ctx, serial: "the-device")
+    monkeypatch.setattr(stream_config_page_module, "get_mode", lambda device: "dual")
+    window._on_device_chosen("SN123", "Intel RealSense D455")
+
+    observed = []
+
+    def _ensure_mode(ctx, device, target_mode):
+        page = window.stream_config_page
+        observed.append((
+            page.next_button.isEnabled(), page.back_button.isEnabled(),
+            page.combo_test.isEnabled(), page.mode_group_box.isEnabled(),
+        ))
+
+    monkeypatch.setattr(main_window_module, "ensure_mode", _ensure_mode)
+
+    window._on_stream_config_mode_switch_requested("dedicated")
+
+    assert observed == [(False, False, False, False)]
+
+
+def test_mode_switch_requested_preserves_camera_controls(qapp, monkeypatch):
+    settings = _minimal_settings({"Intel RealSense D455": [_ir_vs_rgb_test()]})
+    window = _make_window(qapp, settings)
+    monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [IR1, COLOR0])
+    monkeypatch.setattr(main_window_module, "find_device_by_serial", lambda ctx, serial: "the-device")
+    import gui.pages.stream_config_page as stream_config_page_module
+    monkeypatch.setattr(stream_config_page_module, "find_device_by_serial", lambda ctx, serial: "the-device")
+    monkeypatch.setattr(stream_config_page_module, "get_mode", lambda device: "dual")
+    window._on_device_chosen("SN123", "Intel RealSense D455")
+    page = window.stream_config_page
+    page._camera_controls["manual_radio"].setChecked(True)
+    page._camera_controls["exposure_a_spin"].setValue(1234)
+    page._camera_controls["exposure_b_spin"].setValue(5678)
+    monkeypatch.setattr(main_window_module, "ensure_mode", lambda ctx, device, target_mode: None)
+
+    window._on_stream_config_mode_switch_requested("dedicated")
+
+    # The operator's own exposure choice must survive the refresh - a mode
+    # switch invalidates Test/Sensor Options, not camera controls.
+    assert page._camera_controls["manual_radio"].isChecked()
+    assert page._camera_controls["exposure_a_spin"].value() == 1234
+    assert page._camera_controls["exposure_b_spin"].value() == 5678
+
+
+def test_mode_switch_requested_updates_current_mode_even_if_repopulate_fails(qapp, monkeypatch):
+    # Regression test: a mode switch that succeeds (ensure_mode) but leaves
+    # no usable Test for this camera's new mode (_populate_stream_config_page
+    # returns False, e.g. a misconfigured settings.yaml) must still update
+    # the page's own _current_rgb_mode - otherwise the next Next click
+    # thinks another switch is still needed and re-triggers ensure_mode()
+    # for a switch that already succeeded, forever.
+    settings = _minimal_settings({"Intel RealSense D455": [_ir_vs_rgb_test()]})
+    window = _make_window(qapp, settings)
+    calls = _capture_critical(monkeypatch)
+    call_count = []
+
+    def _list_options(ctx, serial):
+        call_count.append(1)
+        return [IR1, COLOR0] if len(call_count) == 1 else []  # nothing matches after the switch
+
+    monkeypatch.setattr(main_window_module, "list_video_stream_options", _list_options)
+    monkeypatch.setattr(main_window_module, "find_device_by_serial", lambda ctx, serial: "the-device")
+    import gui.pages.stream_config_page as stream_config_page_module
+    monkeypatch.setattr(stream_config_page_module, "find_device_by_serial", lambda ctx, serial: "the-device")
+    monkeypatch.setattr(stream_config_page_module, "get_mode", lambda device: "dual")
+    window._on_device_chosen("SN123", "Intel RealSense D455")
+    monkeypatch.setattr(main_window_module, "ensure_mode", lambda ctx, device, target_mode: None)
+
+    window._on_stream_config_mode_switch_requested("dedicated")
+
+    assert len(calls) == 1  # "No matching Stream Select options" shown
+    page = window.stream_config_page
+    assert page._current_rgb_mode == "dedicated"  # updated despite the repopulate failure
+    assert page.next_button.isEnabled()
+    assert page.back_button.isEnabled()
+
+
 def test_on_config_chosen_persists_last_test_name(qapp, monkeypatch):
     settings = _minimal_settings({"Intel RealSense D455": [_ir_vs_rgb_test("IR vs RGB sync")]})
     settings["calibration"] = {"settle_frames": 15}
@@ -250,8 +390,8 @@ def _window_after_config_chosen(qapp, monkeypatch, tmp_path, dual_panel=False):
         main_window_module, "load_led_positions",
         lambda *a, **k: ({"0": [1.0, 1.0, 300.0, 100.0, 200.0]}, {"0": [2.0, 2.0, 600.0, 200.0, 400.0]}),
     )
-    window.device_page.dual_panel_checkbox.setChecked(dual_panel)
     window._on_device_chosen("SN123", "Intel RealSense D455")
+    window.stream_config_page.dual_panel_checkbox.setChecked(dual_panel)
     window._on_config_chosen((IR1, COLOR0, {
         "emitter_enabled": False, "auto_exposure": True, "exposure_a": None, "exposure_b": None,
     }))
@@ -602,7 +742,7 @@ def test_master_change_requested_updates_master(qapp, monkeypatch, tmp_path):
     with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
         window._on_calibration_done()
         window._on_tuning_done()
-    window._cameras["some_other_cam"] = {"label": "other", "config": {}}
+    window._cameras["some_other_cam"] = {"label": "other", "config": {"device_serial": "SN_OTHER"}}
 
     window._on_master_change_requested("some_other_cam")
 
@@ -628,24 +768,148 @@ def test_removing_the_master_promotes_a_remaining_camera(qapp, monkeypatch, tmp_
         window._on_calibration_done()
         window._on_tuning_done()
     master_id = window._master_camera_id
-    window._cameras["some_other_cam"] = {"label": "other", "config": {}}
+    window._cameras["some_other_cam"] = {"label": "other", "config": {"device_serial": "SN_OTHER"}}
 
     window._on_remove_camera_requested(master_id)
 
     assert window._master_camera_id == "some_other_cam"
 
 
-def test_edit_camera_requested_switches_to_device_select_reusing_the_camera_id(qapp, monkeypatch, tmp_path):
-    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
-    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
-        window._on_calibration_done()
-        window._on_tuning_done()
-    camera_id = list(window._cameras.keys())[0]
+def test_add_camera_requested_excludes_already_configured_serials(qapp, monkeypatch, tmp_path):
+    settings = _full_settings({"Intel RealSense D455": [_ir_vs_rgb_test()]})
+    window = _make_window(qapp, settings)
+    monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [IR1, COLOR0])
+    monkeypatch.setattr(main_window_module, "save_gui_state", lambda state: None)
+    monkeypatch.setattr(window.roi_page, "set_context", lambda *a, **k: None)
+    monkeypatch.setattr(main_window_module, "ensure_output_dir", lambda settings: str(tmp_path))
+    monkeypatch.setattr(
+        main_window_module, "load_led_positions",
+        lambda *a, **k: ({"0": [1.0, 1.0, 300.0, 100.0, 200.0]}, {"0": [2.0, 2.0, 600.0, 200.0, 400.0]}),
+    )
+    _configure_one_camera(window, "SN123")
+    calls = []
+    monkeypatch.setattr(
+        window.device_page, "refresh_devices",
+        lambda ctx, exclude_serials=None: calls.append(exclude_serials),
+    )
+
+    window._on_add_camera_requested()
+
+    assert calls == [{"SN123"}]
+
+
+# --- Edit jumps straight to Stream Config, skipping Device Select entirely
+# (the device is already known) - prefilled with that camera's own previous
+# choices, not global settings.yaml defaults, so it's a genuine "continue
+# editing" rather than "redo from scratch". ---
+
+def test_edit_camera_requested_jumps_directly_to_stream_config(qapp, monkeypatch, tmp_path):
+    settings = _full_settings({"Intel RealSense D455": [_ir_vs_rgb_test()]})
+    window = _make_window(qapp, settings)
+    monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [IR1, COLOR0])
+    monkeypatch.setattr(main_window_module, "save_gui_state", lambda state: None)
+    monkeypatch.setattr(window.roi_page, "set_context", lambda *a, **k: None)
+    monkeypatch.setattr(main_window_module, "ensure_output_dir", lambda settings: str(tmp_path))
+    monkeypatch.setattr(
+        main_window_module, "load_led_positions",
+        lambda *a, **k: ({"0": [1.0, 1.0, 300.0, 100.0, 200.0]}, {"0": [2.0, 2.0, 600.0, 200.0, 400.0]}),
+    )
+    camera_id = _configure_one_camera(window, "SN123")
 
     window._on_edit_camera_requested(camera_id)
 
-    assert window.stack.currentWidget() is window.device_page
+    assert window.stack.currentWidget() is window.stream_config_page
     assert window._editing_camera_id == camera_id
+
+
+def test_edit_camera_requested_resets_editing_camera_id_on_populate_failure(qapp, monkeypatch, tmp_path):
+    settings = _full_settings({"Intel RealSense D455": [_ir_vs_rgb_test()]})
+    window = _make_window(qapp, settings)
+    monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [IR1, COLOR0])
+    monkeypatch.setattr(main_window_module, "save_gui_state", lambda state: None)
+    monkeypatch.setattr(window.roi_page, "set_context", lambda *a, **k: None)
+    monkeypatch.setattr(main_window_module, "ensure_output_dir", lambda settings: str(tmp_path))
+    monkeypatch.setattr(
+        main_window_module, "load_led_positions",
+        lambda *a, **k: ({"0": [1.0, 1.0, 300.0, 100.0, 200.0]}, {"0": [2.0, 2.0, 600.0, 200.0, 400.0]}),
+    )
+    camera_id = _configure_one_camera(window, "SN123")
+    _capture_critical(monkeypatch)
+    # Nothing matches this camera any more (e.g. settings.yaml was edited to
+    # drop its entry between configuring and re-editing it) - forces
+    # _populate_stream_config_page to fail.
+    monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [])
+
+    window._on_edit_camera_requested(camera_id)
+
+    assert window._editing_camera_id is None
+
+
+def test_edit_camera_requested_prefills_stream_config_with_this_cameras_own_choices(qapp, monkeypatch, tmp_path):
+    settings = _full_settings({"Intel RealSense D455": [_ir_vs_rgb_test()]})
+    window = _make_window(qapp, settings)
+    monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [IR1, COLOR0])
+    monkeypatch.setattr(main_window_module, "save_gui_state", lambda state: None)
+    monkeypatch.setattr(window.roi_page, "set_context", lambda *a, **k: None)
+    monkeypatch.setattr(main_window_module, "ensure_output_dir", lambda settings: str(tmp_path))
+    monkeypatch.setattr(
+        main_window_module, "load_led_positions",
+        lambda *a, **k: ({"0": [1.0, 1.0, 300.0, 100.0, 200.0]}, {"0": [2.0, 2.0, 600.0, 200.0, 400.0]}),
+    )
+    camera_id = _configure_one_camera(window, "SN123", camera_controls={
+        "emitter_enabled": True, "auto_exposure": False, "exposure_a": 1234, "exposure_b": 5678,
+    })
+
+    window._on_edit_camera_requested(camera_id)
+
+    page = window.stream_config_page
+    assert page.pick_a == IR1
+    assert page.pick_b == COLOR0
+    assert page.current_test_name == "IR vs RGB sync"
+    # emitter_checkbox is labeled "Disable IR emitter" - emitter_enabled
+    # True means the emitter is ON, i.e. the checkbox is UNCHECKED.
+    assert not page._camera_controls["emitter_checkbox"].isChecked()
+    assert page._camera_controls["manual_radio"].isChecked()
+    assert page._camera_controls["exposure_a_spin"].value() == 1234
+    assert page._camera_controls["exposure_b_spin"].value() == 5678
+
+
+def test_edit_camera_requested_prefills_dual_panel_checkbox(qapp, monkeypatch, tmp_path):
+    settings = _full_settings({"Intel RealSense D455": [_ir_vs_rgb_test()]})
+    window = _make_window(qapp, settings)
+    monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [IR1, COLOR0])
+    monkeypatch.setattr(main_window_module, "save_gui_state", lambda state: None)
+    monkeypatch.setattr(window.roi_page, "set_context", lambda *a, **k: None)
+    monkeypatch.setattr(main_window_module, "ensure_output_dir", lambda settings: str(tmp_path))
+    monkeypatch.setattr(
+        main_window_module, "load_led_positions",
+        lambda *a, **k: ({"0": [1.0, 1.0, 300.0, 100.0, 200.0]}, {"0": [2.0, 2.0, 600.0, 200.0, 400.0]}),
+    )
+    # Not via _configure_one_camera - the checkbox must be set AFTER
+    # _on_device_chosen's own populate() call (which resets it) but BEFORE
+    # _on_config_chosen reads it, same ordering _window_after_config_chosen
+    # already uses for this exact reason.
+    window._on_device_chosen("SN123", "Intel RealSense D455")
+    window.stream_config_page.dual_panel_checkbox.setChecked(True)
+    window._on_config_chosen((IR1, COLOR0, {
+        "emitter_enabled": False, "auto_exposure": True, "exposure_a": None, "exposure_b": None,
+    }))
+    window.gui_state.stream_a_roi = [0, 0, 50, 50]
+    window.gui_state.stream_b_roi = [0, 0, 50, 50]
+    window.calibration_page.last_calibration_result = dict(
+        image_a_on=np.full((50, 50), 50, dtype=np.uint8), image_a_off=np.full((50, 50), 50, dtype=np.uint8),
+        image_b_on=np.full((50, 50), 50, dtype=np.uint8), image_b_off=np.full((50, 50), 50, dtype=np.uint8),
+        stream_a_otsu_threshold=127, stream_b_otsu_threshold=127,
+        min_blob_area=5, row_gap_px=15, neighborhood_size=5,
+    )
+    camera_id = window._editing_camera_id
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window._on_tuning_done()
+
+    window._on_edit_camera_requested(camera_id)
+
+    assert window.stream_config_page.dual_panel_checkbox.isChecked()
 
 
 def test_start_multi_camera_session_requested_does_nothing_with_no_cameras(qapp):
@@ -1014,3 +1278,90 @@ def test_start_multi_camera_session_requested_routes_to_live_session_page_after_
     window._on_start_multi_camera_session_requested()
 
     assert window.stack.currentWidget() is window.live_session_page
+
+
+# --- Back button wiring: each page's back_requested just switches the stack
+# to the previous page in the flow - no set_context()/populate() call, so
+# whatever that page already holds is exactly what's shown (see this
+# session's brainstorming: "keep it as you left it"). Tested independently
+# of any full forward flow, since the handler itself doesn't depend on prior
+# navigation state. ---
+
+def test_device_select_back_returns_to_camera_hub(qapp):
+    window = _make_window(qapp, _minimal_settings({}))
+    window.stack.setCurrentWidget(window.device_page)  # MainWindow starts on the hub by default
+
+    window.device_page.back_requested.emit()
+
+    assert window.stack.currentWidget() is window.camera_hub_page
+
+
+def test_stream_config_back_returns_to_device_select(qapp):
+    window = _make_window(qapp, _minimal_settings({}))
+
+    window.stream_config_page.back_requested.emit()
+
+    assert window.stack.currentWidget() is window.device_page
+
+
+def test_roi_select_back_returns_to_stream_config(qapp):
+    window = _make_window(qapp, _minimal_settings({}))
+
+    window.roi_page.back_requested.emit()
+
+    assert window.stack.currentWidget() is window.stream_config_page
+
+
+def test_calibration_back_returns_to_roi_select(qapp):
+    window = _make_window(qapp, _minimal_settings({}))
+
+    window.calibration_page.back_requested.emit()
+
+    assert window.stack.currentWidget() is window.roi_page
+
+
+def test_threshold_tuning_back_returns_to_calibration(qapp):
+    window = _make_window(qapp, _minimal_settings({}))
+
+    window.threshold_tuning_page.back_requested.emit()
+
+    assert window.stack.currentWidget() is window.calibration_page
+
+
+def test_live_session_back_returns_to_camera_hub(qapp):
+    window = _make_window(qapp, _minimal_settings({}))
+    window.stack.setCurrentWidget(window.live_session_page)  # MainWindow starts on the hub by default
+
+    window.live_session_page.back_requested.emit()
+
+    assert window.stack.currentWidget() is window.camera_hub_page
+
+
+def test_configured_camera_hub_card_shows_the_devices_serial(qapp, monkeypatch, tmp_path):
+    # Two configured cameras of the same model are otherwise indistinguishable
+    # on the hub - the serial is what actually tells them apart.
+    settings = _full_settings({"Intel RealSense D455": [_ir_vs_rgb_test()]})
+    window = _make_window(qapp, settings)
+    monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [IR1, COLOR0])
+    monkeypatch.setattr(main_window_module, "save_gui_state", lambda state: None)
+    monkeypatch.setattr(window.roi_page, "set_context", lambda *a, **k: None)
+    monkeypatch.setattr(main_window_module, "ensure_output_dir", lambda settings: str(tmp_path))
+    monkeypatch.setattr(
+        main_window_module, "load_led_positions",
+        lambda *a, **k: ({"0": [1.0, 1.0, 300.0, 100.0, 200.0]}, {"0": [2.0, 2.0, 600.0, 200.0, 400.0]}),
+    )
+
+    camera_id = _configure_one_camera(window, "SN123")
+
+    label_text = window.camera_hub_page._cards[camera_id].label_widget.text()
+    assert "SN123" in label_text
+    assert "Intel RealSense D455" in label_text
+
+
+def test_multi_camera_live_session_back_returns_to_camera_hub(qapp):
+    window = _make_window(qapp, _minimal_settings({}))
+    window.stack.setCurrentWidget(window.multi_camera_live_session_page)  # starts on the hub by default
+
+    window.multi_camera_live_session_page.back_requested.emit()
+
+    assert window.stack.currentWidget() is window.camera_hub_page

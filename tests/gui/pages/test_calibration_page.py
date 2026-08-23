@@ -181,3 +181,146 @@ def test_last_calibration_result_unchanged_after_a_failed_run(qapp, tmp_path):
         page._on_run_clicked()
 
     assert page.last_calibration_result is None
+
+
+# --- Back button: _run_calibration is synchronous but pumps processEvents()
+# via _log(), so Back must be disabled for its whole span (mirroring
+# run_button) rather than trying to cancel a run partway through ---
+
+def test_back_button_emits_back_requested(qapp, tmp_path):
+    page = CalibrationPage()
+    page.set_context(**_minimal_context(str(tmp_path)))
+    emitted = []
+    page.back_requested.connect(lambda: emitted.append(True))
+
+    page.back_button.click()
+
+    assert emitted == [True]
+
+
+def test_back_button_disabled_during_calibration_run(qapp, tmp_path):
+    page = CalibrationPage()
+    page.set_context(**_minimal_context(str(tmp_path)))
+    observed_enabled_during_run = []
+
+    def _fake_run_calibration(**kwargs):
+        observed_enabled_during_run.append(page.back_button.isEnabled())
+
+    with patch.object(page, "_run_calibration", side_effect=_fake_run_calibration):
+        page._on_run_clicked()
+
+    assert observed_enabled_during_run == [False]
+    assert page.back_button.isEnabled()
+
+
+def test_back_button_reenabled_after_failed_calibration_run(qapp, tmp_path):
+    page = CalibrationPage()
+    page.set_context(**_minimal_context(str(tmp_path)))
+
+    with patch.object(page, "_run_calibration", side_effect=RuntimeError("boom")):
+        page._on_run_clicked()
+
+    assert page.back_button.isEnabled()
+
+
+# --- Continue to Threshold Tuning: after Back from Threshold Tuning, the
+# operator shouldn't have to re-run a real calibration just to get back
+# there - Continue reuses the already-cached last_calibration_result (and
+# whatever's already on disk in config.yaml from the run that produced it)
+# by just re-emitting the same calibration_done signal a real run does. ---
+
+def test_continue_button_disabled_before_any_successful_run(qapp, tmp_path):
+    page = CalibrationPage()
+    page.set_context(**_minimal_context(str(tmp_path)))
+    assert not page.continue_button.isEnabled()
+
+
+def test_continue_button_enabled_after_a_successful_run(qapp, tmp_path):
+    config_path = str(tmp_path / "config.yaml")
+    with open(config_path, "w") as f:
+        f.write("leds: {}\n")
+    ctx = _real_hardware_context(str(tmp_path), config_path)
+    pick_a, pick_b = ctx["pick_a"], ctx["pick_b"]
+    on_frame_a = _make_2x2_grid_frame(60, 60, blob_value=220, background_value=20)
+    off_frame_a = np.full((60, 60), 20, dtype=np.uint8)
+
+    page = CalibrationPage()
+    page.set_context(**ctx)
+    with _patch_hardware_boundary(on_frame_a, off_frame_a, on_frame_a, off_frame_a, pick_a, pick_b), \
+         patch("time.sleep"):
+        page._on_run_clicked()
+
+    assert page.continue_button.isEnabled()
+
+
+def test_continue_button_stays_disabled_after_a_failed_run(qapp, tmp_path):
+    config_path = str(tmp_path / "config.yaml")
+    with open(config_path, "w") as f:
+        f.write("leds: {}\n")
+    ctx = _real_hardware_context(str(tmp_path), config_path)
+    pick_a, pick_b = ctx["pick_a"], ctx["pick_b"]
+    on_frame_a = _make_2x2_grid_frame(60, 60, blob_value=220, background_value=20)
+    off_frame_a = np.full((60, 60), 20, dtype=np.uint8)
+
+    page = CalibrationPage()
+    page.set_context(**ctx)
+    with _patch_hardware_boundary(on_frame_a, off_frame_a, on_frame_a, off_frame_a, pick_a, pick_b), \
+         patch("time.sleep"), \
+         patch("gui.pages.calibration_page.build_grid_positions", side_effect=RuntimeError("no LEDs detected")):
+        page._on_run_clicked()
+
+    assert not page.continue_button.isEnabled()
+
+
+def test_continue_button_emits_calibration_done_without_rerunning_calibration(qapp, tmp_path):
+    config_path = str(tmp_path / "config.yaml")
+    with open(config_path, "w") as f:
+        f.write("leds: {}\n")
+    ctx = _real_hardware_context(str(tmp_path), config_path)
+    pick_a, pick_b = ctx["pick_a"], ctx["pick_b"]
+    on_frame_a = _make_2x2_grid_frame(60, 60, blob_value=220, background_value=20)
+    off_frame_a = np.full((60, 60), 20, dtype=np.uint8)
+
+    page = CalibrationPage()
+    page.set_context(**ctx)
+    with _patch_hardware_boundary(on_frame_a, off_frame_a, on_frame_a, off_frame_a, pick_a, pick_b), \
+         patch("time.sleep"):
+        page._on_run_clicked()
+    cached_result = page.last_calibration_result
+
+    emitted = []
+    page.calibration_done.connect(lambda: emitted.append(True))
+    with patch.object(page, "_run_calibration") as mock_run:
+        page.continue_button.click()
+
+    mock_run.assert_not_called()
+    assert emitted == [True]
+    assert page.last_calibration_result is cached_result  # untouched, not recomputed
+
+
+def test_set_context_clears_last_calibration_result_and_disables_continue(qapp, tmp_path):
+    # A fresh set_context() call means genuinely new pending args (e.g. the
+    # operator went further back to ROI Select and redrew the ROI, or picked
+    # a different camera) that haven't been calibrated yet - any cached
+    # result from a DIFFERENT context must not be reusable via Continue.
+    # Back navigation (this feature's actual target case) never calls
+    # set_context() again, so this doesn't affect it.
+    config_path = str(tmp_path / "config.yaml")
+    with open(config_path, "w") as f:
+        f.write("leds: {}\n")
+    ctx = _real_hardware_context(str(tmp_path), config_path)
+    pick_a, pick_b = ctx["pick_a"], ctx["pick_b"]
+    on_frame_a = _make_2x2_grid_frame(60, 60, blob_value=220, background_value=20)
+    off_frame_a = np.full((60, 60), 20, dtype=np.uint8)
+
+    page = CalibrationPage()
+    page.set_context(**ctx)
+    with _patch_hardware_boundary(on_frame_a, off_frame_a, on_frame_a, off_frame_a, pick_a, pick_b), \
+         patch("time.sleep"):
+        page._on_run_clicked()
+    assert page.last_calibration_result is not None
+
+    page.set_context(**ctx)
+
+    assert page.last_calibration_result is None
+    assert not page.continue_button.isEnabled()

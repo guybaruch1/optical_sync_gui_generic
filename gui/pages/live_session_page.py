@@ -82,11 +82,11 @@ import glob
 import os
 
 import cv2
-from PySide6.QtCore import Qt, QSize, QRectF
+from PySide6.QtCore import Qt, QSize, QRectF, Signal
 from PySide6.QtGui import QIcon, QPixmap, QPainter, QPen, QColor
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QSpinBox, QDoubleSpinBox, QLabel, QCheckBox, QFrame,
-    QApplication, QScrollArea,
+    QApplication, QScrollArea, QMessageBox,
 )
 
 from gui.widgets.video_panel import VideoPanel
@@ -146,7 +146,16 @@ def _short_camera_name(camera_name):
     return parts[-1] if parts else camera_name
 
 
+def _camera_display_name(camera_name, device_serial):
+    # Two connected cameras of the same model (e.g. two D585s) are otherwise
+    # indistinguishable in this title - the serial is what actually tells
+    # them apart on a real multi-camera rig.
+    return "{} [{}]".format(_short_camera_name(camera_name), device_serial)
+
+
 class LiveSessionPage(QWidget):
+    back_requested = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.engine_thread = None
@@ -301,6 +310,9 @@ class LiveSessionPage(QWidget):
         )
         control_row = QHBoxLayout(toolbar_frame)
         control_row.setContentsMargins(10, 8, 10, 8)
+        self.back_button = QPushButton("Back")
+        self.back_button.clicked.connect(self._on_back_clicked)
+        control_row.addWidget(self.back_button)
         control_row.addWidget(QLabel("Duration (s, 0 = manual stop):"))
         self.duration_spinbox = QSpinBox()
         self.duration_spinbox.setRange(0, 3600)
@@ -529,9 +541,9 @@ class LiveSessionPage(QWidget):
         self._last_confirmed_switch_time_ms = float(switch_time_ms)
         self.switch_time_spinbox.setValue(float(switch_time_ms))
         self._update_confirm_switch_time_button_state()
-        short_name = _short_camera_name(camera_name)
-        self.stream_a_title_label.setText("{} - {}".format(short_name, stream_a_label))
-        self.stream_b_title_label.setText("{} - {}".format(short_name, stream_b_label))
+        display_name = _camera_display_name(camera_name, device_serial)
+        self.stream_a_title_label.setText("{} - {}".format(display_name, stream_a_label))
+        self.stream_b_title_label.setText("{} - {}".format(display_name, stream_b_label))
 
     def _begin_new_run_output(self, suffix=None):
         # Mints a fresh timestamped output/live_session_<timestamp>[_<config
@@ -676,6 +688,36 @@ class LiveSessionPage(QWidget):
     def stop_session(self):
         if self.engine_thread is not None:
             self.engine_thread.request_stop()
+
+    def _on_back_clicked(self):
+        # Unlike a preview (Stream Config/Threshold Tuning), an active live
+        # session is a deliberate, real timed test - interrupting it isn't
+        # obviously reversible the way stopping a preview is, so this asks
+        # first rather than silently stopping it the way those pages' own
+        # Back does.
+        if self._session_running:
+            answer = QMessageBox.question(
+                self, "Live session running",
+                "A live session is currently running. Going back will stop it now. Continue?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
+            self.stop_session()
+            # request_stop() is non-blocking (session_finished/error fire
+            # inside run()'s try block, before its finally block has actually
+            # torn down the camera/LED panel) - block here the same way
+            # start_session()'s own defensive wait does, so hardware is
+            # genuinely free before this page is left. wait() fully blocks
+            # the event loop, so back_button can't really be re-clicked
+            # during it - disabled anyway as the same cheap, consistent
+            # insurance ROI Select/Calibration already apply to their own
+            # blocking spans.
+            self.back_button.setEnabled(False)
+            if self.engine_thread is not None:
+                self.engine_thread.wait()
+            self.back_button.setEnabled(True)
+        self.back_requested.emit()
 
     def _on_switch_time_spinbox_changed(self, value):
         # No hardware call here - typing into the box only updates the GATE

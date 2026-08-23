@@ -84,6 +84,13 @@ def _short_camera_name(camera_name):
     return parts[-1] if parts else camera_name
 
 
+def _camera_display_name(camera_name, device_serial):
+    # Two connected cameras of the same model (e.g. two D585s) are otherwise
+    # indistinguishable in this title - the serial is what actually tells
+    # them apart on a real multi-camera rig.
+    return "{} [{}]".format(_short_camera_name(camera_name), device_serial)
+
+
 class CameraLiveSessionPanel(QWidget):
     def __init__(self, camera_id, parent=None):
         super().__init__(parent)
@@ -215,10 +222,10 @@ class CameraLiveSessionPanel(QWidget):
         self.status_label = QLabel("")
         layout.addWidget(self.status_label)
 
-    def set_camera_labels(self, camera_name, stream_a_label, stream_b_label):
-        short_name = _short_camera_name(camera_name)
-        self.stream_a_title_label.setText("{} - {}".format(short_name, stream_a_label))
-        self.stream_b_title_label.setText("{} - {}".format(short_name, stream_b_label))
+    def set_camera_labels(self, camera_name, device_serial, stream_a_label, stream_b_label):
+        display_name = _camera_display_name(camera_name, device_serial)
+        self.stream_a_title_label.setText("{} - {}".format(display_name, stream_a_label))
+        self.stream_b_title_label.setText("{} - {}".format(display_name, stream_b_label))
 
     def _make_chart_header(self, checkbox, plot_widget, series_names):
         row = QHBoxLayout()

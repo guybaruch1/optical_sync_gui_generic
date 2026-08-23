@@ -1,6 +1,5 @@
 import pyrealsense2 as rs
 
-import gui.pages.device_select_page as device_select_page_module
 from gui.pages.device_select_page import DeviceSelectPage, _device_label
 from engine.streams import DeviceInfo
 
@@ -23,8 +22,8 @@ def test_device_label_omits_mode_suffix_for_non_d585_family_device():
     assert _device_label(info, None) == "Intel RealSense D435 (987654321)"
 
 
-# --- RGB Mode choice (2C/3C radio buttons): only shown for a recognized
-# D535/D585 variant, defaulted to whatever mode the device is actually in ---
+# --- The combo entry's mode suffix is purely informational here - actually
+# switching mode now lives on Stream Config (see that page's own tests) ---
 
 class FakeDevice:
     def __init__(self, name, serial, pid):
@@ -58,118 +57,71 @@ D585_DEDICATED = FakeDevice("Intel RealSense D585", "SN_DEDICATED", "0C05")
 D435 = FakeDevice("Intel RealSense D435", "SN_D435", "0000")  # unrecognized PID - no 2C/3C concept
 
 
-def test_selecting_dual_rgb_d585_shows_mode_box_checked_to_dual(qapp):
+def test_refresh_devices_labels_show_each_devices_current_mode(qapp):
+    page = DeviceSelectPage()
+    page.refresh_devices(FakeCtx([D585_DUAL, D585_DEDICATED, D435]))
+
+    labels = [page.combo.itemText(i) for i in range(page.combo.count())]
+    assert labels == [
+        "Intel RealSense D585 - Dual RGB (SN_DUAL)",
+        "Intel RealSense D585 - Dedicated RGB (SN_DEDICATED)",
+        "Intel RealSense D435 (SN_D435)",
+    ]
+
+
+# --- Next: a pure device pick, emitted immediately - no mode business at
+# all (that moved to Stream Config, which Edit reaches directly - see
+# gui/main_window.py's _on_edit_camera_requested) ---
+
+def test_next_clicked_emits_the_selected_device(qapp):
     page = DeviceSelectPage()
     page.refresh_devices(FakeCtx([D585_DUAL]))
-    assert page.mode_group_box.isVisibleTo(page)
-    assert page.dual_radio.isChecked()
-    assert not page.dedicated_radio.isChecked()
-
-
-def test_selecting_dedicated_rgb_d585_shows_mode_box_checked_to_dedicated(qapp):
-    page = DeviceSelectPage()
-    page.refresh_devices(FakeCtx([D585_DEDICATED]))
-    assert page.mode_group_box.isVisibleTo(page)
-    assert page.dedicated_radio.isChecked()
-    assert not page.dual_radio.isChecked()
-
-
-def test_selecting_non_family_device_hides_mode_box(qapp):
-    page = DeviceSelectPage()
-    page.refresh_devices(FakeCtx([D435]))
-    assert not page.mode_group_box.isVisibleTo(page)
-
-
-def test_switching_from_dedicated_to_dual_device_updates_mode_box(qapp):
-    page = DeviceSelectPage()
-    page.refresh_devices(FakeCtx([D585_DEDICATED, D585_DUAL]))
-    assert page.dedicated_radio.isChecked()  # first device, index 0
-
-    page.combo.setCurrentIndex(1)  # the dual-mode device
-
-    assert page.dual_radio.isChecked()
-    assert not page.dedicated_radio.isChecked()
-
-
-# --- _on_next_clicked: only actually switches mode if the chosen radio
-# differs from the device's current mode ---
-
-def test_next_does_not_switch_mode_when_chosen_radio_matches_current_mode(qapp, monkeypatch):
-    calls = []
-    monkeypatch.setattr(device_select_page_module, "ensure_mode", lambda ctx, device, target_mode: calls.append(target_mode))
-    page = DeviceSelectPage()
-    page.refresh_devices(FakeCtx([D585_DUAL]))
-    assert page.dual_radio.isChecked()  # already matches current mode - untouched
 
     emitted = []
     page.device_chosen.connect(lambda serial, name: emitted.append((serial, name)))
     page._on_next_clicked()
 
-    assert calls == []
     assert emitted == [("SN_DUAL", "Intel RealSense D585")]
 
 
-def test_next_switches_mode_when_chosen_radio_differs_from_current_mode(qapp, monkeypatch):
-    calls = []
-    monkeypatch.setattr(device_select_page_module, "ensure_mode", lambda ctx, device, target_mode: calls.append(target_mode))
+def test_next_clicked_does_nothing_when_nothing_selected(qapp):
     page = DeviceSelectPage()
-    page.refresh_devices(FakeCtx([D585_DUAL]))
-    page.dedicated_radio.setChecked(True)  # operator explicitly picked the OTHER mode
-
-    emitted = []
-    page.device_chosen.connect(lambda serial, name: emitted.append((serial, name)))
-    page._on_next_clicked()
-
-    assert calls == ["dedicated"]
-    assert emitted == [("SN_DUAL", "Intel RealSense D585")]
-
-
-def test_next_shows_error_and_does_not_emit_when_switch_fails(qapp, monkeypatch):
-    def _raise(ctx, device, target_mode):
-        raise RuntimeError("hardware reset timed out")
-
-    monkeypatch.setattr(device_select_page_module, "ensure_mode", _raise)
-    page = DeviceSelectPage()
-    page.refresh_devices(FakeCtx([D585_DUAL]))
-    page.dedicated_radio.setChecked(True)
+    page.refresh_devices(FakeCtx([]))
 
     emitted = []
     page.device_chosen.connect(lambda serial, name: emitted.append((serial, name)))
     page._on_next_clicked()
 
     assert emitted == []
-    assert "Failed to switch" in page.status_label.text()
-    assert page.next_button.isEnabled()
-    assert page.combo.isEnabled()
-    assert page.mode_group_box.isEnabled()
 
 
-def test_next_does_not_touch_mode_for_non_family_device(qapp, monkeypatch):
-    calls = []
-    monkeypatch.setattr(device_select_page_module, "ensure_mode", lambda ctx, device, target_mode: calls.append(target_mode))
+# --- Back button: Device Select is the first page of a camera's sub-flow -
+# nothing running here to stop, so Back just emits back_requested (MainWindow
+# routes it to the Camera Hub) ---
+
+def test_back_button_emits_back_requested(qapp):
     page = DeviceSelectPage()
-    page.refresh_devices(FakeCtx([D435]))
-
     emitted = []
-    page.device_chosen.connect(lambda serial, name: emitted.append((serial, name)))
-    page._on_next_clicked()
+    page.back_requested.connect(lambda: emitted.append(True))
 
-    assert calls == []
-    assert emitted == [("SN_D435", "Intel RealSense D435")]
+    page.back_button.click()
+
+    assert emitted == [True]
 
 
-# --- Dual LED panel checkbox: a manual, operator-driven choice, independent
-# of which camera/device gets picked - see engine/dual_panel_control.py ---
+# --- exclude_serials: hides an already-configured camera from the picker,
+# so adding a new camera can't accidentally re-select one already in use ---
 
-def test_dual_panel_checkbox_defaults_unchecked(qapp):
+def test_refresh_devices_excludes_already_configured_serials(qapp):
     page = DeviceSelectPage()
-    assert not page.dual_panel_checkbox.isChecked()
+    page.refresh_devices(FakeCtx([D585_DUAL, D585_DEDICATED, D435]), exclude_serials={"SN_DEDICATED"})
+
+    serials = [page.combo.itemData(i) for i in range(page.combo.count())]
+    assert serials == ["SN_DUAL", "SN_D435"]
 
 
-def test_dual_panel_checkbox_stays_checked_across_device_refresh(qapp):
-    # Confirms the checkbox's state isn't tied to/reset by device
-    # selection - it's an independent, persistent operator choice.
+def test_refresh_devices_excludes_nothing_by_default(qapp):
     page = DeviceSelectPage()
-    page.dual_panel_checkbox.setChecked(True)
-    page.refresh_devices(FakeCtx([D435]))
-    assert page.dual_panel_checkbox.isChecked()
+    page.refresh_devices(FakeCtx([D585_DUAL, D435]))
+
+    assert page.combo.count() == 2

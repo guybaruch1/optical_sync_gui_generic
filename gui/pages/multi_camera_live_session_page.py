@@ -60,8 +60,10 @@ as defensive robustness against ever being reached with 1 camera.)"""
 import os
 
 import cv2
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSpinBox, QDoubleSpinBox, QTabWidget,
+    QMessageBox,
 )
 
 from gui.widgets.camera_live_session_panel import CameraLiveSessionPanel
@@ -130,7 +132,7 @@ def _camera_roles(cameras):
     slave_number = 0
     for camera in cameras:
         camera_id = camera["camera_id"]
-        display = "{} (SN {})".format(camera["label"], camera["config"]["device_serial"])
+        display = "{} [{}]".format(camera["label"], camera["config"]["device_serial"])
         if camera["is_master"]:
             roles[camera_id] = {"tag": "MASTER", "slug": "master", "display": display}
         else:
@@ -144,6 +146,8 @@ def _camera_roles(cameras):
 
 
 class MultiCameraLiveSessionPage(QWidget):
+    back_requested = Signal()
+
     def __init__(self, thread_factory=None, device_lookup=None, sync_setter=None,
                  camera_start_stagger_s=None, controller_factory=None, parent=None):
         super().__init__(parent)
@@ -206,6 +210,9 @@ class MultiCameraLiveSessionPage(QWidget):
         self.confirm_switch_time_button.clicked.connect(self._on_confirm_switch_time_clicked)
         toolbar.addWidget(self.confirm_switch_time_button)
 
+        self.back_button = QPushButton("Back")
+        self.back_button.clicked.connect(self._on_back_clicked)
+        toolbar.addWidget(self.back_button)
         self.start_button = QPushButton("Start All")
         self.start_button.clicked.connect(self.start_all_sessions)
         self.stop_button = QPushButton("Stop All")
@@ -284,7 +291,9 @@ class MultiCameraLiveSessionPage(QWidget):
         for camera in cameras:
             panel = CameraLiveSessionPanel(camera["camera_id"])
             config = camera["config"]
-            panel.set_camera_labels(camera["label"], config["stream_a_label"], config["stream_b_label"])
+            panel.set_camera_labels(
+                camera["label"], config["device_serial"], config["stream_a_label"], config["stream_b_label"]
+            )
             tab_label = "{} [{}]".format(camera["label"], roles[camera["camera_id"]]["tag"])
             self.tabs.addTab(panel, tab_label)
             self._panels[camera["camera_id"]] = panel
@@ -601,6 +610,32 @@ class MultiCameraLiveSessionPage(QWidget):
     def stop_all_sessions(self):
         if self._controller is not None:
             self._controller.stop_all()
+
+    def _on_back_clicked(self):
+        # Same confirm-before-interrupting reasoning as LiveSessionPage's own
+        # Back - N cameras instead of one doesn't change that an active run
+        # is a deliberate, real timed test.
+        if self._session_running:
+            answer = QMessageBox.question(
+                self, "Live session running",
+                "A live session is currently running. Going back will stop it now. Continue?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
+            self.stop_all_sessions()
+            # stop_all() only requests each thread stop (non-blocking) - wait
+            # for every one to actually finish (hardware cleanup included)
+            # before leaving, same reasoning as LiveSessionPage's own wait.
+            # Disabled for the same cheap, consistent insurance reasoning as
+            # that page's own equivalent span (fully blocks the event loop,
+            # so this isn't a real reentrancy fix).
+            self.back_button.setEnabled(False)
+            if self._controller is not None:
+                for thread in self._controller.threads.values():
+                    thread.wait()
+            self.back_button.setEnabled(True)
+        self.back_requested.emit()
 
     def _on_switch_time_spinbox_changed(self, value):
         self._update_confirm_switch_time_button_state()

@@ -95,20 +95,28 @@ design — see [Project structure](#project-structure)).
 
 The window opens maximized. Walk through the wizard:
 
-1. **Device Select** — pick your connected RealSense device. If it's a
-   D535/D585-family device, an "RGB Mode" choice appears (Dual RGB (2C) /
-   Dedicated RGB (3C)), defaulted to its current mode - pick the other one
-   before clicking **Next** to switch it (takes a few seconds). If your rig
-   uses two physically separate LED panels sharing one Acroname USB hub and
-   an external trigger relay, check "Use dual LED panel" here first - every
-   other step from here on will drive both panels together instead of one
-   (see `settings.yaml`'s `dual_panel:` section for the wiring specifics).
+1. **Device Select** — pick your connected RealSense device, then click
+   **Next**. Already-configured cameras are hidden from this list (can't add
+   the same physical camera twice); editing an existing camera skips this
+   step entirely, since its device is already known.
 2. **Stream Config** — pick a named test (defined per camera model in
    `settings.yaml`'s `camera.stream_options`) and a sensor-options
    resolution/fps/format pairing for it, and set the global camera controls
-   (IR emitter disable, auto/manual exposure+gain). Optionally click
-   **Start Preview** to check pairing quality live before clicking **Next**
-   (this stops the preview automatically).
+   (IR emitter disable, auto/manual exposure+gain). If the device is a
+   D535/D585-family device, an "RGB Mode" choice appears here (Dual RGB (2C) /
+   Dedicated RGB (3C)), defaulted to its current mode - picking the other one
+   and clicking **Next** switches it (takes a few seconds) and refreshes this
+   page's Test/Sensor Options against the new mode's capabilities, rather
+   than proceeding immediately (the switch can change which options are even
+   valid - click **Next** again once you're happy with the refreshed list).
+   If your rig uses two physically separate LED panels sharing one Acroname
+   USB hub and an external trigger relay, check "Use dual LED panel" here -
+   this is a per-test choice (the same camera can need it for one test and
+   not another), so it lives next to the Test picker rather than on Device
+   Select; every other step from here on will drive both panels together
+   instead of one (see `settings.yaml`'s `dual_panel:` section for the wiring
+   specifics). Optionally click **Start Preview** to check pairing quality
+   live before clicking **Next** (this stops the preview automatically).
 3. **ROI Select** — click **Capture & Select ROI**; a popup shows a frame
    with all LEDs lit. Drag a box around the panel on Stream A's window,
    press Enter, then repeat for Stream B's window.
@@ -167,7 +175,7 @@ The window opens maximized. Walk through the wizard:
   wiring (`dual_panel.stream_a_panel_port`/`stream_b_panel_port`/`relay_port`
   - Acroname hub USB port numbers, keyed per STREAM since the mapping isn't
   necessarily 0=A/1=B on your rig, `relay_com_port`, `hub_switch_settle_s` -
-  only read when Device Select's "Use dual LED panel" checkbox is checked;
+  only read when Stream Config's "Use dual LED panel" checkbox is checked;
   the latter is a real-hardware-tuned guess, keep raising it if panel
   commands still seem unreliable).
   Nothing in the app writes to this file.

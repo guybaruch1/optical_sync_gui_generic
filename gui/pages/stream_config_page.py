@@ -39,11 +39,23 @@ from PySide6.QtWidgets import (
 )
 
 from engine.stream_preview_thread import StreamPreviewThread
+from engine.streams import find_device_by_serial
+from engine.rgb_mode import get_mode
 from gui.pages.roi_select_page import stream_label
 from gui.widgets.video_panel import VideoPanel
 
 
 _STREAM_TYPE_SHORT_LABELS = {"infrared": "IR", "color": "RGB"}
+
+# Matches _build_camera_control_group's own hardcoded widget defaults
+# (emitter_checkbox - "Disable IR emitter" - checked by default, i.e.
+# emitter_enabled False; auto_radio checked by default; exposure spins
+# default to 8500) - populate() applies this explicitly for a fresh Add (no
+# preferred_camera_controls given), same reasoning as preferred_dual_panel's
+# own explicit reset.
+DEFAULT_CAMERA_CONTROLS = {
+    "emitter_enabled": False, "auto_exposure": True, "exposure_a": 8500, "exposure_b": 8500,
+}
 
 
 def _side_short_label(pick):
@@ -80,6 +92,8 @@ def _sensor_option_label(option):
 
 class StreamConfigPage(QWidget):
     config_chosen = Signal(tuple)
+    back_requested = Signal()
+    mode_switch_requested = Signal(str)  # target_mode ("dual"/"dedicated")
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -94,6 +108,13 @@ class StreamConfigPage(QWidget):
         # same IR/RGB sync fix (or lack of it) the real run downstream will
         # actually use, rather than always defaulting to depth-on.
         self._enable_depth_for_ir_sync = True
+        # The device's CURRENT RGB mode ("dual"/"dedicated"/None), fetched at
+        # populate() time - None either means an unrecognized device (no
+        # Dual/Dedicated RGB concept at all) or a lookup failure, both of
+        # which hide mode_group_box entirely. _on_next_clicked compares the
+        # radio selection against this to decide whether a switch is even
+        # needed.
+        self._current_rgb_mode = None
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -102,6 +123,39 @@ class StreamConfigPage(QWidget):
         form.addRow(QLabel("Test:"), self.combo_test)
         form.addRow(QLabel("Sensor Options:"), self.combo_sensor_options)
         layout.addLayout(form)
+
+        # Moved here from Device Select: switching RGB mode changes which
+        # streams the device exposes, which would invalidate whatever Test/
+        # Sensor Options this page already resolved - the switch has to
+        # happen (and refresh those lists) on the SAME page that shows them,
+        # not one page earlier where nothing downstream exists to invalidate
+        # yet. Defaulted to whatever mode the device is actually in right
+        # now (populate()); hidden entirely for a device with no recognized
+        # Dual/Dedicated RGB concept (e.g. a D435/D455).
+        self.mode_group_box = QGroupBox("RGB Mode")
+        mode_layout = QVBoxLayout(self.mode_group_box)
+        self.dual_radio = QRadioButton("Dual RGB (2C)")
+        self.dedicated_radio = QRadioButton("Dedicated RGB (3C)")
+        mode_button_group = QButtonGroup(self.mode_group_box)
+        mode_button_group.addButton(self.dual_radio)
+        mode_button_group.addButton(self.dedicated_radio)
+        mode_layout.addWidget(self.dual_radio)
+        mode_layout.addWidget(self.dedicated_radio)
+        self.mode_group_box.setVisible(False)
+        layout.addWidget(self.mode_group_box)
+
+        # Manual operator toggle, per-camera-FLOW (this page is revisited
+        # once per camera, and dual-panel need depends on which Test is
+        # picked here - e.g. one D585 doing IR-vs-RGB needs two panels, the
+        # same D585 doing IR-vs-IR needs one) - not a whole-test setting, and
+        # not yet auto-inferred from the Test choice. Moved here from Device
+        # Select so it sits next to the choice it actually depends on, and
+        # so Edit (which skips Device Select) can still reach it. See
+        # engine/dual_panel_control.py and settings.yaml's dual_panel:
+        # section (hub port numbers/relay COM port - fixed wiring specifics,
+        # not a per-run choice).
+        self.dual_panel_checkbox = QCheckBox("Use dual LED panel (Acroname hub + external trigger)")
+        layout.addWidget(self.dual_panel_checkbox)
 
         self.combo_test.currentIndexChanged.connect(self._on_test_changed)
 
@@ -124,9 +178,14 @@ class StreamConfigPage(QWidget):
         self.status_label = QLabel("")
         layout.addWidget(self.status_label)
 
+        nav_row = QHBoxLayout()
+        self.back_button = QPushButton("Back")
+        self.back_button.clicked.connect(self._on_back_clicked)
+        nav_row.addWidget(self.back_button)
         self.next_button = QPushButton("Next")
         self.next_button.clicked.connect(self._on_next_clicked)
-        layout.addWidget(self.next_button)
+        nav_row.addWidget(self.next_button)
+        layout.addLayout(nav_row)
 
     @property
     def pick_a(self):
@@ -158,7 +217,8 @@ class StreamConfigPage(QWidget):
         return self.combo_test.currentData()
 
     def populate(self, ctx, device_serial, tests, preferred_a=None, preferred_b=None,
-                 preferred_test_name=None, enable_depth_for_ir_sync=True):
+                 preferred_test_name=None, enable_depth_for_ir_sync=True, preferred_dual_panel=False,
+                 preferred_camera_controls=None):
         """`tests` is engine.streams.resolve_camera_tests's output, already
         filtered by gui/main_window.py to tests with at least one
         sensor_options entry matching this connected device - each entry is
@@ -176,13 +236,41 @@ class StreamConfigPage(QWidget):
         preselection (only pick_a is matched, same as this project's other
         preselection logic). enable_depth_for_ir_sync is settings.yaml's
         camera_sync.enable_depth_for_ir_sync, forwarded into the pairing-
-        quality preview's own ContinuousCapture - see _on_start_preview_clicked."""
+        quality preview's own ContinuousCapture - see _on_start_preview_clicked.
+        preferred_dual_panel pre-checks dual_panel_checkbox (Edit's own
+        previous choice for this camera); defaults False/unchecked for a
+        fresh Add, and is always applied explicitly (never left as-is) since
+        this page's one instance is reused across every camera's own visit.
+        preferred_camera_controls is the same idea for the camera-control
+        widgets (emitter/exposure) - a dict shaped like _read_camera_
+        controls' own output (Edit's own previous choice); None falls back
+        to DEFAULT_CAMERA_CONTROLS, always applied explicitly for the same
+        stale-carryover reason."""
         self.ctx = ctx
         self.device_serial = device_serial
         self._tests = list(tests)
         self._preferred_a = preferred_a
         self._preferred_b = preferred_b
         self._enable_depth_for_ir_sync = enable_depth_for_ir_sync
+        # Always set, never left as-is - this page's SAME instance is reused
+        # across every camera's own sub-flow visit, so a previous camera's
+        # checked state must not silently leak into this one's default.
+        self.dual_panel_checkbox.setChecked(bool(preferred_dual_panel))
+        self._apply_camera_controls_to_widgets(preferred_camera_controls or DEFAULT_CAMERA_CONTROLS)
+
+        try:
+            self._current_rgb_mode = get_mode(find_device_by_serial(ctx, device_serial))
+        except Exception:
+            # The device can vanish between MainWindow resolving it and this
+            # lookup (e.g. unplugged mid-wizard) - fall back to "no mode
+            # concept" rather than raise out of populate().
+            self._current_rgb_mode = None
+        if self._current_rgb_mode is None:
+            self.mode_group_box.setVisible(False)
+        else:
+            self.mode_group_box.setVisible(True)
+            self.dual_radio.setChecked(self._current_rgb_mode == "dual")
+            self.dedicated_radio.setChecked(self._current_rgb_mode == "dedicated")
 
         self.combo_test.blockSignals(True)
         self.combo_test.clear()
@@ -317,7 +405,7 @@ class StreamConfigPage(QWidget):
             "Exposure ({}):".format(stream_label(pick_b)) if pick_b is not None else "Exposure B:"
         )
 
-    def _read_camera_controls(self):
+    def read_camera_controls(self):
         """Returns the single global camera-control dict - applied
         uniformly to every resolved sensor group (see
         gui.pages.roi_select_page._apply_camera_controls), which then picks
@@ -325,7 +413,12 @@ class StreamConfigPage(QWidget):
         exposure_for_group depending on which stream that group actually
         contains. No "gain" key - manual exposure mode never touches gain
         at all (see engine.streams.set_manual_exposure's docstring for
-        why), so there is nothing for this dict to carry for it."""
+        why), so there is nothing for this dict to carry for it. Public
+        (unlike most of this page's helpers) - part of this page's
+        documented produced interface alongside pick_a/pick_b/
+        current_test_name: gui/main_window.py's own mode-switch handler
+        reads this to carry the operator's current camera-control choices
+        through a Test/Sensor Options refresh."""
         w = self._camera_controls
         auto_exposure = w["auto_radio"].isChecked()
         return {
@@ -334,6 +427,23 @@ class StreamConfigPage(QWidget):
             "exposure_a": None if auto_exposure else w["exposure_a_spin"].value(),
             "exposure_b": None if auto_exposure else w["exposure_b_spin"].value(),
         }
+
+    def _apply_camera_controls_to_widgets(self, camera_controls):
+        """The inverse of read_camera_controls - lets populate() prefill
+        this page's camera-control widgets from a previously-read dict
+        (Edit's own previous choice for this camera), rather than always
+        starting from the hardcoded widget defaults DEFAULT_CAMERA_CONTROLS
+        below."""
+        w = self._camera_controls
+        w["emitter_checkbox"].setChecked(not camera_controls["emitter_enabled"])
+        if camera_controls["auto_exposure"]:
+            w["auto_radio"].setChecked(True)
+        else:
+            w["manual_radio"].setChecked(True)
+            if camera_controls["exposure_a"] is not None:
+                w["exposure_a_spin"].setValue(camera_controls["exposure_a"])
+            if camera_controls["exposure_b"] is not None:
+                w["exposure_b_spin"].setValue(camera_controls["exposure_b"])
 
     def _streams_are_identical(self, pick_a, pick_b):
         return pick_a["stream_type"] == pick_b["stream_type"] and pick_a["stream_index"] == pick_b["stream_index"]
@@ -386,6 +496,29 @@ class StreamConfigPage(QWidget):
         self.status_label.setText("Error: {}".format(message))
         self._stop_preview()
 
+    def _on_back_clicked(self):
+        # Same silent auto-stop precedent _on_next_clicked already uses - a
+        # pairing-quality preview has no work to lose, so Back doesn't need
+        # to ask before stopping it, only before leaving with it still open.
+        self._stop_preview()
+        self.back_requested.emit()
+
+    def note_mode_switch_applied(self, new_mode):
+        """Called by gui/main_window.py's _on_stream_config_mode_switch_
+        requested after a real ensure_mode() call has already succeeded,
+        even on the branch where the subsequent Test/Sensor Options
+        re-populate then fails (e.g. no configured test matches this
+        camera's new mode, so populate() - and therefore the fresh
+        get_mode() lookup that would normally refresh _current_rgb_mode -
+        never runs). Without this, _current_rgb_mode would stay stale at
+        the PRE-switch value, making the next Next click think another
+        switch is still needed and re-trigger ensure_mode() for a switch
+        that already succeeded - an unrecoverable retry loop, since
+        nothing about the device's real mode would ever change again."""
+        self._current_rgb_mode = new_mode
+        self.dual_radio.setChecked(new_mode == "dual")
+        self.dedicated_radio.setChecked(new_mode == "dedicated")
+
     def _on_next_clicked(self):
         pick_a = self.pick_a
         pick_b = self.pick_b
@@ -397,6 +530,18 @@ class StreamConfigPage(QWidget):
                 "settings.yaml entry."
             )
             return
+        if self._current_rgb_mode is not None:
+            target_mode = "dual" if self.dual_radio.isChecked() else "dedicated"
+            if target_mode != self._current_rgb_mode:
+                # Don't proceed - the switch changes which streams the
+                # device exposes, so whatever Test/Sensor Options are
+                # currently selected may no longer even be valid.
+                # MainWindow.py's own handler applies the switch and calls
+                # populate() again with the refreshed device capabilities;
+                # the operator reviews the (possibly changed) result and
+                # clicks Next again to actually proceed.
+                self.mode_switch_requested.emit(target_mode)
+                return
         self._stop_preview()
-        camera_controls = self._read_camera_controls()
+        camera_controls = self.read_camera_controls()
         self.config_chosen.emit((pick_a, pick_b, camera_controls))
