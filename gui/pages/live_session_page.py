@@ -100,6 +100,7 @@ from domain.plot_export import export_session_plot
 from domain.realsense_utils import draw_led_state_overlay, crop_to_roi, combine_side_by_side
 from domain.running_stats import RunningStats
 from domain.run_output import create_run_dir, build_live_session_config_suffix
+from tools.standalone_sync_test.config_io import CONFIG_FILENAME, write_gui_run_config
 
 
 def _build_copy_icon(color="#555555", size=18):
@@ -492,7 +493,8 @@ class LiveSessionPage(QWidget):
                      dual_panel_config=None, enable_depth_for_ir_sync=True,
                      hardware_reset_before_start=False, hardware_reset_settle_s=8.0):
         self._context = dict(
-            ctx=ctx, device_serial=device_serial, pick_a=pick_a, pick_b=pick_b, camera_controls=camera_controls,
+            ctx=ctx, device_serial=device_serial, camera_name=camera_name,
+            pick_a=pick_a, pick_b=pick_b, camera_controls=camera_controls,
             switch_time_ms=switch_time_ms, scan_direction=scan_direction,
             # Final, already-tuned per-LED threshold arrays - tuning itself
             # (per-stream, with a live detection preview) already happened
@@ -581,6 +583,31 @@ class LiveSessionPage(QWidget):
         # though the run itself used the newly-confirmed one.
         self.stats_panel.set_value("switch_time_ms", switch_time_ms)
         display_stride = self.frame_sample_interval_spinbox.value()
+        # Snapshot everything this run resolved (picks, camera controls,
+        # calibrated LED positions/thresholds, dual-panel wiring, etc.) to
+        # gui_run_config.json under output_root, unconditionally, on every
+        # Start - lets tools/standalone_sync_test/run_sync_test.py rerun
+        # this exact test headless afterward with no GUI involved. Always
+        # overwrites the same path (not per-run-timestamped), so it always
+        # reflects the MOST RECENT Start, matching that script's own "run
+        # the wizard once, then rerun the script as many times as you want"
+        # usage. See tools/standalone_sync_test/config_io.py - this is the
+        # only write call the app itself makes; all the actual
+        # serialization logic lives in that tool's own folder.
+        #
+        # Best-effort, deliberately non-fatal: this snapshot is a
+        # convenience for an external tool, not part of what a real
+        # session needs to run - a failure here (e.g. an incomplete pick
+        # dict from a test double, or a permissions error on output_root)
+        # must never abort the actual live session Start.
+        try:
+            write_gui_run_config(
+                os.path.join(ctx["output_root"], CONFIG_FILENAME), ctx, switch_time_ms, display_stride, duration_s,
+            )
+        except Exception as exc:
+            print("WARNING: could not write {} for tools/standalone_sync_test/run_sync_test.py: {}".format(
+                CONFIG_FILENAME, exc
+            ))
         # Read BEFORE _begin_new_run_output() (unlike before this feature
         # existed) - the output folder's own name now encodes these three
         # plus the camera pick/exposure mode, so they all have to be known
