@@ -11,26 +11,23 @@ stays out of app code.
 CONFIG_FILENAME is written under the app's own settings.yaml paths.
 output_dir every time a real Live Session run starts (always overwritten,
 so it reflects the MOST RECENT real GUI run, not a specific historical
-one) - run_sync_test.py defaults to reading that same location, computed
-the same way (settings.yaml's paths.output_dir + this filename), so
-nothing has to be typed twice.
+one). The real GUI resolves that output_dir relative to its own working
+directory (always the project root, in practice), so run_sync_test.py
+must NOT do the same relative-to-cwd join itself - a script can
+reasonably be invoked from anywhere, including from inside this very
+tools/standalone_sync_test/ folder, which would otherwise silently look
+in (or create) a second, different "output" folder there instead of the
+project's real one. run_sync_test.py anchors this filename to REPO_ROOT
+itself rather than a helper here, the same way it already anchors
+settings.yaml's own path - see that script's own main().
 """
 
 import json
-import os
 
 import numpy as np
 import pyrealsense2 as rs
 
 CONFIG_FILENAME = "gui_run_config.json"
-
-
-def default_config_path(settings):
-    """Where run_sync_test.py looks by default - settings.yaml's own
-    paths.output_dir + CONFIG_FILENAME, computed the same way
-    write_gui_run_config's caller (live_session_page.py) computes it from
-    ctx["output_root"], so the two never have to be kept in sync by hand."""
-    return os.path.join(settings["paths"]["output_dir"], CONFIG_FILENAME)
 
 
 def _pick_to_json(pick):

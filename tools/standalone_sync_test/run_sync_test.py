@@ -55,7 +55,7 @@ sys.path.insert(0, REPO_ROOT)
 
 import pyrealsense2 as rs  # noqa: E402
 
-from settings import load_settings, ensure_output_dir  # noqa: E402
+from settings import load_settings  # noqa: E402
 from engine.streams import (  # noqa: E402
     ContinuousCapture, find_device_by_serial, resolve_and_group,
     set_emitter_enabled, enable_auto_exposure, set_manual_exposure, exposure_for_group,
@@ -68,7 +68,7 @@ from domain.realsense_utils import sample_all_neighborhood_brightness, safe_neig
 from domain.csv_export import export_session_csvs  # noqa: E402
 from domain.plot_export import export_session_plot  # noqa: E402
 from domain.run_output import create_run_dir  # noqa: E402
-from tools.standalone_sync_test.config_io import load_gui_run_config, default_config_path  # noqa: E402
+from tools.standalone_sync_test.config_io import load_gui_run_config, CONFIG_FILENAME  # noqa: E402
 
 
 def parse_args():
@@ -119,9 +119,21 @@ def apply_camera_controls(groups, pick_a, pick_b, camera_controls):
 def main():
     args = parse_args()
     settings = load_settings(os.path.join(REPO_ROOT, "settings.yaml"))
-    output_dir = ensure_output_dir(settings)
+    # Anchored to REPO_ROOT, not left as settings.yaml's own plain relative
+    # "output" string (what ensure_output_dir alone would give) - the real
+    # GUI (gui/pages/live_session_page.py's start_session()) always writes
+    # gui_run_config.json under the PROJECT's output/, since it's launched
+    # with the project root as its working directory. This script has no
+    # such guarantee - it can reasonably be run from anywhere, including
+    # from inside this very tools/standalone_sync_test/ folder - so its own
+    # notion of "output" must resolve to the same physical folder the GUI
+    # used regardless of the CURRENT WORKING DIRECTORY it happens to be
+    # invoked from, the same reasoning settings.yaml's own path above
+    # already gets.
+    output_dir = os.path.join(REPO_ROOT, settings["paths"]["output_dir"])
+    os.makedirs(output_dir, exist_ok=True)
 
-    config_path = args.config or default_config_path(settings)
+    config_path = args.config or os.path.join(output_dir, CONFIG_FILENAME)
     if not os.path.exists(config_path):
         raise SystemExit(
             "No GUI run config found at {!r}. Run the app's wizard through to a real Live "
