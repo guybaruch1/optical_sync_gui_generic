@@ -31,6 +31,7 @@ panel_connection:
   ssh_user: <windows-user>
   ssh_host: <windows machine's address on the shared network>
   remote_repo_path: <where this repo lives on the Windows machine, e.g. C:/Users/<user>/optical_sync_gui_generic>
+  remote_python: python  # defaults to "python" since the remote machine is always Windows
 ```
 
 ## Troubleshooting

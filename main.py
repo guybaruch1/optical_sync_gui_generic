@@ -33,6 +33,7 @@ def main():
             settings["panel_connection"]["ssh_user"],
             settings["panel_connection"]["ssh_host"],
             settings["panel_connection"]["remote_repo_path"],
+            settings["panel_connection"].get("remote_python", "python"),
         )
 
     window = MainWindow(ctx, gui_state, settings)
@@ -42,7 +43,10 @@ def main():
     # that may be too big or too small for a given monitor.
     window.showMaximized()
 
-    sys.exit(app.exec())
+    exit_code = app.exec()
+    if settings["panel_connection"]["mode"] == "remote":
+        panel_rpc_client.close()
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

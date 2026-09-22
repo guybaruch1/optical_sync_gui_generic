@@ -311,6 +311,14 @@ panel_connection:
   # Where this same repo lives on that Windows machine, used to locate
   # tools/panel_server/panel_server_stdio.py to run over ssh.
   remote_repo_path: ""
+  # The python command to invoke on the remote machine. Defaults to
+  # "python" (not "python3") since the remote machine is BY DEFINITION
+  # always Windows (the whole point of this feature) - the python.org
+  # Windows installer creates python.exe/the py launcher, not python3.exe,
+  # and Windows 10/11 ships its own python3.exe App Execution Alias stub
+  # that redirects to the Microsoft Store when no real Python 3 install is
+  # present, failing non-interactively with a confusing error.
+  remote_python: python
 
 paths:
   config_path: config.yaml
