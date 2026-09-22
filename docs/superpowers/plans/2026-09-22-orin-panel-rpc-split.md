@@ -402,8 +402,11 @@ expected and correct here - fix them in the same step, not around it).
 # Add near the top, alongside the existing imports:
 from subprocess import DEVNULL
 
-# ... then update every existing check_call assertion for a _run-based
-# method to include the new kwargs. For example:
+# ... then EDIT every existing check_call assertion for a _run-based
+# method IN PLACE to include the new kwargs - replace each function body
+# below inside its existing, same-named `def` in the file; do not add a
+# second definition with the same name anywhere. The functions below are
+# shown in full only so the exact expected assertion is unambiguous:
 
 def test_set_speed_ms_converts_to_seconds_string():
     with patch("engine.led_panel.check_call") as mock_check_call, patch("time.sleep"):
