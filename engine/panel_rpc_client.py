@@ -18,12 +18,23 @@ _lock = threading.Lock()
 _state = {"process": None, "config": None, "next_id": itertools.count(1)}
 
 
-def configure(ssh_user, ssh_host, remote_repo_path):
-    """Called once at startup (main.py) before any remote call is made."""
+def configure(ssh_user, ssh_host, remote_repo_path, remote_python="python"):
+    """Called once at startup (main.py) before any remote call is made.
+
+    remote_python defaults to "python", not "python3" - the remote machine
+    is by definition always Windows (the whole point of this feature is
+    that the LED-panel hardware only works from Windows), and the
+    python.org Windows installer creates python.exe/the py launcher, not
+    python3.exe. Windows 10/11 actually ships its own python3.exe App
+    Execution Alias stub that redirects to the Microsoft Store when no
+    real Python 3 install is present, which fails non-interactively with a
+    confusing error - "python" avoids that trap entirely.
+    """
     _state["config"] = {
         "ssh_user": ssh_user,
         "ssh_host": ssh_host,
         "remote_repo_path": remote_repo_path,
+        "remote_python": remote_python,
     }
 
 
@@ -42,8 +53,24 @@ def _ensure_connected():
         config["remote_repo_path"]
     )
     target = "{}@{}".format(config["ssh_user"], config["ssh_host"])
+    # ssh itself concatenates everything after the target into ONE string
+    # that the REMOTE shell re-splits on spaces - subprocess.Popen's own
+    # list-argv protection only guards against the LOCAL shell. A
+    # remote_repo_path containing a space (e.g. "C:/Users/someone/scripts/
+    # Optical Sync/optical_sync_gui_generic") would otherwise get split
+    # apart by the remote shell mid-path. Building the remote side as ONE
+    # quoted argument keeps it intact.
+    remote_cmd = '"{}" -u "{}"'.format(config["remote_python"], remote_script)
     process = subprocess.Popen(
-        ["ssh", target, "python3", "-u", remote_script],
+        [
+            "ssh",
+            "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=10",
+            "-o", "ServerAliveInterval=5",
+            "-o", "ServerAliveCountMax=3",
+            target,
+            remote_cmd,
+        ],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         text=True,
@@ -131,4 +158,8 @@ def close():
         except OSError:
             pass
         process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
         _state["process"] = None

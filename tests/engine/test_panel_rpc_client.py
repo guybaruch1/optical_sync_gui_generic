@@ -64,7 +64,15 @@ def test_led_panel_run_sends_a_request_and_returns_the_result():
     request = json.loads(process.stdin.written[0])
     assert request == {"id": 1, "method": "led_panel_run", "args": ["--start"]}
     mock_popen.assert_called_once_with(
-        ["ssh", "winuser@winhost", "python3", "-u", "/repo/tools/panel_server/panel_server_stdio.py"],
+        [
+            "ssh",
+            "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=10",
+            "-o", "ServerAliveInterval=5",
+            "-o", "ServerAliveCountMax=3",
+            "winuser@winhost",
+            '"python" -u "/repo/tools/panel_server/panel_server_stdio.py"',
+        ],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1,
     )
 
