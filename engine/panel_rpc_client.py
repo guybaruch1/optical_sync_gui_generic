@@ -68,16 +68,23 @@ def _call(method, args):
         if not line:
             raise RuntimeError("Panel server connection lost - remote process exited")
 
-        response = json.loads(line)
-        if response["id"] != request_id:
+        try:
+            response = json.loads(line)
+            if response["id"] != request_id:
+                raise RuntimeError(
+                    "Panel server response id mismatch: expected {}, got {}".format(
+                        request_id, response["id"]
+                    )
+                )
+            if "error" in response:
+                raise RuntimeError(response["error"])
+            return response["result"]
+        except (json.JSONDecodeError, KeyError) as exc:
             raise RuntimeError(
-                "Panel server response id mismatch: expected {}, got {}".format(
-                    request_id, response["id"]
+                "Panel server returned malformed response: {} (line: {})".format(
+                    type(exc).__name__, line.strip()
                 )
             )
-        if "error" in response:
-            raise RuntimeError(response["error"])
-        return response["result"]
 
 
 def led_panel_run(args):

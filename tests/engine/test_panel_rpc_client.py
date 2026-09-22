@@ -155,3 +155,19 @@ def test_close_terminates_the_process():
 
     process.terminate.assert_called_once()
     assert panel_rpc_client._state["process"] is None
+
+
+def test_malformed_json_response_raises_runtime_error():
+    panel_rpc_client.configure("winuser", "winhost", "/repo")
+    process = _fake_process(['not valid json\n'])
+    with patch("subprocess.Popen", return_value=process):
+        with pytest.raises(RuntimeError, match="malformed"):
+            panel_rpc_client.led_panel_run("--start")
+
+
+def test_missing_result_key_in_response_raises_runtime_error():
+    panel_rpc_client.configure("winuser", "winhost", "/repo")
+    process = _fake_process(['{"id": 1}\n'])  # no "result" or "error" key
+    with patch("subprocess.Popen", return_value=process):
+        with pytest.raises(RuntimeError, match="malformed response"):
+            panel_rpc_client.led_panel_run("--start")
