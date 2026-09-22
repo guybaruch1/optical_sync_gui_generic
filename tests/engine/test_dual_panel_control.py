@@ -795,3 +795,28 @@ def test_enter_then_exit_stream_panel_match_switched_to_stream_panel_behavior():
     mock_sleep.assert_called_once_with(3.0)
     mock_led_panel.reset.assert_called_once()
     assert dual_panel_control._stream_panel_state["hub"] is None
+
+
+def test_enter_stream_panel_disconnects_hub_if_switch_body_raises():
+    # Regression: enter_stream_panel used to have no try/except at all
+    # around the port-lookup/enable_ports/disable_ports/sleep body - a
+    # failure there (a KeyError on a missing config key, or a real
+    # brainstem/hardware error out of enable_ports/disable_ports) left the
+    # hub connected (leaking it - the next _connect_hub() would try to
+    # connect to an already-connected hub) with no cleanup at all. Before
+    # this task's refactor, switched_to_stream_panel's own try/finally
+    # covered exactly this; enter_stream_panel must restore that guarantee
+    # on its own now that it holds the connect call.
+    fake_hub = _FakeHubForSwitch()
+    fake_hub.enable_ports = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("hub error"))
+
+    def fake_acroname_hub_module():
+        return type("module", (), {"AcronameHub": lambda: fake_hub})
+
+    with patch.dict("sys.modules", {"engine.acroname_hub": fake_acroname_hub_module()}), \
+         patch("engine.dual_panel_control.LEDPanel"), \
+         patch("time.sleep"):
+        with pytest.raises(RuntimeError, match="hub error"):
+            enter_stream_panel(DUAL_PANEL_CONFIG, "stream_a")
+
+    assert fake_hub.calls[-1] == "disconnect"

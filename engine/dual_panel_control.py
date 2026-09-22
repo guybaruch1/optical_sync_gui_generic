@@ -318,14 +318,27 @@ def enter_stream_panel(dual_panel_config, stream_name):
     connected hub across them (module-level, mirroring _relay_connection's
     existing pattern in this same file)."""
     hub = _connect_hub()
-    my_port = dual_panel_config["{}_panel_port".format(stream_name)]
-    other_stream = "stream_b" if stream_name == "stream_a" else "stream_a"
-    other_port = dual_panel_config["{}_panel_port".format(other_stream)]
-    relay_port = dual_panel_config["relay_port"]
+    try:
+        my_port = dual_panel_config["{}_panel_port".format(stream_name)]
+        other_stream = "stream_b" if stream_name == "stream_a" else "stream_a"
+        other_port = dual_panel_config["{}_panel_port".format(other_stream)]
+        relay_port = dual_panel_config["relay_port"]
 
-    hub.enable_ports([my_port], False, delay_in_seconds=0)
-    hub.disable_ports([other_port, relay_port])
-    time.sleep(dual_panel_config["hub_switch_settle_s"])
+        hub.enable_ports([my_port], False, delay_in_seconds=0)
+        hub.disable_ports([other_port, relay_port])
+        time.sleep(dual_panel_config["hub_switch_settle_s"])
+    except BaseException:
+        # A failure anywhere in the switch body (a KeyError on a missing
+        # config key, or a real brainstem/hardware error out of
+        # enable_ports/disable_ports) must not leave the hub connected -
+        # the next _connect_hub() call would otherwise try to connect to an
+        # already-connected hub. Mirrors the try/finally
+        # switched_to_stream_panel's body had before enter_stream_panel was
+        # split out of it. Full de-priming on failure is exit_stream_panel's
+        # job on success, not this function's - re-raising here (rather than
+        # swallowing) keeps that a separate, smaller question.
+        hub.disconnect()
+        raise
     _stream_panel_state["hub"] = hub
 
 
