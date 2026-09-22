@@ -121,7 +121,8 @@ box itself, exactly as today.
   `RuntimeError("Panel server connection lost - ...")` - no silent retry,
   matching this codebase's existing "fail loudly" convention (see
   `ContinuousCapture.start()`'s own no-`can_resolve()`-pre-check reasoning).
-  Reconnecting after a drop means restarting the app (see §7).
+  The connection self-heals on the NEXT call after a drop - no need to
+  restart the app (see §7).
 
 - **`settings.yaml`** gains:
   ```yaml
@@ -289,11 +290,16 @@ behavior has exactly one implementation regardless of which branch runs it.
 
 ## 7. Explicitly out of scope
 
-- **No automatic reconnect on a dropped SSH connection mid-session.** If
-  the `ssh` subprocess dies (network hiccup, Windows machine sleeps, etc.),
-  the next panel command raises `RuntimeError("Panel server connection
-  lost - ...")` and stays failed - recovering means restarting the Orin
-  app. Not solved here.
+- **The connection self-heals after a drop, but loses in-progress
+  server-side state.** If the `ssh` subprocess dies (network hiccup,
+  Windows machine sleeps, etc.), the in-flight call raises
+  `RuntimeError("Panel server connection lost - ...")`, but
+  `panel_rpc_client._ensure_connected()` detects the dead process on the
+  NEXT call and transparently spawns a fresh one - no operator action
+  needed to reconnect. This does mean any server-side state from the old
+  process (the dual-panel priming flag, an open relay/hub connection) is
+  gone; a fresh server starts safely unprimed, the same as a real restart
+  would.
 - **Single-client assumption.** The stdio server's module-level state
   (relay connection, priming flag, the new enter/exit hub-handle variable)
   assumes one Orin talking to it at a time, matching the existing
