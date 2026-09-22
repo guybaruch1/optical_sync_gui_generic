@@ -56,8 +56,8 @@ all of that keeps running, unmodified, wherever the hardware physically is.
 - **Windows side (hardware-attached machine)**: a new script,
   `tools/panel_server/panel_rpc_server.py`, imports `engine.led_panel` and
   `engine.dual_panel_control` exactly as they exist today and starts a
-  stdlib `xmlrpc.server.SimpleXMLRPCServer` on `panel_connection.host`/`port`
-  (from `settings.yaml`), registering:
+  stdlib `xmlrpc.server.SimpleXMLRPCServer` bound to `127.0.0.1` only (never
+  the machine's real LAN/wifi address - see §2a), registering:
   - `led_panel_run(args)` -> `LEDPanel._run(args)`
   - `led_panel_query(args)` -> `LEDPanel._query(args)`
   - `dual_panel_turn_all_leds_on(dual_panel_config)`
@@ -88,8 +88,9 @@ all of that keeps running, unmodified, wherever the hardware physically is.
 - **`settings.yaml`** gains:
   ```yaml
   panel_connection:
-    mode: local   # "local" (default, today's behavior) or "remote"
-    host: ""      # Windows panel-server address, only used when mode: remote
+    mode: local     # "local" (default, today's behavior) or "remote"
+    host: localhost # always localhost - see §2a, the SSH tunnel is what
+                     # actually reaches the Windows machine
     port: 8765
   ```
   `mode: local` is the default specifically so nothing about today's single-
@@ -108,6 +109,35 @@ all of that keeps running, unmodified, wherever the hardware physically is.
   `{"mode": "local"}` if `configure_panel_connection` is never called (e.g.
   in tests), so existing tests that import these modules directly keep
   working unchanged.
+
+## 2a. Reaching the Windows machine: SSH tunnel, not a bare port
+
+The RPC server is never exposed directly on the wifi network. Instead:
+
+- Windows enables **OpenSSH Server** (Settings -> Optional Features ->
+  OpenSSH Server - built into Windows 10/11, nothing extra to install) and
+  is set up for key-based login (no password auth), so the Orin can connect
+  non-interactively.
+- The Orin opens a local-forwarding tunnel before starting a session:
+  ```bash
+  ssh -N -L 8765:localhost:8765 <windows-user>@<windows-host>
+  ```
+  This forwards the Orin's own `localhost:8765` to the Windows machine's
+  `localhost:8765`, which is exactly why the server binds to `127.0.0.1`
+  (§2) and `settings.yaml`'s `panel_connection.host` is always `localhost`
+  (§2) - the app itself never needs to know the Windows machine's real
+  address; the tunnel is what actually crosses the network.
+- This resolves the "no auth/encryption" gap a plain exposed TCP port would
+  have, using SSH's existing authentication and encryption instead of any
+  new code - the RPC layer itself stays exactly as simple as designed in
+  §2, unaware a tunnel exists.
+- Operationally, the tunnel and the Windows-side `panel_rpc_server.py`
+  process both need to be up before an Orin session starts. Out of scope
+  for this design to automate (see §7) - a documented manual step (or a
+  simple wrapper script) for now, e.g. a `tools/panel_server/` README
+  covering: enabling OpenSSH Server once, starting `panel_rpc_server.py` on
+  Windows, and running the `ssh -L` command from the Orin before launching
+  `main.py`.
 
 ## 3. `engine/led_panel.py` changes
 
@@ -192,9 +222,12 @@ exactly one implementation regardless of which branch runs it.
   no official PyPI wheel for Linux ARM64; Intel documents the librealsense
   build process for Jetson boards.
 - The Windows panel server needs everything it needs today
-  (`LED-Panel.exe` on PATH, `pywin32`, and `brainstem` only if dual-panel).
-- Both machines must be reachable over the same network; `host`/`port` are
-  static config, no discovery.
+  (`LED-Panel.exe` on PATH, `pywin32`, and `brainstem` only if dual-panel),
+  plus OpenSSH Server enabled and a key-based login set up for the Orin
+  (§2a).
+- Both machines must be reachable over the same wifi/LAN for the SSH tunnel
+  to be established; beyond that, `host`/`port` in `settings.yaml` are
+  always `localhost`/static (§2a) - no discovery needed.
 
 ## 6. Testing
 
@@ -218,10 +251,15 @@ exactly one implementation regardless of which branch runs it.
 
 ## 7. Explicitly out of scope
 
-- **No auth/encryption on the RPC channel.** Assumes a trusted LAN between
-  the Orin and the Windows panel-control machine, same trust model as the
-  rest of this lab-hardware app. Flagged here as a known limitation, not
-  solved by this design.
+- **Auth/encryption on the RPC channel itself** is not this design's job -
+  it's delegated entirely to the SSH tunnel (§2a). The RPC layer stays as
+  simple as an unauthenticated `localhost`-only server precisely because
+  the tunnel is what's actually trusted to cross the network.
+- **Automating the tunnel + server startup.** Establishing the `ssh -L`
+  tunnel and starting `panel_rpc_server.py` on Windows before a session are
+  manual steps (or a simple documented wrapper script) for now - not
+  auto-started by `main.py`, not a Windows service, not retried/reconnected
+  if the tunnel drops mid-session.
 - **Single-client assumption.** The server's module-level state (relay
   connection, priming flag, the new enter/exit hub-handle variable) assumes
   one Orin talking to it at a time, matching the existing single-process
@@ -229,5 +267,6 @@ exactly one implementation regardless of which branch runs it.
 - **Orin display/GUI mechanics** (X11/Wayland/remote desktop for viewing the
   PySide6 wizard on the Orin) - a deployment detail, not part of this
   design.
-- **Auto-discovery of the panel server's address** - static `host`/`port`
-  config only.
+- **Auto-discovery of the Windows machine's address** - the operator runs
+  the `ssh -L` command with the Windows host explicitly; nothing in the app
+  discovers it.
