@@ -12,9 +12,23 @@ mode numbers and the all_leds_off-vs-stop distinction.
 
 import logging
 import time
-from subprocess import check_call, CalledProcessError, TimeoutExpired
+from subprocess import check_call, CalledProcessError, TimeoutExpired, DEVNULL
 
 _logger = logging.getLogger(__name__)
+
+# Gates every LEDPanel.* call between running LED-Panel.exe locally
+# ("local", the default - unchanged single-machine behavior) and
+# redirecting it over engine.panel_rpc_client to a Windows machine the
+# hardware is actually attached to ("remote"). Set once at startup via
+# configure_panel_connection() (main.py) - never called (e.g. tests
+# importing this module directly) leaves this at its safe default.
+PANEL_CONNECTION = {"mode": "local"}
+
+
+def configure_panel_connection(config):
+    """Called once at startup with settings["panel_connection"]."""
+    PANEL_CONNECTION.clear()
+    PANEL_CONNECTION.update(config)
 
 
 class LEDPanel:
@@ -31,6 +45,10 @@ class LEDPanel:
 
     @staticmethod
     def _run(args):
+        if PANEL_CONNECTION["mode"] == "remote":
+            from engine import panel_rpc_client
+            return panel_rpc_client.led_panel_run(args)
+
         cmd = [LEDPanel.exe_name] + args.split()
         retries = 3
         _logger.info("Running cmd: %s", " ".join(cmd))
@@ -38,7 +56,15 @@ class LEDPanel:
         try:
             while retries > 0:
                 try:
-                    check_call(cmd, timeout=LEDPanel.cmd_timeout_s)
+                    # stdout/stderr redirected to DEVNULL unconditionally -
+                    # this output was never read by any caller even before
+                    # remote mode existed, but once this same _run() runs
+                    # as a subprocess of panel_server_stdio.py (whose own
+                    # stdout is the JSON-response pipe back to the remote
+                    # caller), an unredirected LED-Panel.exe inheriting that
+                    # fd would corrupt the response stream.
+                    check_call(cmd, timeout=LEDPanel.cmd_timeout_s,
+                               stdout=DEVNULL, stderr=DEVNULL)
                     return
                 except (CalledProcessError, FileNotFoundError, TimeoutExpired) as e:
                     last_error = e
@@ -87,6 +113,10 @@ class LEDPanel:
         int/bool, since the exact output format for each of these query
         commands hasn't been confirmed against real hardware yet;
         callers/diagnostic scripts print it as-is."""
+        if PANEL_CONNECTION["mode"] == "remote":
+            from engine import panel_rpc_client
+            return panel_rpc_client.led_panel_query(args)
+
         import win32console
 
         cmd = [LEDPanel.exe_name] + args.split()
