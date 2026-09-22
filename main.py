@@ -11,6 +11,8 @@ from PySide6.QtWidgets import QApplication
 from gui.main_window import MainWindow
 from state.gui_state import load_gui_state
 from settings import load_settings
+from engine.led_panel import configure_panel_connection
+from engine import panel_rpc_client
 
 
 def main():
@@ -24,6 +26,14 @@ def main():
     ctx = rs.context()
     gui_state = load_gui_state()
     settings = load_settings()
+
+    configure_panel_connection(settings["panel_connection"])
+    if settings["panel_connection"]["mode"] == "remote":
+        panel_rpc_client.configure(
+            settings["panel_connection"]["ssh_user"],
+            settings["panel_connection"]["ssh_host"],
+            settings["panel_connection"]["remote_repo_path"],
+        )
 
     window = MainWindow(ctx, gui_state, settings)
     # Maximized (not a fixed resize()) so the window - and everything in
