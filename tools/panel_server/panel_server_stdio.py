@@ -17,7 +17,10 @@ same fd and corrupt a response mid-stream.
 
 import json
 import logging
+import os
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from engine import dual_panel_control
 from engine.led_panel import LEDPanel
