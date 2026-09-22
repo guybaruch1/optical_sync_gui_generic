@@ -338,6 +338,12 @@ def enter_stream_panel(dual_panel_config, stream_name):
         # job on success, not this function's - re-raising here (rather than
         # swallowing) keeps that a separate, smaller question.
         hub.disconnect()
+        # Restore the pre-refactor finally's guarantee that a failed switch
+        # always de-primes the pair - a failed enter here leaves the pair in
+        # an unknown state (mid hub-switch, possibly mid enable_ports/
+        # disable_ports), so the next start_scanning() should not trust
+        # whatever primed/switch_time_ms/scan_direction it already had.
+        _dual_panel_primed["primed"] = False
         raise
     _stream_panel_state["hub"] = hub
 
@@ -345,6 +351,18 @@ def enter_stream_panel(dual_panel_config, stream_name):
 def exit_stream_panel(dual_panel_config, stream_name):
     """The 'exit' half - see enter_stream_panel's docstring."""
     hub = _stream_panel_state["hub"]
+    if hub is None:
+        # Reachable on a real failure sequence: if the ssh connection dies
+        # mid-session, engine/panel_rpc_client.py's _ensure_connected()
+        # transparently respawns a FRESH server process on the next call -
+        # and that fresh process's own _stream_panel_state["hub"] starts at
+        # None. A caller whose enter_stream_panel succeeded against the OLD
+        # server, then hit a real connection-lost error mid-block, then has
+        # its `finally` call exit_stream_panel here would otherwise get an
+        # AttributeError masking the real "connection lost" error the
+        # operator actually needs to see. Nothing was ever entered on this
+        # (possibly brand new) server, so there's nothing to clean up.
+        return
     # Un-poison the panel before switching away, while it's still
     # hub-exposed on my_port (no extra hub switch needed). Both
     # Calibration's and ROI Select's own capture code (the only 2

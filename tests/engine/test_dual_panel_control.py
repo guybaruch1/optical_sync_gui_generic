@@ -797,6 +797,20 @@ def test_enter_then_exit_stream_panel_match_switched_to_stream_panel_behavior():
     assert dual_panel_control._stream_panel_state["hub"] is None
 
 
+def test_exit_stream_panel_returns_cleanly_when_no_hub_was_ever_entered():
+    # Reachable on a real failure sequence: if the ssh connection dies
+    # mid-session, engine/panel_rpc_client.py's _ensure_connected()
+    # transparently respawns a FRESH server process on the next call, and
+    # that fresh process's own _stream_panel_state["hub"] starts at None.
+    # A caller whose enter_stream_panel succeeded against the OLD server,
+    # then hit a real connection-lost error mid-block, then has its
+    # `finally` call exit_stream_panel - which now hits the NEW (respawned)
+    # server with no hub ever entered there - must not raise AttributeError
+    # and mask the real "connection lost" error the operator needs to see.
+    dual_panel_control._stream_panel_state["hub"] = None
+    exit_stream_panel(DUAL_PANEL_CONFIG, "stream_a")  # must not raise
+
+
 def test_enter_stream_panel_disconnects_hub_if_switch_body_raises():
     # Regression: enter_stream_panel used to have no try/except at all
     # around the port-lookup/enable_ports/disable_ports/sleep body - a
