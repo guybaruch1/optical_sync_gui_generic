@@ -97,3 +97,92 @@ def test_resolve_sync_nodes_reports_missing_v4l2_ctl():
 
     with pytest.raises(RuntimeError, match="v4l-utils"):
         gmsl_sync.resolve_sync_nodes("camera_sync_mode", run_v4l2=run, glob_fn=glob_fn)
+
+
+class _FakeKernel:
+    """Per-node control values, answering -L/-C/-c like v4l2-ctl."""
+
+    def __init__(self, values, max_value=2, fail_write_on=(), ignore_write_on=(), unreadable=()):
+        self.values = dict(values)
+        self.max_value = max_value
+        self.fail_write_on = set(fail_write_on)
+        self.ignore_write_on = set(ignore_write_on)
+        self.unreadable = set(unreadable)
+        self.writes = []
+
+    def __call__(self, node, *args, timeout=15):
+        if args == ("-L",):
+            return 0, "camera_sync_mode 0x009a4010 (menu) : min=0 max={} default=0 value={}".format(
+                self.max_value, self.values[node]), ""
+        if args == ("-C", "camera_sync_mode"):
+            if node in self.unreadable:
+                return 1, "", "read failed"
+            return 0, "camera_sync_mode: {} (label)".format(self.values[node]), ""
+        if len(args) == 2 and args[0] == "-c":
+            value = int(args[1].split("=")[1])
+            self.writes.append((node, value))
+            if node in self.fail_write_on:
+                return 1, "", "VIDIOC_S_EXT_CTRLS: failed: Invalid argument"
+            if node not in self.ignore_write_on:
+                self.values[node] = value
+            return 0, "", ""
+        raise AssertionError(args)
+
+
+NODES = ["/dev/video2", "/dev/video10"]
+
+
+def test_apply_sync_mode_writes_confirms_and_returns_as_found():
+    kernel = _FakeKernel({"/dev/video2": 0, "/dev/video10": 1})
+
+    as_found = gmsl_sync.apply_sync_mode(NODES, "camera_sync_mode", 2, run_v4l2=kernel)
+
+    assert as_found == {"/dev/video2": 0, "/dev/video10": 1}
+    assert kernel.values == {"/dev/video2": 2, "/dev/video10": 2}
+
+
+def test_apply_sync_mode_out_of_range_writes_nothing():
+    kernel = _FakeKernel({"/dev/video2": 0, "/dev/video10": 0}, max_value=2)
+
+    with pytest.raises(RuntimeError, match="0..2"):
+        gmsl_sync.apply_sync_mode(NODES, "camera_sync_mode", 3, run_v4l2=kernel)
+    assert kernel.writes == []
+
+
+def test_apply_sync_mode_write_failure_restores_earlier_node():
+    kernel = _FakeKernel({"/dev/video2": 0, "/dev/video10": 0}, fail_write_on={"/dev/video10"})
+
+    with pytest.raises(RuntimeError, match="/dev/video10"):
+        gmsl_sync.apply_sync_mode(NODES, "camera_sync_mode", 2, run_v4l2=kernel)
+    assert kernel.values["/dev/video2"] == 0  # restored
+
+
+def test_apply_sync_mode_readback_mismatch_raises_and_restores():
+    kernel = _FakeKernel({"/dev/video2": 0, "/dev/video10": 0}, ignore_write_on={"/dev/video10"})
+
+    with pytest.raises(RuntimeError, match="readback"):
+        gmsl_sync.apply_sync_mode(NODES, "camera_sync_mode", 2, run_v4l2=kernel)
+    assert kernel.values == {"/dev/video2": 0, "/dev/video10": 0}
+
+
+def test_restore_writes_as_found_values():
+    kernel = _FakeKernel({"/dev/video2": 2, "/dev/video10": 2})
+
+    gmsl_sync.restore_sync_mode({"/dev/video2": 0, "/dev/video10": 1}, "camera_sync_mode", run_v4l2=kernel)
+
+    assert kernel.values == {"/dev/video2": 0, "/dev/video10": 1}
+
+
+def test_restore_skips_unreadable_as_found():
+    kernel = _FakeKernel({"/dev/video2": 2, "/dev/video10": 2})
+
+    gmsl_sync.restore_sync_mode({"/dev/video2": None, "/dev/video10": 0}, "camera_sync_mode", run_v4l2=kernel)
+
+    assert kernel.writes == [("/dev/video10", 0)]
+
+
+def test_restore_never_raises():
+    def exploding(node, *args, timeout=15):
+        raise OSError("gone")
+
+    gmsl_sync.restore_sync_mode({"/dev/video2": 0}, "camera_sync_mode", run_v4l2=exploding)  # must not raise

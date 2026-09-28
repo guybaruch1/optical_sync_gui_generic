@@ -109,3 +109,55 @@ def resolve_sync_nodes(control, run_v4l2=run_v4l2, glob_fn=glob.glob):
             )
         )
     return found
+
+
+def _read_value(node, control, run_v4l2):
+    code, out, err = run_v4l2(node, "-C", control)
+    if code != 0:
+        return None
+    return parse_control_value(out, control)
+
+
+def restore_sync_mode(as_found, control, run_v4l2=run_v4l2):
+    """Best-effort: writes each node's as-found value back. A node whose
+    as-found value was unreadable (None) is skipped - there is nothing
+    known to restore it to. Never raises (same convention as
+    MultiCameraSessionController._reset_genlock_roles)."""
+    for node, value in as_found.items():
+        if value is None:
+            continue
+        try:
+            run_v4l2(node, "-c", "{}={}".format(control, value))
+        except Exception:
+            continue
+
+
+def apply_sync_mode(nodes, control, value, run_v4l2=run_v4l2):
+    """Reads each node's as-found value, range-checks `value` against the
+    driver's own min/max BEFORE writing anything, then writes and reads
+    back each node. Any write failure or readback mismatch restores every
+    node already written and raises RuntimeError. Returns
+    {node: as_found_value_or_None}."""
+    as_found = {}
+    for node in nodes:
+        code, listing, err = run_v4l2(node, "-L")
+        limits = control_range(listing, control) if code == 0 else None
+        if limits is not None and not limits[0] <= value <= limits[1]:
+            raise RuntimeError("{} on {} accepts {}..{}, so {} cannot be written".format(
+                control, node, limits[0], limits[1], value))
+        as_found[node] = _read_value(node, control, run_v4l2)
+
+    written = {}
+    for node in nodes:
+        code, out, err = run_v4l2(node, "-c", "{}={}".format(control, value))
+        if code != 0:
+            restore_sync_mode(written, control, run_v4l2)
+            raise RuntimeError("Writing {}={} on {} failed: {}".format(
+                control, value, node, err or out or "exit {}".format(code)))
+        written[node] = as_found[node]
+        readback = _read_value(node, control, run_v4l2)
+        if readback != value:
+            restore_sync_mode(written, control, run_v4l2)
+            raise RuntimeError("{} readback on {} is {}, not {} - the driver clamped or "
+                               "ignored the write".format(control, node, readback, value))
+    return as_found
