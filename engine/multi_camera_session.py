@@ -97,12 +97,17 @@ class MultiCameraSessionController(QObject):
 
     def __init__(self, camera_specs, pairing_gap_outlier_threshold_us=100_000,
                  thread_factory=None, device_lookup=None, sync_setter=None,
-                 camera_start_stagger_s=2.0, parent=None):
+                 camera_start_stagger_s=2.0, gmsl_sync=None, parent=None):
         super().__init__(parent)
         self._camera_specs = camera_specs
         self._thread_factory = thread_factory or SessionEngineThread
         self._device_lookup = device_lookup or find_device_by_serial
         self._sync_setter = sync_setter or set_inter_cam_sync_mode
+        # Optional GMSL external-sync collaborator (engine.gmsl_sync.
+        # GmslTscSync): kernel camera_sync_mode + the Orin's TSC trigger,
+        # engaged after the genlock step and before any thread, disengaged
+        # only once every thread has finished. None = today's behavior.
+        self._gmsl_sync = gmsl_sync
         # Real-hardware finding: two cameras sharing a USB hub/controller
         # (e.g. an Acroname hub) can disrupt each other's device enumeration
         # if their rs.pipeline().start() calls (already documented elsewhere
@@ -155,7 +160,9 @@ class MultiCameraSessionController(QObject):
         a clear RuntimeError and start NOTHING if any device fails to apply
         its role, rather than a silent partial run (a real error reaching
         the operator beats guessing whether a half-genlocked rig is safe to
-        run). 3. Only once every role is confirmed applied, construct and
+        run). 2b. If a gmsl_sync collaborator was given, engage it (kernel
+        external-sync mode + TSC trigger + settle) - all-or-nothing, same as
+        genlock. 3. Only once every role is confirmed applied, construct and
         start one thread per camera.
 
         Also enforces: at most one configured camera may use dual-panel
@@ -203,28 +210,42 @@ class MultiCameraSessionController(QObject):
                 )
             self._applied_genlock_specs.append(spec)
 
+        if self._gmsl_sync is not None:
+            try:
+                self._gmsl_sync.engage()
+            except Exception:
+                self._reset_genlock_roles()
+                raise
+
         self._finished_rows_by_camera = {}
-        for index, spec in enumerate(self._camera_specs):
-            # See __init__'s own comment - staggered so each camera's
-            # rs.pipeline().start() gets a moment to finish its own noisy
-            # USB open/negotiate window before the next camera starts its
-            # own, if they share a USB hub/controller. No delay before the
-            # very first camera - nothing else is starting concurrently
-            # with it yet.
-            if index > 0 and self._camera_start_stagger_s > 0:
-                time.sleep(self._camera_start_stagger_s)
-            thread = self._thread_factory(
-                ctx=ctx,
-                device_serial=spec.device_serial,
-                # Already handled above, sequentially, for every camera that
-                # wanted it - a thread redoing this internally could race or
-                # undo the genlock role just applied.
-                hardware_reset_before_start=False,
-                **spec.thread_kwargs,
-            )
-            self._wire_thread(spec.camera_id, thread)
-            self._threads[spec.camera_id] = thread
-            thread.start()
+        try:
+            for index, spec in enumerate(self._camera_specs):
+                # See __init__'s own comment - staggered so each camera's
+                # rs.pipeline().start() gets a moment to finish its own noisy
+                # USB open/negotiate window before the next camera starts its
+                # own, if they share a USB hub/controller. No delay before the
+                # very first camera - nothing else is starting concurrently
+                # with it yet.
+                if index > 0 and self._camera_start_stagger_s > 0:
+                    time.sleep(self._camera_start_stagger_s)
+                thread = self._thread_factory(
+                    ctx=ctx,
+                    device_serial=spec.device_serial,
+                    # Already handled above, sequentially, for every camera that
+                    # wanted it - a thread redoing this internally could race or
+                    # undo the genlock role just applied.
+                    hardware_reset_before_start=False,
+                    **spec.thread_kwargs,
+                )
+                self._wire_thread(spec.camera_id, thread)
+                self._threads[spec.camera_id] = thread
+                thread.start()
+        except Exception:
+            # The trigger must not keep running for a run that never got
+            # its threads up.
+            if self._gmsl_sync is not None:
+                self._gmsl_sync.disengage()
+            raise
 
     def stop_all(self):
         for thread in self._threads.values():
@@ -268,6 +289,8 @@ class MultiCameraSessionController(QObject):
             # request_stop() is non-blocking) is it safe to touch these
             # devices again - see _reset_genlock_roles's own docstring.
             self._reset_genlock_roles()
+            if self._gmsl_sync is not None:
+                self._gmsl_sync.disengage()
             self.all_sessions_finished.emit(dict(self._finished_rows_by_camera))
 
     def _reset_genlock_roles(self):

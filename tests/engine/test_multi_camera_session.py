@@ -59,24 +59,26 @@ def _spec(camera_id, is_master, inter_cam_sync_value=1, stream_identities=None,
     )
 
 
-def _controller(camera_specs, sync_setter=None, device_lookup=None, camera_start_stagger_s=0):
+def _controller(camera_specs, sync_setter=None, device_lookup=None, camera_start_stagger_s=0,
+                gmsl_sync=None, thread_factory=None):
     # Defaults the stagger to 0 (instant) - tests that don't care about
     # stagger behavior specifically shouldn't pay a real multi-second sleep
     # just because they happen to construct a 2+ camera controller. Tests
     # that DO care about stagger pass a real value explicitly.
     fake_threads = {}
 
-    def thread_factory(**kwargs):
+    def default_thread_factory(**kwargs):
         thread = _FakeSessionEngineThread(**kwargs)
         fake_threads[kwargs["device_serial"]] = thread
         return thread
 
     controller = MultiCameraSessionController(
         camera_specs=camera_specs,
-        thread_factory=thread_factory,
+        thread_factory=thread_factory or default_thread_factory,
         device_lookup=device_lookup or (lambda ctx, serial: MagicMock(name=serial)),
         sync_setter=sync_setter or MagicMock(return_value=True),
         camera_start_stagger_s=camera_start_stagger_s,
+        gmsl_sync=gmsl_sync,
     )
     return controller, fake_threads
 
@@ -577,3 +579,70 @@ def test_all_sessions_finished_still_emits_even_if_resetting_a_genlock_role_rais
     # rest, or suppress all_sessions_finished firing.
     assert sync_setter.call_count == 4
     assert len(finished_payloads) == 1
+
+
+# --- GMSL TSC sync: engaged after genlock, before any thread; disengaged
+# only after every thread finished. ---
+
+def _gmsl_specs():
+    return [_spec("cam1", True, inter_cam_sync_value=None, device_serial="s1"),
+            _spec("cam2", False, inter_cam_sync_value=None, device_serial="s2")]
+
+
+def test_start_all_engages_gmsl_before_any_thread_starts():
+    events = []
+    gmsl = MagicMock()
+    gmsl.engage.side_effect = lambda: events.append("engage")
+
+    def thread_factory(**kwargs):
+        events.append("thread")
+        return _FakeSessionEngineThread(**kwargs)
+
+    controller, _ = _controller(_gmsl_specs(), gmsl_sync=gmsl, thread_factory=thread_factory)
+    controller.start_all(ctx=object())
+
+    assert events == ["engage", "thread", "thread"]
+
+
+def test_start_all_starts_no_thread_when_gmsl_engage_fails():
+    gmsl = MagicMock()
+    gmsl.engage.side_effect = RuntimeError("readback mismatch")
+    controller, fake_threads = _controller(_gmsl_specs(), gmsl_sync=gmsl)
+
+    with pytest.raises(RuntimeError, match="readback"):
+        controller.start_all(ctx=object())
+    assert fake_threads == {}
+
+
+def test_start_all_disengages_gmsl_if_thread_start_raises():
+    gmsl = MagicMock()
+
+    def thread_factory(**kwargs):
+        raise RuntimeError("thread construction failed")
+
+    controller, _ = _controller(_gmsl_specs(), gmsl_sync=gmsl, thread_factory=thread_factory)
+
+    with pytest.raises(RuntimeError, match="thread construction"):
+        controller.start_all(ctx=object())
+    gmsl.disengage.assert_called_once()
+
+
+def test_gmsl_disengaged_only_after_every_thread_finished():
+    gmsl = MagicMock()
+    controller, fake_threads = _controller(_gmsl_specs(), gmsl_sync=gmsl)
+    controller.start_all(ctx=object())
+
+    fake_threads["s1"].finished.emit()
+    gmsl.disengage.assert_not_called()
+    fake_threads["s2"].finished.emit()
+    gmsl.disengage.assert_called_once()
+
+
+def test_stop_all_never_disengages_gmsl_by_itself():
+    gmsl = MagicMock()
+    controller, _ = _controller(_gmsl_specs(), gmsl_sync=gmsl)
+    controller.start_all(ctx=object())
+
+    controller.stop_all()
+
+    gmsl.disengage.assert_not_called()
