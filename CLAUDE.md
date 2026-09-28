@@ -600,8 +600,10 @@ the slave-color-resolution check is skipped - SDK genlock and GMSL sync
 are never applied together. `MultiCameraSessionController` engages
 `GmslTscSync` after the genlock step and before any thread
 (all-or-nothing), and disengages (TSC off, as-found mode restored) only
-once every thread's own `finished` has fired. `main.py` also stops the TSC
-on exit in remote mode.
+once every thread's own `finished` has fired. On exit in remote mode,
+`main.py` calls `disengage_all_engaged()`, which undoes only what this
+process engaged (TSC off AND mode restored - a camera left in external
+sync with no trigger gives no frames on the next free-running run).
 
 `tools/tsc_trigger/ext_sync_gen.py` is the user's script vendored
 unchanged; `engine/gmsl_sync.KernelTscIO` imports its ioctl helpers

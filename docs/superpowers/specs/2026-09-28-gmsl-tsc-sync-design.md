@@ -195,12 +195,16 @@ place and style as the existing `hardware_reset_settle_s` and
 `camera_start_stagger_s` sleeps in `start_all()`.
 
 **App exit safety:** `main.py`, after `app.exec()` returns (next to the
-existing `panel_rpc_client.close()`), calls a best-effort
-`engine.gmsl_sync.stop_tsc_best_effort()` when
-`panel_connection.mode == "remote"` and `/dev/cdi_tsc` exists, so closing
-the window mid-run does not leave the generator running. The kernel mode
-is not restored there (no live device state is known at that point); the
-next run's `apply_sync_mode` reads and handles whatever is found.
+existing `panel_rpc_client.close()`), calls
+`engine.gmsl_sync.disengage_all_engaged()` when
+`panel_connection.mode == "remote"`. It disengages every `GmslTscSync`
+this process engaged and never disengaged (TSC off AND as-found mode
+restored), so closing the window mid-run neither leaves the generator
+running nor leaves the cameras in external-sync mode (which would give no
+frames on the next free-running run). It never touches a trigger this app
+did not start. A killed process (no exit path) can still leave both; the
+manual recovery is `ext_sync_gen.py --disable` plus a power-cycle or
+`v4l2-ctl -c camera_sync_mode=0`.
 
 ## 4. Error handling
 

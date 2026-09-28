@@ -327,13 +327,22 @@ def test_disengage_never_raises_when_tsc_stop_fails():
     assert kernel.values == {"/dev/video2": 0, "/dev/video10": 0}  # restore still ran
 
 
-def test_stop_tsc_best_effort():
-    tsc = MagicMock()
-    gmsl_sync.stop_tsc_best_effort(tsc_io=tsc, path_exists=lambda p: False)
-    tsc.stop.assert_not_called()
+def test_disengage_all_engaged_undoes_only_engaged_syncs():
+    # Final-review I2/M5: closing the app mid-run must restore the kernel
+    # mode too (a camera left in external sync gives no frames on the next
+    # free-running run), and must not touch a trigger this app never started.
+    order = []
+    engaged, kernel, tsc = _gmsl_sync(order, kernel=_FakeKernel({"/dev/video2": 0, "/dev/video10": 0}))
+    never_engaged, _, idle_tsc = _gmsl_sync([])
+    engaged.engage()
 
-    tsc.stop.side_effect = OSError("x")
-    gmsl_sync.stop_tsc_best_effort(tsc_io=tsc, path_exists=lambda p: True)  # must not raise
+    gmsl_sync.disengage_all_engaged()
+
+    tsc.stop.assert_called_once()
+    idle_tsc.stop.assert_not_called()
+    assert kernel.values == {"/dev/video2": 0, "/dev/video10": 0}
+
+    gmsl_sync.disengage_all_engaged()  # nothing left - a no-op
     tsc.stop.assert_called_once()
 
 

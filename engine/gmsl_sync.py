@@ -177,6 +177,11 @@ DEFAULT_GMSL_TSC_SYNC = {
 
 CDI_TSC_DEV = "/dev/cdi_tsc"
 
+# Every GmslTscSync currently engaged in this process, so app exit can
+# undo exactly what this app applied (disengage_all_engaged) - and never
+# touch a trigger someone started by hand with ext_sync_gen.py.
+_ENGAGED = []
+
 
 class KernelTscIO:
     """Drives /dev/cdi_tsc through the vendored tools/tsc_trigger/
@@ -255,10 +260,13 @@ class GmslTscSync:
             self._as_found = None
             raise
         self._tsc_running = True
+        _ENGAGED.append(self)
         if self._settle_s > 0:
             self._sleep(self._settle_s)
 
     def disengage(self):
+        if self in _ENGAGED:
+            _ENGAGED.remove(self)
         if self._tsc_running:
             self._tsc_running = False
             try:
@@ -270,15 +278,14 @@ class GmslTscSync:
             restore_sync_mode(as_found, self._control, run_v4l2=self._run_v4l2)
 
 
-def stop_tsc_best_effort(tsc_io=None, path_exists=os.path.exists):
-    """App-exit safety net: stop the generator if the device exists. Never
-    raises."""
-    if not path_exists(CDI_TSC_DEV):
-        return
-    try:
-        (tsc_io or KernelTscIO()).stop()
-    except Exception:
-        pass
+def disengage_all_engaged():
+    """App-exit safety net: disengage (TSC off, as-found mode restored)
+    every GmslTscSync this process engaged and never disengaged - e.g. the
+    window closed mid-run. A camera left in external-sync mode with no
+    trigger delivers no frames on the next free-running run. Never raises
+    (disengage itself never does)."""
+    for sync in list(_ENGAGED):
+        sync.disengage()
 
 
 def detect_gmsl_tsc_rig(panel_connection, serials, device_lookup, path_exists=os.path.exists):
