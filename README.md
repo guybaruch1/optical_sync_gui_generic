@@ -99,6 +99,13 @@ genlock rather than guess a value that hasn't been validated on real
 hardware. At most one configured camera may use the dual-LED-panel mode at
 a time, since it depends on a single shared relay/hub connection.
 
+On an NVIDIA Orin with **two D585 cameras on the GMSL deserializer** (not
+USB), the app can hardware-sync both cameras instead: it puts each camera
+into kernel external-sync mode (`camera_sync_mode=2` via `v4l2-ctl`) and
+drives both from the Orin's TSC signal generator (`/dev/cdi_tsc`). This is
+offered as a "GMSL TSC sync" checkbox on the Camera Hub, only when that
+exact rig is detected - see [Running on an NVIDIA Orin](#running-on-an-nvidia-orin).
+
 ## Features
 
 - **Camera Hub** — the app's home screen. Lists every configured camera as
@@ -109,7 +116,8 @@ a time, since it depends on a single shared relay/hub connection.
   Master. Add walks a brand-new camera through the full sub-flow below;
   Edit jumps straight to that camera's Stream Config, prefilled with its
   previous choices, skipping Device Select entirely since the device is
-  already known.
+  already known. On the Orin GMSL rig (2x D585 over GMSL, remote panel
+  mode), a **GMSL TSC sync** checkbox also appears here, ticked by default.
 - **Device selection** — lists every connected RealSense device not
   already configured on another Hub card (no Stereo-Module/RGB-Camera
   requirement — `engine.streams.list_devices` has no PID/sensor
@@ -178,6 +186,8 @@ a time, since it depends on a single shared relay/hub connection.
 ## Prerequisites
 
 - **Windows**, Python 3.10+ (developed against 3.13).
+  (Running the camera + GUI on an NVIDIA Orin instead, with the LED panel
+  on a Windows PC: see [Running on an NVIDIA Orin](#running-on-an-nvidia-orin).)
 - **RealSense SDK/drivers installed** — not just the `pyrealsense2` pip
   package. Install the RealSense Viewer or SDK installer so Windows
   recognizes the camera at the OS level.
@@ -211,11 +221,76 @@ All tests under `domain/`, the pure-logic parts of `engine/`, `state/`, and
 the GUI widgets should pass (hardware-facing code has no automated tests by
 design — see [Architecture & project structure](#architecture--project-structure)).
 
+## Running on an NVIDIA Orin
+
+The camera + GUI can run on an NVIDIA Orin (aarch64 Linux) while the LED
+panel stays attached to a Windows PC (`LED-Panel.exe` is Windows-only). The
+Orin's app starts the panel server on the Windows PC itself, over SSH -
+see [`tools/panel_server/README.md`](tools/panel_server/README.md) for the
+one-time Windows-side setup (OpenSSH Server, key-based login, a venv with
+`requirements.txt` installed, and `remote_python` pointing at it).
+
+### Orin prerequisites
+
+- `pyrealsense2` working in the Python environment you run the app with.
+- Key-based SSH login from the Orin to the Windows PC (no password prompt),
+  as described in the panel server README.
+- **For GMSL TSC sync only** (2x D585 on the GMSL deserializer):
+  - **`v4l2-ctl`**, from the `v4l-utils` package - used to set and read back
+    each camera's `camera_sync_mode`:
+    ```bash
+    sudo apt install v4l-utils
+    ```
+  - The TSC driver loaded (`/dev/cdi_tsc` exists) and readable/writable by
+    your user. If Start reports a permission error, add a udev rule:
+    ```bash
+    echo 'KERNEL=="cdi_tsc", MODE="0666"' | sudo tee /etc/udev/rules.d/99-cdi-tsc.rules
+    ```
+    ```bash
+    sudo udevadm control --reload-rules && sudo udevadm trigger
+    ```
+
+### Getting a branch onto the Orin without git
+
+If you can't clone on the Orin, download the branch as a zip instead:
+
+1. On GitHub, pick the branch, then **Code -> Download ZIP** (or
+   `https://github.com/guybaruch1/optical_sync_gui_generic/archive/refs/heads/<branch>.zip`).
+   Save it to `~/Downloads`.
+2. Extract it. GitHub names the folder `optical_sync_gui_generic-<branch>`,
+   with `/` in the branch name replaced by `-`:
+   ```bash
+   cd ~/Downloads && unzip optical_sync_gui_generic-<branch>.zip
+   ```
+3. **Copy your machine-specific files from the previous folder.** The zip's
+   own `settings.yaml` is the repo default (`panel_connection.mode: local`,
+   empty SSH fields), so without this the app won't reach the panel - a
+   mismatched `panel_connection` block can show up as `Panel server
+   returned malformed response`:
+   ```bash
+   cp ../<previous-folder>/{settings.yaml,config.yaml,gui_state.json} .
+   ```
+   `config.yaml` (LED calibration) and `gui_state.json` are optional; copy
+   them to skip recalibrating. A `settings.yaml` from an older branch may
+   lack newer sections; the code falls back to defaults for those, but
+   compare against the zip's copy if a new feature needs its own settings.
+4. Run it. A previous folder's `.venv` can be reused as long as the branch
+   adds no new Python dependencies (check `requirements.txt`):
+   ```bash
+   ../<previous-folder>/.venv/bin/python main.py
+   ```
+   Or create a venv in the new folder (`python3 -m venv .venv`, then
+   `.venv/bin/pip install -r requirements.txt`) and run
+   `.venv/bin/python main.py`.
+
 ## Running the app
 
 ```powershell
 .venv\Scripts\python.exe main.py
 ```
+
+On the Orin: `.venv/bin/python main.py` (see
+[Running on an NVIDIA Orin](#running-on-an-nvidia-orin)).
 
 The window opens maximized on the **Camera Hub**, empty at first launch.
 
@@ -304,6 +379,29 @@ Multi-Camera Live Session**:
   each camera's own CSVs/plots/snapshots in its own subfolder, plus a
   combined cross-camera CSV and per-Slave summary plot at the top level.
 
+**GMSL TSC sync (Orin, 2x D585 over GMSL).** When the rig is detected
+(`panel_connection.mode: remote`, exactly two configured cameras, both
+D585, neither reporting a USB descriptor, and `/dev/cdi_tsc` present), the
+Camera Hub shows a **GMSL TSC sync** checkbox, ticked by default:
+
+- **Ticked** - every stream on both cameras must use the same fps (Start is
+  blocked otherwise); that fps becomes the trigger rate. Start sets both
+  cameras to `camera_sync_mode=2` and reads it back, starts the TSC
+  trigger, and waits `settle_s` (5 s by default) before opening any stream.
+  The status line shows "Engaging GMSL sync..." while it waits - the window
+  doesn't respond during that time. The SDK genlock step and the
+  slave-color-resolution check are skipped. When every camera has stopped,
+  the trigger is turned off and each camera's original mode is written
+  back. Closing the window mid-run does the same.
+- **Unticked** - a free-running baseline on the same rig. Before any stream
+  opens, Start resets any camera left in external-sync mode by an earlier
+  run that was killed (not closed normally) and stops the trigger; the
+  status line says so when it had to reset something. If that reset fails,
+  Start is blocked rather than running a "free-running" test that's still
+  synced.
+
+Your untick is remembered while the app runs, even across hub refreshes.
+
 ## Configuration files
 
 - **`settings.yaml`** — the one file meant to be hand-edited between runs:
@@ -335,7 +433,15 @@ Multi-Camera Live Session**:
   necessarily 0=A/1=B on your rig, `relay_com_port`, `hub_switch_settle_s` -
   only read when Stream Config's "Use dual LED panel" checkbox is checked;
   the latter is a real-hardware-tuned guess, keep raising it if panel
-  commands still seem unreliable). Nothing in the app writes to this file.
+  commands still seem unreliable), where the LED panel is controlled from
+  (`panel_connection.mode` - `local` by default; `remote` plus
+  `ssh_user`/`ssh_host`/`remote_repo_path`/`remote_python` when running on
+  the Orin, see [`tools/panel_server/README.md`](tools/panel_server/README.md)),
+  and GMSL TSC sync tuning (`camera_sync.gmsl_tsc_sync` - `control`
+  (`camera_sync_mode`), `sync_mode_value` (`2` = "External Sync" in the
+  kernel driver's own numbering, which is NOT the SDK's), `duty_percent`
+  (50), `settle_s` (5.0); any other key blocks Start with a message naming
+  it). Nothing in the app writes to this file.
 - **`config.yaml`** — auto-generated by the Calibration step. Each
   calibration run updates only its own two stream slugs' entries under the
   connected camera name (e.g. `infrared1`, `color`, `color2`) — any other
@@ -447,6 +553,40 @@ own timestamped subfolder so a new run never overwrites a previous one:
   Latency" cross-camera metric; if a rig's hardware/driver doesn't support
   it, turn off `settings.yaml`'s `camera_sync.capture_global_ts` (you lose
   that one metric, HW TS Latency and Optical Sync are unaffected).
+- **The "GMSL TSC sync" checkbox doesn't appear on the Orin** - it needs
+  `panel_connection.mode: remote`, exactly two configured cameras, both
+  D585, `/dev/cdi_tsc` present, and neither camera reporting a USB
+  descriptor. Check the last one with:
+  ```bash
+  python3 -c "import pyrealsense2 as rs; [print(d.get_info(rs.camera_info.name), d.supports(rs.camera_info.usb_type_descriptor)) for d in rs.context().query_devices()]"
+  ```
+  Both lines should end in `False`.
+- **Start says `v4l2-ctl not found ... install v4l-utils`** - run
+  `sudo apt install v4l-utils` on the Orin.
+- **Start says `Permission denied on /dev/cdi_tsc`** - add the udev rule
+  from [Orin prerequisites](#orin-prerequisites).
+- **Start says `/dev/cdi_tsc not found (TSC driver not loaded?)`** - the
+  Orin's TSC kernel driver isn't loaded; this is a BSP/device-tree issue,
+  not an app setting.
+- **Start says `Cannot place V4L2 control 'camera_sync_mode': N node(s)
+  expose it ..., expected 2`** - the message lists the `/dev` nodes found.
+  Check them with `v4l2-ctl -d <node> -L`.
+- **Start says the streams use different fps** - GMSL TSC sync drives every
+  camera from one trigger, so every stream on both cameras must share one
+  fps. Change it in Stream Config, or untick the checkbox.
+- **Cameras deliver no frames, or an unticked run looks synced, after the
+  app was killed mid-run** - the next Start on the rig cleans this up
+  automatically. To recover by hand on the Orin:
+  ```bash
+  python3 tools/tsc_trigger/ext_sync_gen.py --disable
+  ```
+  ```bash
+  v4l2-ctl -d <node> -c camera_sync_mode=0
+  ```
+- **`Panel server returned malformed response` on the Orin** - usually a
+  `settings.yaml` that doesn't match a working setup (e.g. a fresh zip
+  download's default copy). Copy `settings.yaml` from a folder that works;
+  see [Getting a branch onto the Orin without git](#getting-a-branch-onto-the-orin-without-git).
 
 ## Architecture & project structure
 
@@ -613,6 +753,19 @@ if global time behaves as documented, it should stay near zero, unlike its
 HW-ts counterpart. "Optical Sync" for a cross-camera pair reuses the same
 last-detected-LED-index math as the single-camera case, using the Master's
 own `num_leds`/switch-time as authoritative.
+
+### GMSL TSC sync
+
+`engine/gmsl_sync.py` owns everything: detecting the rig, finding the two
+`/dev` nodes that carry `camera_sync_mode`, writing and reading it back
+through `v4l2-ctl`, and starting/stopping the TSC through the vendored
+`tools/tsc_trigger/ext_sync_gen.py` (imported lazily, since it needs the
+Linux-only `fcntl`). `MultiCameraSessionController` engages it after the
+SDK genlock step and before any camera thread, all-or-nothing, and
+disengages it only once every thread has finished. The kernel control is
+used rather than the SDK's `inter_cam_sync_mode` because on the D585
+prototype firmware the SDK write can't be read back. See CLAUDE.md's "GMSL
+TSC sync" section for the details.
 
 ### Naming: UI labels vs. internal data keys
 
