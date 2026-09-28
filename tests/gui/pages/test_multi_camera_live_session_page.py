@@ -1187,3 +1187,43 @@ def test_back_button_declining_confirmation_leaves_sessions_running(qapp, tmp_pa
     for thread in fake_threads.values():
         thread.request_stop.assert_not_called()
     assert emitted == []
+
+
+GMSL_CONFIG = {"control": "camera_sync_mode", "sync_mode_value": 2, "duty_percent": 50,
+               "settle_s": 0.0, "fps": 30}
+
+
+def _page_with_fake_gmsl():
+    page, fake_threads = _page_with_fake_threads()
+    created = []
+
+    def factory(**kwargs):
+        sync = MagicMock()
+        sync.kwargs = kwargs
+        created.append(sync)
+        return sync
+
+    page._gmsl_sync_factory = factory
+    return page, fake_threads, created
+
+
+def test_start_all_sessions_builds_gmsl_sync_from_config(qapp, tmp_path):
+    page, _, created = _page_with_fake_gmsl()
+    page.set_cameras(object(), _two_cameras(tmp_path), gmsl_tsc_sync=GMSL_CONFIG)
+
+    page.start_all_sessions()
+
+    assert len(created) == 1
+    assert created[0].kwargs == GMSL_CONFIG
+    assert page._controller._gmsl_sync is created[0]
+    created[0].engage.assert_called_once()
+
+
+def test_start_all_sessions_without_gmsl_config_passes_none(qapp, tmp_path):
+    page, _, created = _page_with_fake_gmsl()
+    page.set_cameras(object(), _two_cameras(tmp_path))
+
+    page.start_all_sessions()
+
+    assert created == []
+    assert page._controller._gmsl_sync is None
