@@ -615,7 +615,19 @@ class MultiCameraLiveSessionPage(QWidget):
         self.confirm_switch_time_button.setEnabled(False)
         self.frame_sample_interval_spinbox.setEnabled(False)
 
-        self._controller.start_all(self._ctx)
+        try:
+            self._controller.start_all(self._ctx)
+        except Exception as exc:
+            # start_all is all-or-nothing (genlock roles, GMSL TSC sync) and
+            # raises a RuntimeError meant for the operator - show it instead
+            # of letting it escape this Qt slot as a console-only traceback.
+            # If some camera threads did start, the controller already
+            # stopped them and all_sessions_finished will unlock the toolbar
+            # once they are done; otherwise unlock now.
+            if not self._controller.threads:
+                self._unlock_toolbar()
+            self.status_label.setText("Failed to start: {}".format(exc))
+            QMessageBox.critical(self, "Could not start the multi-camera session", str(exc))
 
     def stop_all_sessions(self):
         if self._controller is not None:
@@ -898,7 +910,7 @@ class MultiCameraLiveSessionPage(QWidget):
         stats_panel.set_value("{}_std".format(key), round(stats.std, 1))
         stats_panel.set_value("{}_max".format(key), round(stats.max, 1))
 
-    def _on_all_sessions_finished(self, rows_by_camera):
+    def _unlock_toolbar(self):
         self._session_running = False
         self.stop_button.setEnabled(False)
         self.duration_spinbox.setEnabled(True)
@@ -908,6 +920,9 @@ class MultiCameraLiveSessionPage(QWidget):
         # value (see _update_confirm_switch_time_button_state).
         self._update_confirm_switch_time_button_state()
         self.frame_sample_interval_spinbox.setEnabled(True)
+
+    def _on_all_sessions_finished(self, rows_by_camera):
+        self._unlock_toolbar()
 
         # Only when a cross-camera comparison actually exists (>=2 cameras,
         # >=1 shared stream identity) - with a single camera there's no

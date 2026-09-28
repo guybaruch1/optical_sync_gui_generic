@@ -242,8 +242,13 @@ class MultiCameraSessionController(QObject):
                 thread.start()
         except Exception:
             # The trigger must not keep running for a run that never got
-            # its threads up.
-            if self._gmsl_sync is not None:
+            # its threads up. If some threads already started, stop them and
+            # let _on_thread_finished disengage once they are genuinely done -
+            # disengaging now would stop the trigger and rewrite the V4L2
+            # mode under a still-streaming pipeline.
+            if self._threads:
+                self.stop_all()
+            elif self._gmsl_sync is not None:
                 self._gmsl_sync.disengage()
             raise
 

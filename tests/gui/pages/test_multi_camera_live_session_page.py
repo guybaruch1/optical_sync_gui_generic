@@ -1227,3 +1227,30 @@ def test_start_all_sessions_without_gmsl_config_passes_none(qapp, tmp_path):
 
     assert created == []
     assert page._controller._gmsl_sync is None
+
+
+def test_start_all_sessions_surfaces_gmsl_engage_failure_and_unlocks_ui(qapp, tmp_path, monkeypatch):
+    # Final-review C1: an engage() RuntimeError used to escape the Qt slot as
+    # a console-only traceback, leaving the page stuck "running".
+    from PySide6.QtWidgets import QMessageBox
+    shown = []
+    monkeypatch.setattr(QMessageBox, "critical", staticmethod(lambda *a, **k: shown.append(a) or QMessageBox.Ok))
+    page, fake_threads, created = _page_with_fake_gmsl()
+
+    def failing_factory(**kwargs):
+        sync = MagicMock()
+        sync.engage.side_effect = RuntimeError("v4l2-ctl not found on PATH. Install it with 'sudo apt install v4l-utils'.")
+        created.append(sync)
+        return sync
+
+    page._gmsl_sync_factory = failing_factory
+    page.set_cameras(object(), _two_cameras(tmp_path), gmsl_tsc_sync=GMSL_CONFIG)
+
+    page.start_all_sessions()  # must not raise out of the slot
+
+    assert fake_threads == {}
+    assert page._session_running is False
+    assert page.start_button.isEnabled()
+    assert not page.stop_button.isEnabled()
+    assert "v4l-utils" in page.status_label.text()
+    assert len(shown) == 1

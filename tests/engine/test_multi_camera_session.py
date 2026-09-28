@@ -646,3 +646,27 @@ def test_stop_all_never_disengages_gmsl_by_itself():
     controller.stop_all()
 
     gmsl.disengage.assert_not_called()
+
+
+def test_partial_thread_start_failure_defers_gmsl_disengage_until_started_threads_finish():
+    # Final-review I1: disengaging while camera 1 is still streaming would
+    # stop its trigger and rewrite its V4L2 mode under a live pipeline.
+    gmsl = MagicMock()
+    started = {}
+
+    def thread_factory(**kwargs):
+        if kwargs["device_serial"] == "s2":
+            raise RuntimeError("second camera failed")
+        thread = _FakeSessionEngineThread(**kwargs)
+        started[kwargs["device_serial"]] = thread
+        return thread
+
+    controller, _ = _controller(_gmsl_specs(), gmsl_sync=gmsl, thread_factory=thread_factory)
+
+    with pytest.raises(RuntimeError, match="second camera"):
+        controller.start_all(ctx=object())
+
+    assert started["s1"].stop_requested is True
+    gmsl.disengage.assert_not_called()
+    started["s1"].finished.emit()
+    gmsl.disengage.assert_called_once()
