@@ -92,6 +92,12 @@ class CameraHubPage(QWidget):
         self.gmsl_tsc_checkbox = QCheckBox("GMSL TSC sync (external trigger)")
         self.gmsl_tsc_checkbox.setHidden(True)
         self._gmsl_tsc_available = False
+        # The operator's own last click (None until they touch it). A
+        # programmatic setChecked never fires `clicked`, so this only ever
+        # records a real choice - and it wins over the pre-tick when the rig
+        # becomes available again after a transient lookup failure.
+        self._gmsl_tsc_operator_choice = None
+        self.gmsl_tsc_checkbox.clicked.connect(self._on_gmsl_tsc_clicked)
         layout.addWidget(self.gmsl_tsc_checkbox)
 
         self.start_button = QPushButton("Start Multi-Camera Live Session")
@@ -135,11 +141,15 @@ class CameraHubPage(QWidget):
         """Pre-ticks only on the unavailable->available transition, so an
         operator's untick survives a later hub refresh (e.g. after Edit)."""
         if available and not self._gmsl_tsc_available:
-            self.gmsl_tsc_checkbox.setChecked(True)
+            self.gmsl_tsc_checkbox.setChecked(
+                True if self._gmsl_tsc_operator_choice is None else self._gmsl_tsc_operator_choice)
         if not available:
             self.gmsl_tsc_checkbox.setChecked(False)
         self._gmsl_tsc_available = available
         self.gmsl_tsc_checkbox.setHidden(not available)
+
+    def _on_gmsl_tsc_clicked(self, checked):
+        self._gmsl_tsc_operator_choice = checked
 
     @property
     def gmsl_tsc_checked(self):

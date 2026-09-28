@@ -86,6 +86,10 @@ def _nodes_with_control(candidates, control, run_v4l2, errors):
     found = []
     for node in candidates:
         code, out, err = run_v4l2(node, "-L")
+        if code == 127:
+            # The binary itself is missing - every other node would fail
+            # identically, so stop here with the one actionable message.
+            raise RuntimeError(err)
         if code != 0:
             errors.append("{}: {}".format(node, err or "v4l2-ctl -L exited {}".format(code)))
             continue
@@ -183,6 +187,13 @@ CDI_TSC_DEV = "/dev/cdi_tsc"
 _ENGAGED = []
 
 
+def unknown_gmsl_tsc_settings_keys(section):
+    """Keys under settings.yaml's camera_sync.gmsl_tsc_sync that
+    GmslTscSync doesn't take, in order - a typo there would otherwise
+    surface as a raw TypeError at Start."""
+    return [key for key in (section or {}) if key not in DEFAULT_GMSL_TSC_SYNC]
+
+
 class KernelTscIO:
     """Drives /dev/cdi_tsc through the vendored tools/tsc_trigger/
     ext_sync_gen.py's own ioctl helpers - the same sequence as its --enable
@@ -208,6 +219,8 @@ class KernelTscIO:
             raise RuntimeError(
                 'Permission denied on {}. Add udev rule: KERNEL=="cdi_tsc", MODE="0666"'.format(
                     ext.CDI_TSC_DEV))
+        except FileNotFoundError:
+            raise RuntimeError("{} not found (TSC driver not loaded?)".format(ext.CDI_TSC_DEV))
         try:
             action(ext, fd)
         except OSError as exc:

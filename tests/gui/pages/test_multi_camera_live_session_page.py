@@ -1254,3 +1254,22 @@ def test_start_all_sessions_surfaces_gmsl_engage_failure_and_unlocks_ui(qapp, tm
     assert not page.stop_button.isEnabled()
     assert "v4l-utils" in page.status_label.text()
     assert len(shown) == 1
+
+
+def test_start_all_sessions_shows_gmsl_status_before_blocking_engage(qapp, tmp_path):
+    # M1: engage() blocks the GUI thread for the V4L2 scan + settle_s - the
+    # operator must see why the window stopped responding.
+    page, _, _ = _page_with_fake_gmsl()
+    seen = []
+
+    def factory(**kwargs):
+        sync = MagicMock()
+        sync.engage.side_effect = lambda: seen.append(page.status_label.text())
+        return sync
+
+    page._gmsl_sync_factory = factory
+    page.set_cameras(object(), _two_cameras(tmp_path), gmsl_tsc_sync=GMSL_CONFIG)
+
+    page.start_all_sessions()
+
+    assert seen and "GMSL" in seen[0]

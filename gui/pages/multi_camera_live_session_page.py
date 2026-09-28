@@ -63,7 +63,7 @@ import cv2
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QSpinBox, QDoubleSpinBox, QTabWidget,
-    QMessageBox,
+    QMessageBox, QApplication,
 )
 
 from gui.widgets.camera_live_session_panel import CameraLiveSessionPanel
@@ -615,6 +615,13 @@ class MultiCameraLiveSessionPage(QWidget):
         self.confirm_switch_time_button.setEnabled(False)
         self.frame_sample_interval_spinbox.setEnabled(False)
 
+        if self._gmsl_tsc_sync is not None:
+            # engage() blocks this (GUI) thread for the V4L2 scan plus
+            # settle_s - say why before the window stops responding.
+            self.status_label.setText(
+                "Engaging GMSL sync: setting camera sync mode and starting the TSC trigger "
+                "({:g} s settle)...".format(self._gmsl_tsc_sync.get("settle_s", 0)))
+            QApplication.processEvents()
         try:
             self._controller.start_all(self._ctx)
         except Exception as exc:

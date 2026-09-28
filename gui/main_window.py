@@ -64,7 +64,7 @@ from engine.streams import (
     find_device_by_serial, set_inter_cam_sync_mode, INTER_CAM_SYNC_DEFAULT,
 )
 from engine.rgb_mode import ensure_mode
-from engine.gmsl_sync import detect_gmsl_tsc_rig, DEFAULT_GMSL_TSC_SYNC
+from engine.gmsl_sync import detect_gmsl_tsc_rig, DEFAULT_GMSL_TSC_SYNC, unknown_gmsl_tsc_settings_keys
 from domain.calibration import load_led_positions
 from settings import ensure_output_dir
 
@@ -750,6 +750,14 @@ class MainWindow(QMainWindow):
                     "streams use {} fps. Set every stream to the same fps in Stream Config, or "
                     "untick \"GMSL TSC sync\" on the Camera Hub.".format(
                         " / ".join(str(fps) for fps in fps_values)),
+                )
+                return
+            unknown_keys = unknown_gmsl_tsc_settings_keys(camera_sync_settings.get("gmsl_tsc_sync"))
+            if unknown_keys:
+                QMessageBox.critical(
+                    self, "Unknown GMSL TSC sync settings",
+                    "settings.yaml's camera_sync.gmsl_tsc_sync has unknown key(s): {}. "
+                    "Allowed keys: {}.".format(", ".join(unknown_keys), ", ".join(DEFAULT_GMSL_TSC_SYNC)),
                 )
                 return
             gmsl_tsc_sync = {**DEFAULT_GMSL_TSC_SYNC,

@@ -193,3 +193,17 @@ def test_gmsl_checkbox_unavailable_hides_and_reports_false(qapp):
 
     page.set_gmsl_tsc_available(True)  # becomes available again -> re-ticked
     assert page.gmsl_tsc_checked is True
+
+
+def test_gmsl_checkbox_operator_untick_survives_a_transient_unavailable_refresh(qapp):
+    # M3: a lookup blip (available -> unavailable -> available) must not
+    # override the operator's own untick.
+    page = CameraHubPage()
+    page.set_gmsl_tsc_available(True)
+    page.gmsl_tsc_checkbox.click()  # operator unticks
+    assert page.gmsl_tsc_checked is False
+
+    page.set_gmsl_tsc_available(False)
+    page.set_gmsl_tsc_available(True)
+
+    assert page.gmsl_tsc_checked is False

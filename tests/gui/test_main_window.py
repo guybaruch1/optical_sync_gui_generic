@@ -1461,3 +1461,19 @@ def test_gmsl_settings_section_overrides_defaults(qapp, monkeypatch, tmp_path):
     assert captured["gmsl_tsc_sync"]["duty_percent"] == 25
     assert captured["gmsl_tsc_sync"]["settle_s"] == 2.0
     assert captured["gmsl_tsc_sync"]["sync_mode_value"] == 2
+
+
+def test_start_with_gmsl_ticked_rejects_unknown_settings_keys(qapp, monkeypatch, tmp_path):
+    # M4: a settings.yaml typo must be a clear message, not a TypeError.
+    monkeypatch.setattr(main_window_module, "detect_gmsl_tsc_rig", lambda *a: True)
+    window, _, _ = _two_camera_window(qapp, monkeypatch, tmp_path)
+    window.settings["camera_sync"] = {"gmsl_tsc_sync": {"duty_pct": 25}}
+    critical = _capture_critical(monkeypatch)
+    set_cameras = MagicMock()
+    monkeypatch.setattr(window.multi_camera_live_session_page, "set_cameras", set_cameras)
+
+    window._on_start_multi_camera_session_requested()
+
+    assert len(critical) == 1
+    assert "duty_pct" in critical[0][0][2]
+    set_cameras.assert_not_called()

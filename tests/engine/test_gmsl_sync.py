@@ -392,3 +392,30 @@ def test_detect_never_looks_up_devices_in_local_mode():
     lookup = MagicMock()
     gmsl_sync.detect_gmsl_tsc_rig({"mode": "local"}, ["s1", "s2"], lookup, path_exists=lambda p: True)
     lookup.assert_not_called()
+
+
+def test_resolve_sync_nodes_stops_at_first_missing_v4l2_ctl():
+    # M2: the "install v4l-utils" line must not repeat once per probed node.
+    run = MagicMock(return_value=(127, "", "v4l2-ctl not found on PATH. Install it with 'sudo apt install v4l-utils'."))
+    glob_fn = _fake_glob({"/dev/video-rs-*": ["/dev/video-rs-depth-0", "/dev/video-rs-depth-1"],
+                          "/dev/video[0-9]*": ["/dev/video0", "/dev/video1", "/dev/video2"]})
+
+    with pytest.raises(RuntimeError) as excinfo:
+        gmsl_sync.resolve_sync_nodes("camera_sync_mode", run_v4l2=run, glob_fn=glob_fn)
+
+    assert str(excinfo.value).count("v4l-utils") == 1
+    assert run.call_count == 1
+
+
+def test_kernel_tsc_io_missing_device_is_a_friendly_error():
+    # M6
+    io = gmsl_sync.KernelTscIO(ext_module=_FakeExtModule(),
+                               open_fn=MagicMock(side_effect=FileNotFoundError()), close_fn=MagicMock())
+    with pytest.raises(RuntimeError, match="TSC driver not loaded"):
+        io.start(30, 50)
+
+
+def test_validate_gmsl_tsc_settings_rejects_unknown_keys():
+    # M4
+    assert gmsl_sync.unknown_gmsl_tsc_settings_keys({"duty_percent": 25}) == []
+    assert gmsl_sync.unknown_gmsl_tsc_settings_keys({"duty_pct": 25, "settle": 1}) == ["duty_pct", "settle"]
