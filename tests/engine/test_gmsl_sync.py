@@ -5,6 +5,7 @@ same convention as engine/led_panel.py)."""
 from unittest.mock import MagicMock
 
 import pytest
+import pyrealsense2 as rs
 
 from engine import gmsl_sync
 
@@ -186,3 +187,199 @@ def test_restore_never_raises():
         raise OSError("gone")
 
     gmsl_sync.restore_sync_mode({"/dev/video2": 0}, "camera_sync_mode", run_v4l2=exploding)  # must not raise
+
+
+class _FakeExtModule:
+    CDI_TSC_DEV = "/dev/cdi_tsc"
+
+    def __init__(self, fail_first_stop=False, fail_start=False):
+        self.calls = []
+        self._fail_first_stop = fail_first_stop
+        self._fail_start = fail_start
+
+    def tsc_fsync(self, fd, on):
+        self.calls.append(("fsync", fd, on))
+        if on == 0 and self._fail_first_stop:
+            self._fail_first_stop = False
+            raise OSError("not running")
+        if on == 1 and self._fail_start:
+            raise OSError("ioctl failed")
+
+    def tsc_set_rate(self, fd, fps, duty):
+        self.calls.append(("set_rate", fd, fps, duty))
+
+
+def _tsc_io(ext):
+    closed = []
+    io = gmsl_sync.KernelTscIO(ext_module=ext, open_fn=lambda path, flags: 7, close_fn=closed.append)
+    return io, closed
+
+
+def test_kernel_tsc_io_start_matches_ext_sync_gen_enable_sequence():
+    ext = _FakeExtModule(fail_first_stop=True)  # a leading stop that fails is ignored, like the script
+    io, closed = _tsc_io(ext)
+
+    io.start(30, 50)
+
+    assert ext.calls == [("fsync", 7, 0), ("set_rate", 7, 30, 50), ("fsync", 7, 1)]
+    assert closed == [7]
+
+
+def test_kernel_tsc_io_stop_and_fd_closed_on_failure():
+    ext = _FakeExtModule(fail_start=True)
+    io, closed = _tsc_io(ext)
+
+    with pytest.raises(RuntimeError, match="ioctl"):
+        io.start(30, 50)
+    assert closed == [7]
+
+    io.stop()
+    assert ext.calls[-1] == ("fsync", 7, 0)
+
+
+def test_kernel_tsc_io_permission_error_mentions_udev_rule():
+    io = gmsl_sync.KernelTscIO(ext_module=_FakeExtModule(),
+                               open_fn=MagicMock(side_effect=PermissionError()), close_fn=MagicMock())
+    with pytest.raises(RuntimeError, match='KERNEL=="cdi_tsc", MODE="0666"'):
+        io.start(30, 50)
+
+
+def _gmsl_sync(order, kernel=None, tsc_start_error=None):
+    kernel = kernel or _FakeKernel({"/dev/video2": 0, "/dev/video10": 0})
+
+    def run(node, *args, timeout=15):
+        if args and args[0] == "-c":
+            order.append(("write", node, args[1]))
+        return kernel(node, *args, timeout=timeout)
+
+    def tsc_start(fps, duty):
+        order.append(("tsc_start", fps, duty))
+        if tsc_start_error is not None:
+            raise tsc_start_error
+
+    tsc = MagicMock()
+    tsc.start.side_effect = tsc_start
+    tsc.stop.side_effect = lambda: order.append(("tsc_stop",))
+    glob_fn = _fake_glob({"/dev/video-rs-*": NODES})
+    sync = gmsl_sync.GmslTscSync(
+        control="camera_sync_mode", sync_mode_value=2, fps=30, duty_percent=50, settle_s=5.0,
+        run_v4l2=run, tsc_io=tsc, sleep=lambda s: order.append(("sleep", s)), glob_fn=glob_fn,
+    )
+    return sync, kernel, tsc
+
+
+def test_engage_order_is_mode_then_tsc_then_settle():
+    order = []
+    sync, kernel, _ = _gmsl_sync(order)
+
+    sync.engage()
+
+    assert order == [("write", "/dev/video2", "camera_sync_mode=2"),
+                     ("write", "/dev/video10", "camera_sync_mode=2"),
+                     ("tsc_start", 30, 50), ("sleep", 5.0)]
+
+
+def test_engage_restores_mode_when_tsc_start_fails():
+    order = []
+    sync, kernel, _ = _gmsl_sync(order, tsc_start_error=RuntimeError("ioctl failed"))
+
+    with pytest.raises(RuntimeError, match="ioctl"):
+        sync.engage()
+
+    assert kernel.values == {"/dev/video2": 0, "/dev/video10": 0}
+    assert ("sleep", 5.0) not in order
+
+
+def test_disengage_stops_tsc_then_restores_and_is_idempotent():
+    order = []
+    sync, kernel, tsc = _gmsl_sync(order, kernel=_FakeKernel({"/dev/video2": 1, "/dev/video10": 0}))
+    sync.engage()
+    order.clear()
+
+    sync.disengage()
+    sync.disengage()
+
+    assert order[0] == ("tsc_stop",)
+    assert kernel.values == {"/dev/video2": 1, "/dev/video10": 0}
+    assert tsc.stop.call_count == 1
+
+
+def test_disengage_after_failed_engage_is_noop():
+    order = []
+    kernel = _FakeKernel({"/dev/video2": 0, "/dev/video10": 0}, fail_write_on={"/dev/video2"})
+    sync, _, tsc = _gmsl_sync(order, kernel=kernel)
+    with pytest.raises(RuntimeError):
+        sync.engage()
+
+    sync.disengage()  # must not raise
+
+    tsc.stop.assert_not_called()
+
+
+def test_disengage_never_raises_when_tsc_stop_fails():
+    order = []
+    sync, kernel, tsc = _gmsl_sync(order)
+    sync.engage()
+    tsc.stop.side_effect = OSError("gone")
+
+    sync.disengage()  # must not raise
+
+    assert kernel.values == {"/dev/video2": 0, "/dev/video10": 0}  # restore still ran
+
+
+def test_stop_tsc_best_effort():
+    tsc = MagicMock()
+    gmsl_sync.stop_tsc_best_effort(tsc_io=tsc, path_exists=lambda p: False)
+    tsc.stop.assert_not_called()
+
+    tsc.stop.side_effect = OSError("x")
+    gmsl_sync.stop_tsc_best_effort(tsc_io=tsc, path_exists=lambda p: True)  # must not raise
+    tsc.stop.assert_called_once()
+
+
+def _device(name="Intel RealSense D585", usb=False):
+    device = MagicMock()
+    device.get_info.side_effect = lambda info: name if info == rs.camera_info.name else "x"
+    device.supports.side_effect = lambda info: usb if info == rs.camera_info.usb_type_descriptor else True
+    return device
+
+
+REMOTE = {"mode": "remote"}
+
+
+def _detect(panel_connection=REMOTE, devices=None, tsc_exists=True):
+    devices = devices if devices is not None else {"s1": _device(), "s2": _device()}
+    return gmsl_sync.detect_gmsl_tsc_rig(
+        panel_connection, list(devices), lambda serial: devices[serial],
+        path_exists=lambda path: tsc_exists,
+    )
+
+
+def test_detect_true_for_two_gmsl_d585_on_remote():
+    assert _detect() is True
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"panel_connection": {"mode": "local"}},
+    {"panel_connection": {}},
+    {"devices": {"s1": _device()}},
+    {"devices": {"s1": _device(), "s2": _device(), "s3": _device()}},
+    {"devices": {"s1": _device(), "s2": _device(name="Intel RealSense D455")}},
+    {"devices": {"s1": _device(), "s2": _device(usb=True)}},
+    {"tsc_exists": False},
+])
+def test_detect_false_when_any_condition_fails(kwargs):
+    assert _detect(**kwargs) is False
+
+
+def test_detect_false_when_lookup_raises():
+    def lookup(serial):
+        raise RuntimeError("No connected device")
+
+    assert gmsl_sync.detect_gmsl_tsc_rig(REMOTE, ["s1", "s2"], lookup, path_exists=lambda p: True) is False
+
+
+def test_detect_never_looks_up_devices_in_local_mode():
+    lookup = MagicMock()
+    gmsl_sync.detect_gmsl_tsc_rig({"mode": "local"}, ["s1", "s2"], lookup, path_exists=lambda p: True)
+    lookup.assert_not_called()

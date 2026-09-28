@@ -16,8 +16,13 @@ Its enum is NOT the SDK's: kernel 0=Default, 1=Master, 2=External Sync
 (SDK d500_intercam_sync_mode numbers these differently)."""
 
 import glob
+import importlib
+import os
 import re
 import subprocess
+import time
+
+import pyrealsense2 as rs
 
 V4L2_CTL = "v4l2-ctl"
 
@@ -161,3 +166,137 @@ def apply_sync_mode(nodes, control, value, run_v4l2=run_v4l2):
             raise RuntimeError("{} readback on {} is {}, not {} - the driver clamped or "
                                "ignored the write".format(control, node, readback, value))
     return as_found
+
+
+DEFAULT_GMSL_TSC_SYNC = {
+    "control": "camera_sync_mode",
+    "sync_mode_value": 2,
+    "duty_percent": 50,
+    "settle_s": 5.0,
+}
+
+CDI_TSC_DEV = "/dev/cdi_tsc"
+
+
+class KernelTscIO:
+    """Drives /dev/cdi_tsc through the vendored tools/tsc_trigger/
+    ext_sync_gen.py's own ioctl helpers - the same sequence as its --enable
+    (stop, ignore failure; set rate; start) and --disable. That module
+    imports fcntl at top level (Linux-only), so it is imported lazily here,
+    never at engine.gmsl_sync import time."""
+
+    def __init__(self, ext_module=None, open_fn=os.open, close_fn=os.close):
+        self._ext_module = ext_module
+        self._open = open_fn
+        self._close = close_fn
+
+    def _ext(self):
+        if self._ext_module is None:
+            self._ext_module = importlib.import_module("tools.tsc_trigger.ext_sync_gen")
+        return self._ext_module
+
+    def _with_fd(self, action):
+        ext = self._ext()
+        try:
+            fd = self._open(ext.CDI_TSC_DEV, os.O_RDWR)
+        except PermissionError:
+            raise RuntimeError(
+                'Permission denied on {}. Add udev rule: KERNEL=="cdi_tsc", MODE="0666"'.format(
+                    ext.CDI_TSC_DEV))
+        try:
+            action(ext, fd)
+        except OSError as exc:
+            raise RuntimeError("TSC ioctl failed: {}".format(exc))
+        finally:
+            self._close(fd)
+
+    def start(self, fps, duty):
+        def action(ext, fd):
+            try:
+                ext.tsc_fsync(fd, 0)
+            except OSError:
+                pass
+            ext.tsc_set_rate(fd, fps, duty)
+            ext.tsc_fsync(fd, 1)
+        self._with_fd(action)
+
+    def stop(self):
+        self._with_fd(lambda ext, fd: ext.tsc_fsync(fd, 0))
+
+
+class GmslTscSync:
+    """engage(): resolve the two nodes -> external-sync mode on both
+    (read-back confirmed) -> start the TSC -> wait settle_s so the sensors
+    lock to a stable signal before any stream opens. Any failure undoes
+    what was applied and raises. disengage(): stop TSC, restore as-found
+    mode; best-effort, idempotent, never raises."""
+
+    def __init__(self, control, sync_mode_value, fps, duty_percent, settle_s,
+                 run_v4l2=run_v4l2, tsc_io=None, sleep=time.sleep, glob_fn=glob.glob):
+        self._control = control
+        self._value = sync_mode_value
+        self._fps = fps
+        self._duty = duty_percent
+        self._settle_s = settle_s
+        self._run_v4l2 = run_v4l2
+        self._tsc_io = tsc_io or KernelTscIO()
+        self._sleep = sleep
+        self._glob_fn = glob_fn
+        self._as_found = None
+        self._tsc_running = False
+
+    def engage(self):
+        nodes = resolve_sync_nodes(self._control, run_v4l2=self._run_v4l2, glob_fn=self._glob_fn)
+        self._as_found = apply_sync_mode(nodes, self._control, self._value, run_v4l2=self._run_v4l2)
+        try:
+            self._tsc_io.start(self._fps, self._duty)
+        except Exception:
+            restore_sync_mode(self._as_found, self._control, run_v4l2=self._run_v4l2)
+            self._as_found = None
+            raise
+        self._tsc_running = True
+        if self._settle_s > 0:
+            self._sleep(self._settle_s)
+
+    def disengage(self):
+        if self._tsc_running:
+            self._tsc_running = False
+            try:
+                self._tsc_io.stop()
+            except Exception:
+                pass
+        if self._as_found is not None:
+            as_found, self._as_found = self._as_found, None
+            restore_sync_mode(as_found, self._control, run_v4l2=self._run_v4l2)
+
+
+def stop_tsc_best_effort(tsc_io=None, path_exists=os.path.exists):
+    """App-exit safety net: stop the generator if the device exists. Never
+    raises."""
+    if not path_exists(CDI_TSC_DEV):
+        return
+    try:
+        (tsc_io or KernelTscIO()).stop()
+    except Exception:
+        pass
+
+
+def detect_gmsl_tsc_rig(panel_connection, serials, device_lookup, path_exists=os.path.exists):
+    """True only for: remote panel mode, exactly 2 cameras, both D585,
+    neither reporting a USB descriptor (GMSL), and /dev/cdi_tsc present.
+    Checks the cheap conditions before touching any device; any lookup
+    failure means False - the hub must stay usable with no hardware."""
+    if (panel_connection or {}).get("mode") != "remote":
+        return False
+    if len(serials) != 2 or not path_exists(CDI_TSC_DEV):
+        return False
+    try:
+        for serial in serials:
+            device = device_lookup(serial)
+            if "D585" not in device.get_info(rs.camera_info.name):
+                return False
+            if device.supports(rs.camera_info.usb_type_descriptor):
+                return False
+    except Exception:
+        return False
+    return True
