@@ -11,6 +11,8 @@ from PySide6.QtWidgets import QApplication
 from gui.main_window import MainWindow
 from state.gui_state import load_gui_state
 from settings import load_settings
+from engine.led_panel import configure_panel_connection
+from engine import panel_rpc_client
 
 
 def main():
@@ -25,6 +27,15 @@ def main():
     gui_state = load_gui_state()
     settings = load_settings()
 
+    configure_panel_connection(settings["panel_connection"])
+    if settings["panel_connection"]["mode"] == "remote":
+        panel_rpc_client.configure(
+            settings["panel_connection"]["ssh_user"],
+            settings["panel_connection"]["ssh_host"],
+            settings["panel_connection"]["remote_repo_path"],
+            settings["panel_connection"].get("remote_python", "python"),
+        )
+
     window = MainWindow(ctx, gui_state, settings)
     # Maximized (not a fixed resize()) so the window - and everything in
     # it, now that VideoPanel/LivePlot have sane size policies - actually
@@ -32,7 +43,10 @@ def main():
     # that may be too big or too small for a given monitor.
     window.showMaximized()
 
-    sys.exit(app.exec())
+    exit_code = app.exec()
+    if settings["panel_connection"]["mode"] == "remote":
+        panel_rpc_client.close()
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

@@ -1,3 +1,12 @@
+# --- Running on an NVIDIA Orin (aarch64 Linux) instead of Windows, with
+# the LED-panel hardware left on a separate Windows machine (see
+# docs/superpowers/specs/2026-09-22-orin-panel-rpc-split-design.md) ---
+# - pyrealsense2 has no official PyPI wheel for Linux ARM64 - build
+#   librealsense from source with Python bindings (Intel documents this
+#   for Jetson boards) instead of `pip install pyrealsense2`.
+# - pywin32 and brainstem (below) are only ever needed on the Windows
+#   machine the LED-panel hardware is attached to - skip both here.
+
 pyrealsense2==2.58.3.10794
 opencv-python==5.0.0.93
 numpy==2.5.1

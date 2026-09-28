@@ -1,6 +1,6 @@
 import pytest
 from unittest.mock import patch, call, MagicMock
-from subprocess import CalledProcessError, TimeoutExpired
+from subprocess import CalledProcessError, TimeoutExpired, DEVNULL
 
 from engine.led_panel import LEDPanel
 
@@ -17,7 +17,8 @@ def test_set_speed_ms_converts_to_seconds_string():
     with patch("engine.led_panel.check_call") as mock_check_call, patch("time.sleep"):
         LEDPanel.set_speed_ms(1)
         mock_check_call.assert_called_once_with(
-            ["LED-Panel.exe", "--setTime", "0.0010"], timeout=LEDPanel.cmd_timeout_s)
+            ["LED-Panel.exe", "--setTime", "0.0010"],
+            timeout=LEDPanel.cmd_timeout_s, stdout=DEVNULL, stderr=DEVNULL)
 
 
 def test_set_speed_ms_accepts_a_fractional_value():
@@ -28,7 +29,8 @@ def test_set_speed_ms_accepts_a_fractional_value():
     with patch("engine.led_panel.check_call") as mock_check_call, patch("time.sleep"):
         LEDPanel.set_speed_ms(0.5)
         mock_check_call.assert_called_once_with(
-            ["LED-Panel.exe", "--setTime", "0.0005"], timeout=LEDPanel.cmd_timeout_s)
+            ["LED-Panel.exe", "--setTime", "0.0005"],
+            timeout=LEDPanel.cmd_timeout_s, stdout=DEVNULL, stderr=DEVNULL)
 
 
 def test_set_mode_sends_only_set_mode_no_preceding_stop():
@@ -40,7 +42,8 @@ def test_set_mode_sends_only_set_mode_no_preceding_stop():
     with patch("engine.led_panel.check_call") as mock_check_call, patch("time.sleep"):
         LEDPanel.set_mode(1)
         mock_check_call.assert_called_once_with(
-            ["LED-Panel.exe", "--setMode", "1"], timeout=LEDPanel.cmd_timeout_s)
+            ["LED-Panel.exe", "--setMode", "1"],
+            timeout=LEDPanel.cmd_timeout_s, stdout=DEVNULL, stderr=DEVNULL)
 
 
 def test_run_retries_on_called_process_error_then_raises():
@@ -84,7 +87,8 @@ def test_set_trigger_mode_sends_set_trigger_mode_command():
     with patch("engine.led_panel.check_call") as mock_check_call, patch("time.sleep"):
         LEDPanel.set_trigger_mode(2)
         mock_check_call.assert_called_once_with(
-            ["LED-Panel.exe", "--setTriggerMode", "2"], timeout=LEDPanel.cmd_timeout_s)
+            ["LED-Panel.exe", "--setTriggerMode", "2"],
+            timeout=LEDPanel.cmd_timeout_s, stdout=DEVNULL, stderr=DEVNULL)
 
 
 def test_set_camera_trigger_true_sends_1():
@@ -98,14 +102,16 @@ def test_set_camera_trigger_true_sends_1():
     with patch("engine.led_panel.check_call") as mock_check_call, patch("time.sleep"):
         LEDPanel.set_camera_trigger(True)
         mock_check_call.assert_called_once_with(
-            ["LED-Panel.exe", "--setCameraTrigger", "1"], timeout=LEDPanel.cmd_timeout_s)
+            ["LED-Panel.exe", "--setCameraTrigger", "1"],
+            timeout=LEDPanel.cmd_timeout_s, stdout=DEVNULL, stderr=DEVNULL)
 
 
 def test_set_camera_trigger_false_sends_0():
     with patch("engine.led_panel.check_call") as mock_check_call, patch("time.sleep"):
         LEDPanel.set_camera_trigger(False)
         mock_check_call.assert_called_once_with(
-            ["LED-Panel.exe", "--setCameraTrigger", "0"], timeout=LEDPanel.cmd_timeout_s)
+            ["LED-Panel.exe", "--setCameraTrigger", "0"],
+            timeout=LEDPanel.cmd_timeout_s, stdout=DEVNULL, stderr=DEVNULL)
 
 
 def test_set_stop_trigger_true_sends_0():
@@ -113,14 +119,16 @@ def test_set_stop_trigger_true_sends_0():
     with patch("engine.led_panel.check_call") as mock_check_call, patch("time.sleep"):
         LEDPanel.set_stop_trigger(True)
         mock_check_call.assert_called_once_with(
-            ["LED-Panel.exe", "--setStopTrigger", "0"], timeout=LEDPanel.cmd_timeout_s)
+            ["LED-Panel.exe", "--setStopTrigger", "0"],
+            timeout=LEDPanel.cmd_timeout_s, stdout=DEVNULL, stderr=DEVNULL)
 
 
 def test_set_stop_trigger_false_sends_1():
     with patch("engine.led_panel.check_call") as mock_check_call, patch("time.sleep"):
         LEDPanel.set_stop_trigger(False)
         mock_check_call.assert_called_once_with(
-            ["LED-Panel.exe", "--setStopTrigger", "1"], timeout=LEDPanel.cmd_timeout_s)
+            ["LED-Panel.exe", "--setStopTrigger", "1"],
+            timeout=LEDPanel.cmd_timeout_s, stdout=DEVNULL, stderr=DEVNULL)
 
 
 class _FakeCoord:
@@ -215,3 +223,51 @@ def test_query_methods_send_the_right_command(method_name, expected_args):
         result = getattr(LEDPanel, method_name)()
         assert result == "0"
         mock_check_call.assert_called_once_with(expected_args, timeout=LEDPanel.cmd_timeout_s)
+
+
+@pytest.fixture(autouse=True)
+def _reset_panel_connection_mode():
+    # PANEL_CONNECTION is module-level state that persists across tests -
+    # reset it to the real fresh-process default before/after every test.
+    from engine.led_panel import PANEL_CONNECTION
+    PANEL_CONNECTION.clear()
+    PANEL_CONNECTION["mode"] = "local"
+    yield
+    PANEL_CONNECTION.clear()
+    PANEL_CONNECTION["mode"] = "local"
+
+
+def test_configure_panel_connection_sets_the_module_level_dict():
+    from engine.led_panel import configure_panel_connection, PANEL_CONNECTION
+    configure_panel_connection({"mode": "remote", "ssh_host": "orin-panel-host"})
+    assert PANEL_CONNECTION == {"mode": "remote", "ssh_host": "orin-panel-host"}
+
+
+def test_run_delegates_to_panel_rpc_client_when_mode_is_remote():
+    from engine.led_panel import PANEL_CONNECTION
+    PANEL_CONNECTION["mode"] = "remote"
+    with patch("engine.panel_rpc_client.led_panel_run") as mock_remote_run, \
+         patch("engine.led_panel.check_call") as mock_check_call:
+        LEDPanel._run("--start")
+        mock_remote_run.assert_called_once_with("--start")
+        mock_check_call.assert_not_called()
+
+
+def test_query_delegates_to_panel_rpc_client_when_mode_is_remote():
+    from engine.led_panel import PANEL_CONNECTION
+    PANEL_CONNECTION["mode"] = "remote"
+    with patch("engine.panel_rpc_client.led_panel_query", return_value="1") as mock_remote_query, \
+         patch("engine.led_panel.check_call") as mock_check_call:
+        result = LEDPanel._query("--isRunning")
+        assert result == "1"
+        mock_remote_query.assert_called_once_with("--isRunning")
+        mock_check_call.assert_not_called()
+
+
+def test_run_propagates_a_runtime_error_from_panel_rpc_client():
+    from engine.led_panel import PANEL_CONNECTION
+    PANEL_CONNECTION["mode"] = "remote"
+    with patch("engine.panel_rpc_client.led_panel_run",
+               side_effect=RuntimeError("Panel server connection lost")):
+        with pytest.raises(RuntimeError, match="Panel server connection lost"):
+            LEDPanel._run("--start")

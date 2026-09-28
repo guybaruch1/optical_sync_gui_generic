@@ -664,3 +664,173 @@ def test_start_scanning_and_stop_scanning_still_work_together_under_the_lock():
          patch.object(dual_panel_control, "_relay_on"), \
          patch.object(dual_panel_control, "_relay_off"):
         start_scanning(5, 1, DUAL_PANEL_CONFIG)  # not yet primed -> calls stop_scanning() internally
+
+
+from engine.dual_panel_control import enter_stream_panel, exit_stream_panel
+
+
+# --- Remote mode: dual_panel_config is not None + PANEL_CONNECTION is
+# "remote" delegates the WHOLE call to panel_rpc_client, instead of
+# touching the (mocked-out, in these tests) local hub/relay machinery. ---
+
+@pytest.fixture(autouse=True)
+def _reset_panel_connection_mode():
+    from engine.led_panel import PANEL_CONNECTION
+    PANEL_CONNECTION.clear()
+    PANEL_CONNECTION["mode"] = "local"
+    yield
+    PANEL_CONNECTION.clear()
+    PANEL_CONNECTION["mode"] = "local"
+
+
+def test_turn_all_leds_on_in_remote_mode_delegates_to_panel_rpc_client():
+    from engine.led_panel import PANEL_CONNECTION
+    PANEL_CONNECTION["mode"] = "remote"
+    with patch("engine.panel_rpc_client.dual_panel_turn_all_leds_on") as mock_remote, \
+         patch.object(dual_panel_control, "_run_on_both_panels") as mock_run_on_both:
+        turn_all_leds_on(DUAL_PANEL_CONFIG)
+        mock_remote.assert_called_once_with(DUAL_PANEL_CONFIG)
+        mock_run_on_both.assert_not_called()
+
+
+def test_turn_all_leds_off_in_remote_mode_delegates_to_panel_rpc_client():
+    from engine.led_panel import PANEL_CONNECTION
+    PANEL_CONNECTION["mode"] = "remote"
+    with patch("engine.panel_rpc_client.dual_panel_turn_all_leds_off") as mock_remote, \
+         patch.object(dual_panel_control, "_run_on_both_panels") as mock_run_on_both:
+        turn_all_leds_off(DUAL_PANEL_CONFIG)
+        mock_remote.assert_called_once_with(DUAL_PANEL_CONFIG)
+        mock_run_on_both.assert_not_called()
+
+
+def test_start_scanning_in_remote_mode_delegates_to_panel_rpc_client():
+    from engine.led_panel import PANEL_CONNECTION
+    PANEL_CONNECTION["mode"] = "remote"
+    with patch("engine.panel_rpc_client.dual_panel_start_scanning") as mock_remote, \
+         patch.object(dual_panel_control, "_run_on_both_panels") as mock_run_on_both, \
+         patch.object(dual_panel_control, "_relay_on") as mock_relay_on:
+        start_scanning(5, 1, DUAL_PANEL_CONFIG)
+        mock_remote.assert_called_once_with(5, 1, DUAL_PANEL_CONFIG)
+        mock_run_on_both.assert_not_called()
+        mock_relay_on.assert_not_called()
+
+
+def test_stop_scanning_in_remote_mode_delegates_to_panel_rpc_client():
+    from engine.led_panel import PANEL_CONNECTION
+    PANEL_CONNECTION["mode"] = "remote"
+    with patch("engine.panel_rpc_client.dual_panel_stop_scanning") as mock_remote, \
+         patch.object(dual_panel_control, "_run_on_both_panels") as mock_run_on_both, \
+         patch.object(dual_panel_control, "_relay_off") as mock_relay_off:
+        stop_scanning(DUAL_PANEL_CONFIG)
+        mock_remote.assert_called_once_with(DUAL_PANEL_CONFIG)
+        mock_run_on_both.assert_not_called()
+        mock_relay_off.assert_not_called()
+
+
+def test_single_panel_path_is_unaffected_by_remote_mode():
+    # dual_panel_config=None must take the exact same local LEDPanel path
+    # regardless of PANEL_CONNECTION - it's already covered by
+    # engine/led_panel.py's own guard, one layer down.
+    from engine.led_panel import PANEL_CONNECTION
+    PANEL_CONNECTION["mode"] = "remote"
+    with patch("engine.dual_panel_control.LEDPanel") as mock_led_panel, \
+         patch("engine.panel_rpc_client.dual_panel_turn_all_leds_on") as mock_remote:
+        turn_all_leds_on(None)
+        mock_led_panel.stop.assert_called_once()
+        mock_led_panel.all_leds_on.assert_called_once()
+        mock_remote.assert_not_called()
+
+
+def test_switched_to_stream_panel_in_remote_mode_calls_enter_then_exit():
+    from engine.led_panel import PANEL_CONNECTION
+    PANEL_CONNECTION["mode"] = "remote"
+    call_order = []
+    with patch("engine.panel_rpc_client.dual_panel_enter_stream_panel",
+               side_effect=lambda cfg, name: call_order.append(("enter", name))) as mock_enter, \
+         patch("engine.panel_rpc_client.dual_panel_exit_stream_panel",
+               side_effect=lambda cfg, name: call_order.append(("exit", name))) as mock_exit:
+        with switched_to_stream_panel(DUAL_PANEL_CONFIG, "stream_a"):
+            call_order.append("inside")
+
+    assert call_order == [("enter", "stream_a"), "inside", ("exit", "stream_a")]
+    mock_enter.assert_called_once_with(DUAL_PANEL_CONFIG, "stream_a")
+    mock_exit.assert_called_once_with(DUAL_PANEL_CONFIG, "stream_a")
+
+
+def test_switched_to_stream_panel_in_remote_mode_still_exits_if_block_raises():
+    from engine.led_panel import PANEL_CONNECTION
+    PANEL_CONNECTION["mode"] = "remote"
+    with patch("engine.panel_rpc_client.dual_panel_enter_stream_panel"), \
+         patch("engine.panel_rpc_client.dual_panel_exit_stream_panel") as mock_exit:
+        with pytest.raises(ValueError, match="boom"):
+            with switched_to_stream_panel(DUAL_PANEL_CONFIG, "stream_a"):
+                raise ValueError("boom")
+    mock_exit.assert_called_once_with(DUAL_PANEL_CONFIG, "stream_a")
+
+
+# --- enter_stream_panel/exit_stream_panel: the two standalone functions
+# switched_to_stream_panel's LOCAL branch now calls internally, and that
+# tools/panel_server/panel_server_stdio.py registers directly for the
+# remote case. Same hub/LEDPanel behavior switched_to_stream_panel's
+# existing tests above already cover end-to-end - these two just confirm
+# the split itself didn't change anything. ---
+
+def test_enter_then_exit_stream_panel_match_switched_to_stream_panel_behavior():
+    fake_hub = _FakeHubForSwitch()
+
+    def fake_acroname_hub_module():
+        return type("module", (), {"AcronameHub": lambda: fake_hub})
+
+    with patch.dict("sys.modules", {"engine.acroname_hub": fake_acroname_hub_module()}), \
+         patch("engine.dual_panel_control.LEDPanel") as mock_led_panel, \
+         patch("time.sleep") as mock_sleep:
+        enter_stream_panel(DUAL_PANEL_CONFIG, "stream_a")
+        exit_stream_panel(DUAL_PANEL_CONFIG, "stream_a")
+
+    assert fake_hub.calls == [
+        "try_connect",
+        ("enable", [1], False), ("disable", [0, 6]),
+        "disconnect",
+    ]
+    mock_sleep.assert_called_once_with(3.0)
+    mock_led_panel.reset.assert_called_once()
+    assert dual_panel_control._stream_panel_state["hub"] is None
+
+
+def test_exit_stream_panel_returns_cleanly_when_no_hub_was_ever_entered():
+    # Reachable on a real failure sequence: if the ssh connection dies
+    # mid-session, engine/panel_rpc_client.py's _ensure_connected()
+    # transparently respawns a FRESH server process on the next call, and
+    # that fresh process's own _stream_panel_state["hub"] starts at None.
+    # A caller whose enter_stream_panel succeeded against the OLD server,
+    # then hit a real connection-lost error mid-block, then has its
+    # `finally` call exit_stream_panel - which now hits the NEW (respawned)
+    # server with no hub ever entered there - must not raise AttributeError
+    # and mask the real "connection lost" error the operator needs to see.
+    dual_panel_control._stream_panel_state["hub"] = None
+    exit_stream_panel(DUAL_PANEL_CONFIG, "stream_a")  # must not raise
+
+
+def test_enter_stream_panel_disconnects_hub_if_switch_body_raises():
+    # Regression: enter_stream_panel used to have no try/except at all
+    # around the port-lookup/enable_ports/disable_ports/sleep body - a
+    # failure there (a KeyError on a missing config key, or a real
+    # brainstem/hardware error out of enable_ports/disable_ports) left the
+    # hub connected (leaking it - the next _connect_hub() would try to
+    # connect to an already-connected hub) with no cleanup at all. Before
+    # this task's refactor, switched_to_stream_panel's own try/finally
+    # covered exactly this; enter_stream_panel must restore that guarantee
+    # on its own now that it holds the connect call.
+    fake_hub = _FakeHubForSwitch()
+    fake_hub.enable_ports = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("hub error"))
+
+    def fake_acroname_hub_module():
+        return type("module", (), {"AcronameHub": lambda: fake_hub})
+
+    with patch.dict("sys.modules", {"engine.acroname_hub": fake_acroname_hub_module()}), \
+         patch("engine.dual_panel_control.LEDPanel"), \
+         patch("time.sleep"):
+        with pytest.raises(RuntimeError, match="hub error"):
+            enter_stream_panel(DUAL_PANEL_CONFIG, "stream_a")
+
+    assert fake_hub.calls[-1] == "disconnect"

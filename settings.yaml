@@ -294,6 +294,32 @@ dual_panel:
   # seem to reach a panel before it's actually ready.
   hub_switch_settle_s: 3.0
 
+# Only read when the operator wants the camera + GUI running on a
+# different machine (e.g. an NVIDIA Orin) than the one the LED-panel
+# hardware is physically attached to - see engine/panel_rpc_client.py and
+# tools/panel_server/panel_server_stdio.py. mode: local (the default)
+# keeps this app's normal single-machine behavior completely unchanged;
+# nothing below this line is read unless mode is switched to "remote".
+panel_connection:
+  mode: local
+  # Only used when mode: remote - the Windows machine the LED-panel
+  # hardware (LED-Panel.exe, and the Acroname hub/relay in dual-panel
+  # setups) is physically attached to. Needs key-based SSH login already
+  # set up for this to connect without a password prompt.
+  ssh_user: ""
+  ssh_host: ""
+  # Where this same repo lives on that Windows machine, used to locate
+  # tools/panel_server/panel_server_stdio.py to run over ssh.
+  remote_repo_path: ""
+  # The python command to invoke on the remote machine. Defaults to
+  # "python" (not "python3") since the remote machine is BY DEFINITION
+  # always Windows (the whole point of this feature) - the python.org
+  # Windows installer creates python.exe/the py launcher, not python3.exe,
+  # and Windows 10/11 ships its own python3.exe App Execution Alias stub
+  # that redirects to the Microsoft Store when no real Python 3 install is
+  # present, failing non-interactively with a confusing error.
+  remote_python: python
+
 paths:
   config_path: config.yaml
   raw_csv_path: pipeline_sync_raw.csv
