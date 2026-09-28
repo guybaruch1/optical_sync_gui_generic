@@ -1365,3 +1365,99 @@ def test_multi_camera_live_session_back_returns_to_camera_hub(qapp):
     window.multi_camera_live_session_page.back_requested.emit()
 
     assert window.stack.currentWidget() is window.camera_hub_page
+
+
+# --- GMSL TSC sync: detection on hub refresh, and the Start branch. ---
+
+def _two_camera_window(qapp, monkeypatch, tmp_path, slave_pick=COLOR0):
+    settings = _full_settings({"Intel RealSense D455": [_ir_vs_rgb_test()]})
+    settings["camera"]["inter_cam_sync"] = {
+        "Intel RealSense D455": {"master": 1, "slave": 2, "max_slave_color_resolution": {"width": 640, "height": 480}},
+    }
+    window = _make_window(qapp, settings)
+    monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [IR1, COLOR0])
+    monkeypatch.setattr(main_window_module, "save_gui_state", lambda state: None)
+    monkeypatch.setattr(window.roi_page, "set_context", lambda *a, **k: None)
+    monkeypatch.setattr(main_window_module, "ensure_output_dir", lambda settings: str(tmp_path))
+    monkeypatch.setattr(
+        main_window_module, "load_led_positions",
+        lambda *a, **k: ({"0": [1.0, 1.0, 300.0, 100.0, 200.0]}, {"0": [2.0, 2.0, 600.0, 200.0, 400.0]}),
+    )
+    master_id = _configure_one_camera(window, "SN123")
+    window._on_add_camera_requested()
+    slave_id = _configure_one_camera(window, "SN456", color_pick=slave_pick)
+    return window, master_id, slave_id
+
+
+def test_refresh_camera_hub_runs_gmsl_detection(qapp, monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(main_window_module, "detect_gmsl_tsc_rig",
+                        lambda panel_connection, serials, lookup: calls.append(sorted(serials)) or True)
+    window, _, _ = _two_camera_window(qapp, monkeypatch, tmp_path)
+
+    assert calls[-1] == ["SN123", "SN456"]
+    assert window.camera_hub_page.gmsl_tsc_checked is True
+
+
+def test_start_with_gmsl_ticked_skips_genlock_and_passes_config(qapp, monkeypatch, tmp_path):
+    monkeypatch.setattr(main_window_module, "detect_gmsl_tsc_rig", lambda *a: True)
+    # COLOR0 (1280x720) on the slave would normally fail the slave-color check.
+    window, master_id, slave_id = _two_camera_window(qapp, monkeypatch, tmp_path, slave_pick=COLOR0)
+    critical = _capture_critical(monkeypatch)
+    captured = {}
+    monkeypatch.setattr(window.multi_camera_live_session_page, "set_cameras",
+                        lambda ctx, cameras, gmsl_tsc_sync=None: captured.update(
+                            cameras=cameras, gmsl_tsc_sync=gmsl_tsc_sync))
+
+    window._on_start_multi_camera_session_requested()
+
+    assert critical == []
+    assert all(c["config"]["inter_cam_sync_value"] is None for c in captured["cameras"])
+    assert captured["gmsl_tsc_sync"] == {"control": "camera_sync_mode", "sync_mode_value": 2,
+                                         "duty_percent": 50, "settle_s": 5.0, "fps": 30}
+
+
+def test_start_with_gmsl_ticked_blocks_on_fps_mismatch(qapp, monkeypatch, tmp_path):
+    monkeypatch.setattr(main_window_module, "detect_gmsl_tsc_rig", lambda *a: True)
+    color_15fps = dict(COLOR0, fps=15)
+    window, _, _ = _two_camera_window(qapp, monkeypatch, tmp_path, slave_pick=color_15fps)
+    critical = _capture_critical(monkeypatch)
+    set_cameras = MagicMock()
+    monkeypatch.setattr(window.multi_camera_live_session_page, "set_cameras", set_cameras)
+
+    window._on_start_multi_camera_session_requested()
+
+    assert len(critical) == 1
+    set_cameras.assert_not_called()
+
+
+def test_start_with_gmsl_unticked_behaves_as_before(qapp, monkeypatch, tmp_path):
+    monkeypatch.setattr(main_window_module, "detect_gmsl_tsc_rig", lambda *a: True)
+    window, master_id, slave_id = _two_camera_window(qapp, monkeypatch, tmp_path, slave_pick=COLOR0_SAFE)
+    window.camera_hub_page.gmsl_tsc_checkbox.setChecked(False)
+    captured = {}
+    monkeypatch.setattr(window.multi_camera_live_session_page, "set_cameras",
+                        lambda ctx, cameras, gmsl_tsc_sync=None: captured.update(
+                            cameras=cameras, gmsl_tsc_sync=gmsl_tsc_sync))
+
+    window._on_start_multi_camera_session_requested()
+
+    configs = {c["camera_id"]: c["config"] for c in captured["cameras"]}
+    assert configs[master_id]["inter_cam_sync_value"] == 1
+    assert configs[slave_id]["inter_cam_sync_value"] == 2
+    assert captured["gmsl_tsc_sync"] is None
+
+
+def test_gmsl_settings_section_overrides_defaults(qapp, monkeypatch, tmp_path):
+    monkeypatch.setattr(main_window_module, "detect_gmsl_tsc_rig", lambda *a: True)
+    window, _, _ = _two_camera_window(qapp, monkeypatch, tmp_path)
+    window.settings["camera_sync"] = {"gmsl_tsc_sync": {"duty_percent": 25, "settle_s": 2.0}}
+    captured = {}
+    monkeypatch.setattr(window.multi_camera_live_session_page, "set_cameras",
+                        lambda ctx, cameras, gmsl_tsc_sync=None: captured.update(gmsl_tsc_sync=gmsl_tsc_sync))
+
+    window._on_start_multi_camera_session_requested()
+
+    assert captured["gmsl_tsc_sync"]["duty_percent"] == 25
+    assert captured["gmsl_tsc_sync"]["settle_s"] == 2.0
+    assert captured["gmsl_tsc_sync"]["sync_mode_value"] == 2

@@ -64,6 +64,7 @@ from engine.streams import (
     find_device_by_serial, set_inter_cam_sync_mode, INTER_CAM_SYNC_DEFAULT,
 )
 from engine.rgb_mode import ensure_mode
+from engine.gmsl_sync import detect_gmsl_tsc_rig, DEFAULT_GMSL_TSC_SYNC
 from domain.calibration import load_led_positions
 from settings import ensure_output_dir
 
@@ -634,6 +635,14 @@ class MainWindow(QMainWindow):
             for camera_id, camera in self._cameras.items()
         ]
         self.camera_hub_page.set_cameras(summaries)
+        # GMSL TSC sync is only offered on the Orin with 2x D585 over GMSL -
+        # see engine.gmsl_sync.detect_gmsl_tsc_rig. Local panel mode returns
+        # False before any device lookup, so Windows/tests are unaffected.
+        self.camera_hub_page.set_gmsl_tsc_available(detect_gmsl_tsc_rig(
+            self.settings.get("panel_connection"),
+            [camera["config"]["device_serial"] for camera in self._cameras.values()],
+            lambda serial: find_device_by_serial(self.ctx, serial),
+        ))
 
     def _on_add_camera_requested(self):
         self._editing_camera_id = self._new_camera_slot_id()
@@ -729,12 +738,31 @@ class MainWindow(QMainWindow):
         # every Start is what keeps this correct rather than stale.
         inter_cam_sync_settings = self.settings["camera"].get("inter_cam_sync", {})
         camera_sync_settings = self.settings.get("camera_sync") or {}
+        gmsl_tsc_on = self.camera_hub_page.gmsl_tsc_checked
+        gmsl_tsc_sync = None
+        if gmsl_tsc_on:
+            fps_values = sorted({camera["config"][pick]["fps"]
+                                 for camera in self._cameras.values() for pick in ("pick_a", "pick_b")})
+            if len(fps_values) != 1:
+                QMessageBox.critical(
+                    self, "GMSL TSC sync needs one frame rate",
+                    "The TSC trigger drives every GMSL camera at one rate, but the configured "
+                    "streams use {} fps. Set every stream to the same fps in Stream Config, or "
+                    "untick \"GMSL TSC sync\" on the Camera Hub.".format(
+                        " / ".join(str(fps) for fps in fps_values)),
+                )
+                return
+            gmsl_tsc_sync = {**DEFAULT_GMSL_TSC_SYNC,
+                             **(camera_sync_settings.get("gmsl_tsc_sync") or {}),
+                             "fps": fps_values[0]}
         cameras = [
             {"camera_id": camera_id, "label": camera["label"],
              "is_master": (camera_id == self._master_camera_id),
              "config": {
                  **camera["config"],
-                 "inter_cam_sync_value": resolve_inter_cam_sync_value(
+                 # GMSL TSC sync replaces SDK genlock entirely - the two are
+                 # never applied together.
+                 "inter_cam_sync_value": None if gmsl_tsc_on else resolve_inter_cam_sync_value(
                      inter_cam_sync_settings, camera["label"],
                      is_master=(camera_id == self._master_camera_id),
                  ),
@@ -747,7 +775,9 @@ class MainWindow(QMainWindow):
              }}
             for camera_id, camera in self._cameras.items()
         ]
-        conflicts = _slave_genlock_color_resolution_conflicts(cameras, inter_cam_sync_settings)
+        # A USB-bandwidth rule for SDK genlock slaves - not applicable to GMSL.
+        conflicts = [] if gmsl_tsc_on else _slave_genlock_color_resolution_conflicts(
+            cameras, inter_cam_sync_settings)
         if conflicts:
             QMessageBox.critical(
                 self, "Slave camera color resolution too high for genlock",
@@ -758,7 +788,7 @@ class MainWindow(QMainWindow):
                 ),
             )
             return
-        self.multi_camera_live_session_page.set_cameras(self.ctx, cameras)
+        self.multi_camera_live_session_page.set_cameras(self.ctx, cameras, gmsl_tsc_sync=gmsl_tsc_sync)
         self.stack.setCurrentWidget(self.multi_camera_live_session_page)
 
     def _current_device_name(self):

@@ -579,6 +579,37 @@ therefore gained two new, always-empty columns after `stream_b_ts_us`.
 Name-keyed CSV consumers are unaffected; anything reading these CSVs by
 column INDEX would break.
 
+### GMSL TSC sync (2x D585 on the Orin)
+
+On the Orin (`panel_connection.mode: remote`) with two D585s on the GMSL
+deserializer, `engine/gmsl_sync.py` hardware-syncs both cameras instead of
+SDK genlock: kernel `camera_sync_mode=2` ("External Sync") written via
+`v4l2-ctl` with a read-back check, then the Orin's TSC signal generator
+(`/dev/cdi_tsc`) started at the streams' shared fps, then `settle_s` of
+wait before any stream opens. Why V4L2, not the SDK's
+`inter_cam_sync_mode`: on this D585 prototype firmware the SDK write
+succeeds silently and its readback throws, so the mode can never be
+confirmed. The kernel enum is NOT the SDK enum (kernel 2 = SDK 3).
+
+Gating is auto-detect + operator checkbox: `detect_gmsl_tsc_rig` (remote
+mode, exactly 2 cameras, both D585, neither reports
+`usb_type_descriptor`, `/dev/cdi_tsc` exists) decides whether Camera Hub
+shows its "GMSL TSC sync" checkbox, pre-ticked on becoming available.
+When ticked, every camera's `inter_cam_sync_value` is forced to `None` and
+the slave-color-resolution check is skipped - SDK genlock and GMSL sync
+are never applied together. `MultiCameraSessionController` engages
+`GmslTscSync` after the genlock step and before any thread
+(all-or-nothing), and disengages (TSC off, as-found mode restored) only
+once every thread's own `finished` has fired. `main.py` also stops the TSC
+on exit in remote mode.
+
+`tools/tsc_trigger/ext_sync_gen.py` is the user's script vendored
+unchanged; `engine/gmsl_sync.KernelTscIO` imports its ioctl helpers
+lazily (it imports `fcntl`, Linux-only). Manual recovery if the app dies
+mid-run: `python3 tools/tsc_trigger/ext_sync_gen.py --disable` on the
+Orin. Unconfirmed on real hardware: that a GMSL D585 reports no
+`usb_type_descriptor` - if wrong, only that detection rule changes.
+
 ### Camera management: distinguishing cameras, hiding duplicates, and Edit's direct routing
 
 Three related fixes to the multi-camera Hub/Add/Edit flow, all driven by the same real-rig scenario: an operator running two same-model cameras (e.g. two D585s), or one camera used for more than one test shape.
