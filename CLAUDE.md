@@ -609,8 +609,9 @@ sync with no trigger gives no frames on the next free-running run).
 unchanged; `engine/gmsl_sync.KernelTscIO` imports its ioctl helpers
 lazily (it imports `fcntl`, Linux-only). Manual recovery if the app dies
 mid-run: `python3 tools/tsc_trigger/ext_sync_gen.py --disable` on the
-Orin. Unconfirmed on real hardware: that a GMSL D585 reports no
-`usb_type_descriptor` - if wrong, only that detection rule changes.
+Orin. Confirmed on the Orin rig (2026-09-28): both GMSL cameras report
+name `RealSense D585 Prototype` and `supports(usb_type_descriptor) == False`,
+so detection rules 3 and 4 hold there.
 
 ### Camera management: distinguishing cameras, hiding duplicates, and Edit's direct routing
 

@@ -252,8 +252,8 @@ Unit (no hardware, runs on Windows CI):
 
 Real hardware (Orin, 2x D585 GMSL) - first thing to verify:
 
-1. a GMSL D585 really reports no `usb_type_descriptor` (if wrong, only
-   detection rule 4 changes)
+1. ~~a GMSL D585 really reports no `usb_type_descriptor`~~ CONFIRMED
+   2026-09-28: both report `RealSense D585 Prototype` / `False`
 2. both nodes resolve and read back `camera_sync_mode = 2`
 3. with the checkbox ticked, both cameras deliver frames at the trigger
    rate; unticked, the run behaves as today
