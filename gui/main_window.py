@@ -740,6 +740,14 @@ class MainWindow(QMainWindow):
         camera_sync_settings = self.settings.get("camera_sync") or {}
         gmsl_tsc_on = self.camera_hub_page.gmsl_tsc_checked
         gmsl_tsc_sync = None
+        # Unticked on the detected GMSL rig = a free-running run: a killed
+        # earlier ticked run may have left both cameras in external-sync mode
+        # and the trigger pulsing, which would silently keep this "baseline"
+        # synced - engine.gmsl_sync.GmslFreeRunGuard cleans that up first.
+        gmsl_free_run_cleanup = None
+        if self.camera_hub_page.gmsl_tsc_available and not gmsl_tsc_on:
+            gmsl_settings = {**DEFAULT_GMSL_TSC_SYNC, **(camera_sync_settings.get("gmsl_tsc_sync") or {})}
+            gmsl_free_run_cleanup = {"control": gmsl_settings["control"]}
         if gmsl_tsc_on:
             fps_values = sorted({camera["config"][pick]["fps"]
                                  for camera in self._cameras.values() for pick in ("pick_a", "pick_b")})
@@ -796,7 +804,8 @@ class MainWindow(QMainWindow):
                 ),
             )
             return
-        self.multi_camera_live_session_page.set_cameras(self.ctx, cameras, gmsl_tsc_sync=gmsl_tsc_sync)
+        self.multi_camera_live_session_page.set_cameras(
+            self.ctx, cameras, gmsl_tsc_sync=gmsl_tsc_sync, gmsl_free_run_cleanup=gmsl_free_run_cleanup)
         self.stack.setCurrentWidget(self.multi_camera_live_session_page)
 
     def _current_device_name(self):

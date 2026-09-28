@@ -1406,8 +1406,9 @@ def test_start_with_gmsl_ticked_skips_genlock_and_passes_config(qapp, monkeypatc
     critical = _capture_critical(monkeypatch)
     captured = {}
     monkeypatch.setattr(window.multi_camera_live_session_page, "set_cameras",
-                        lambda ctx, cameras, gmsl_tsc_sync=None: captured.update(
-                            cameras=cameras, gmsl_tsc_sync=gmsl_tsc_sync))
+                        lambda ctx, cameras, gmsl_tsc_sync=None, gmsl_free_run_cleanup=None: captured.update(
+                            cameras=cameras, gmsl_tsc_sync=gmsl_tsc_sync,
+                            gmsl_free_run_cleanup=gmsl_free_run_cleanup))
 
     window._on_start_multi_camera_session_requested()
 
@@ -1437,8 +1438,9 @@ def test_start_with_gmsl_unticked_behaves_as_before(qapp, monkeypatch, tmp_path)
     window.camera_hub_page.gmsl_tsc_checkbox.setChecked(False)
     captured = {}
     monkeypatch.setattr(window.multi_camera_live_session_page, "set_cameras",
-                        lambda ctx, cameras, gmsl_tsc_sync=None: captured.update(
-                            cameras=cameras, gmsl_tsc_sync=gmsl_tsc_sync))
+                        lambda ctx, cameras, gmsl_tsc_sync=None, gmsl_free_run_cleanup=None: captured.update(
+                            cameras=cameras, gmsl_tsc_sync=gmsl_tsc_sync,
+                            gmsl_free_run_cleanup=gmsl_free_run_cleanup))
 
     window._on_start_multi_camera_session_requested()
 
@@ -1446,6 +1448,9 @@ def test_start_with_gmsl_unticked_behaves_as_before(qapp, monkeypatch, tmp_path)
     assert configs[master_id]["inter_cam_sync_value"] == 1
     assert configs[slave_id]["inter_cam_sync_value"] == 2
     assert captured["gmsl_tsc_sync"] is None
+    # Unticked on the detected rig = a free-running run: leftovers from a
+    # killed ticked run must be cleaned first.
+    assert captured["gmsl_free_run_cleanup"] == {"control": "camera_sync_mode"}
 
 
 def test_gmsl_settings_section_overrides_defaults(qapp, monkeypatch, tmp_path):
@@ -1454,7 +1459,7 @@ def test_gmsl_settings_section_overrides_defaults(qapp, monkeypatch, tmp_path):
     window.settings["camera_sync"] = {"gmsl_tsc_sync": {"duty_percent": 25, "settle_s": 2.0}}
     captured = {}
     monkeypatch.setattr(window.multi_camera_live_session_page, "set_cameras",
-                        lambda ctx, cameras, gmsl_tsc_sync=None: captured.update(gmsl_tsc_sync=gmsl_tsc_sync))
+                        lambda ctx, cameras, gmsl_tsc_sync=None, gmsl_free_run_cleanup=None: captured.update(gmsl_tsc_sync=gmsl_tsc_sync))
 
     window._on_start_multi_camera_session_requested()
 
@@ -1477,3 +1482,30 @@ def test_start_with_gmsl_ticked_rejects_unknown_settings_keys(qapp, monkeypatch,
     assert len(critical) == 1
     assert "duty_pct" in critical[0][0][2]
     set_cameras.assert_not_called()
+
+
+
+def test_start_on_undetected_rig_passes_no_gmsl_objects(qapp, monkeypatch, tmp_path):
+    monkeypatch.setattr(main_window_module, "detect_gmsl_tsc_rig", lambda *a: False)
+    window, _, _ = _two_camera_window(qapp, monkeypatch, tmp_path, slave_pick=COLOR0_SAFE)
+    captured = {}
+    monkeypatch.setattr(window.multi_camera_live_session_page, "set_cameras",
+                        lambda ctx, cameras, gmsl_tsc_sync=None, gmsl_free_run_cleanup=None: captured.update(
+                            gmsl_tsc_sync=gmsl_tsc_sync, gmsl_free_run_cleanup=gmsl_free_run_cleanup))
+
+    window._on_start_multi_camera_session_requested()
+
+    assert captured == {"gmsl_tsc_sync": None, "gmsl_free_run_cleanup": None}
+
+
+def test_start_with_gmsl_ticked_passes_no_free_run_cleanup(qapp, monkeypatch, tmp_path):
+    monkeypatch.setattr(main_window_module, "detect_gmsl_tsc_rig", lambda *a: True)
+    window, _, _ = _two_camera_window(qapp, monkeypatch, tmp_path)
+    captured = {}
+    monkeypatch.setattr(window.multi_camera_live_session_page, "set_cameras",
+                        lambda ctx, cameras, gmsl_tsc_sync=None, gmsl_free_run_cleanup=None: captured.update(
+                            gmsl_free_run_cleanup=gmsl_free_run_cleanup))
+
+    window._on_start_multi_camera_session_requested()
+
+    assert captured["gmsl_free_run_cleanup"] is None

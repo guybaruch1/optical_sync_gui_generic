@@ -70,7 +70,7 @@ from gui.widgets.camera_live_session_panel import CameraLiveSessionPanel
 from gui.widgets.live_plot import LivePlot
 from gui.widgets.stats_panel import StatsPanel
 from engine.multi_camera_session import CameraSessionSpec, MultiCameraSessionController
-from engine.gmsl_sync import GmslTscSync
+from engine.gmsl_sync import GmslTscSync, GmslFreeRunGuard
 from engine.cross_camera_reconciler import build_cross_camera_pair_specs
 from engine.metrics import PairingGapMetric, PositionGapMetric, is_position_gap_debug_outlier
 from engine.test_session import TestSession, TestSessionConfig
@@ -168,6 +168,10 @@ class MultiCameraLiveSessionPage(QWidget):
         self._camera_start_stagger_s = camera_start_stagger_s
         self._controller_factory = controller_factory or MultiCameraSessionController
         self._gmsl_sync_factory = gmsl_sync_factory or GmslTscSync
+        self._gmsl_free_run_guard_factory = GmslFreeRunGuard
+        # {"control": ...} for an UNTICKED run on the detected GMSL rig
+        # (clean up a killed run's leftover sync mode/trigger first), else None.
+        self._gmsl_free_run_cleanup = None
         # engine.gmsl_sync config dict for this run, or None (the normal
         # case) - set by MainWindow only when Camera Hub's "GMSL TSC sync"
         # checkbox is ticked.
@@ -265,7 +269,7 @@ class MultiCameraLiveSessionPage(QWidget):
         self.status_label = QLabel("")
         layout.addWidget(self.status_label)
 
-    def set_cameras(self, ctx, cameras, gmsl_tsc_sync=None):
+    def set_cameras(self, ctx, cameras, gmsl_tsc_sync=None, gmsl_free_run_cleanup=None):
         """cameras: list of {"camera_id", "label", "is_master", "config"} -
         exactly what MainWindow's self._cameras/self._master_camera_id
         already hold, built fresh by MainWindow's own _refresh_camera_hub-
@@ -273,6 +277,7 @@ class MultiCameraLiveSessionPage(QWidget):
         self._ctx = ctx
         self._cameras = cameras
         self._gmsl_tsc_sync = gmsl_tsc_sync
+        self._gmsl_free_run_cleanup = gmsl_free_run_cleanup
 
         # Prefill the switch-time spinbox from the MASTER camera's own tuned
         # config value (the same "master's config is authoritative"
@@ -595,6 +600,8 @@ class MultiCameraLiveSessionPage(QWidget):
             controller_kwargs["camera_start_stagger_s"] = self._camera_start_stagger_s
         if self._gmsl_tsc_sync is not None:
             controller_kwargs["gmsl_sync"] = self._gmsl_sync_factory(**self._gmsl_tsc_sync)
+        elif self._gmsl_free_run_cleanup is not None:
+            controller_kwargs["gmsl_sync"] = self._gmsl_free_run_guard_factory(**self._gmsl_free_run_cleanup)
 
         self._controller = self._controller_factory(camera_specs, **controller_kwargs)
         self._controller.camera_frame_ready.connect(self._on_camera_frame_ready)
@@ -635,6 +642,12 @@ class MultiCameraLiveSessionPage(QWidget):
                 self._unlock_toolbar()
             self.status_label.setText("Failed to start: {}".format(exc))
             QMessageBox.critical(self, "Could not start the multi-camera session", str(exc))
+            return
+        guard_reset_nodes = getattr(controller_kwargs.get("gmsl_sync"), "reset_nodes", None)
+        if self._gmsl_free_run_cleanup is not None and guard_reset_nodes:
+            self.status_label.setText(
+                "Reset camera sync mode left over from a previous run ({}) and stopped the TSC "
+                "trigger - this run is free-running.".format(", ".join(guard_reset_nodes)))
 
     def stop_all_sessions(self):
         if self._controller is not None:

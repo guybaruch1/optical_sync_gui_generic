@@ -152,6 +152,10 @@ class CameraHubPage(QWidget):
         self._gmsl_tsc_operator_choice = checked
 
     @property
+    def gmsl_tsc_available(self):
+        return self._gmsl_tsc_available
+
+    @property
     def gmsl_tsc_checked(self):
         return self._gmsl_tsc_available and self.gmsl_tsc_checkbox.isChecked()
 

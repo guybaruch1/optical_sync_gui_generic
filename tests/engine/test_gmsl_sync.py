@@ -419,3 +419,79 @@ def test_validate_gmsl_tsc_settings_rejects_unknown_keys():
     # M4
     assert gmsl_sync.unknown_gmsl_tsc_settings_keys({"duty_percent": 25}) == []
     assert gmsl_sync.unknown_gmsl_tsc_settings_keys({"duty_pct": 25, "settle": 1}) == ["duty_pct", "settle"]
+
+
+# --- Self-heal after a killed run: leftover external-sync mode / trigger. ---
+
+def test_control_default_reads_driver_default():
+    assert gmsl_sync.control_default(L_WITH_SYNC, "camera_sync_mode") == 0
+    assert gmsl_sync.control_default(L_WITHOUT_SYNC, "camera_sync_mode") is None
+
+
+def test_apply_sync_mode_restores_to_driver_default_when_found_already_in_sync_mode():
+    # A killed ticked run leaves mode 2; restoring "as found" would keep it
+    # stuck at 2 forever.
+    kernel = _FakeKernel({"/dev/video2": 2, "/dev/video10": 0})
+
+    restore_to = gmsl_sync.apply_sync_mode(NODES, "camera_sync_mode", 2, run_v4l2=kernel)
+
+    assert restore_to == {"/dev/video2": 0, "/dev/video10": 0}
+
+
+def _free_run(kernel, tsc=None):
+    tsc = tsc or MagicMock()
+    return gmsl_sync.reset_leftover_sync(
+        "camera_sync_mode", run_v4l2=kernel, tsc_io=tsc, glob_fn=_fake_glob({"/dev/video-rs-*": NODES})), tsc
+
+
+def test_reset_leftover_sync_resets_only_non_default_nodes_and_stops_trigger():
+    kernel = _FakeKernel({"/dev/video2": 2, "/dev/video10": 0})
+
+    reset_nodes, tsc = _free_run(kernel)
+
+    assert reset_nodes == ["/dev/video2"]
+    assert kernel.writes == [("/dev/video2", 0)]
+    tsc.stop.assert_called_once()
+
+
+def test_reset_leftover_sync_on_clean_rig_writes_nothing_but_still_stops_trigger():
+    # The trigger has no GET ioctl - a still-pulsing one from a killed run
+    # can't be detected, and a free-running run must not have one.
+    kernel = _FakeKernel({"/dev/video2": 0, "/dev/video10": 0})
+
+    reset_nodes, tsc = _free_run(kernel)
+
+    assert reset_nodes == []
+    assert kernel.writes == []
+    tsc.stop.assert_called_once()
+
+
+def test_reset_leftover_sync_raises_when_reset_does_not_stick():
+    kernel = _FakeKernel({"/dev/video2": 2, "/dev/video10": 0}, ignore_write_on={"/dev/video2"})
+
+    with pytest.raises(RuntimeError, match="free-running"):
+        _free_run(kernel)
+
+
+def test_reset_leftover_sync_raises_when_trigger_stop_fails():
+    tsc = MagicMock()
+    tsc.stop.side_effect = RuntimeError("TSC ioctl failed: x")
+
+    with pytest.raises(RuntimeError, match="TSC"):
+        _free_run(_FakeKernel({"/dev/video2": 0, "/dev/video10": 0}), tsc=tsc)
+
+
+def test_free_run_guard_engage_resets_and_disengage_is_a_noop():
+    kernel = _FakeKernel({"/dev/video2": 2, "/dev/video10": 2})
+    tsc = MagicMock()
+    guard = gmsl_sync.GmslFreeRunGuard(control="camera_sync_mode", run_v4l2=kernel, tsc_io=tsc,
+                                       glob_fn=_fake_glob({"/dev/video-rs-*": NODES}))
+
+    guard.engage()
+    writes_after_engage = list(kernel.writes)
+    guard.disengage()
+    gmsl_sync.disengage_all_engaged()
+
+    assert guard.reset_nodes == NODES
+    assert kernel.writes == writes_after_engage  # nothing written back
+    tsc.stop.assert_called_once()

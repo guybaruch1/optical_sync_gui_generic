@@ -206,6 +206,19 @@ did not start. A killed process (no exit path) can still leave both; the
 manual recovery is `ext_sync_gen.py --disable` plus a power-cycle or
 `v4l2-ctl -c camera_sync_mode=0`.
 
+**Self-heal after a killed process.** A killed process has no exit
+path, so the NEXT Start cleans up:
+
+- Unticked Start on the detected rig: `GmslFreeRunGuard` (passed through
+  the controller's `gmsl_sync` slot, so it runs before any thread, all-or-
+  nothing) resets every node not at the driver's `default=` back to it
+  (read-back confirmed) and always stops the TSC (no GET ioctl exists to
+  check it). Failure blocks Start. The page's status line names any node
+  it reset.
+- Ticked Start: if a node is ALREADY at `sync_mode_value` when found, the
+  end-of-run restore target is the driver's default (0 if unknown), not
+  the as-found value - otherwise a leftover 2 would be "restored" to 2.
+
 ## 4. Error handling
 
 - Any failure in `engage()` (node resolution, out-of-range value, write,

@@ -605,6 +605,19 @@ once every thread's own `finished` has fired. On exit in remote mode,
 process engaged (TSC off AND mode restored - a camera left in external
 sync with no trigger gives no frames on the next free-running run).
 
+**Self-heal after a killed run.** A killed/crashed process never reaches
+that exit path, leaving both cameras in `camera_sync_mode=2` and the
+trigger possibly still pulsing (the TSC has no GET ioctl, so it can't be
+detected, only stopped). The next Start cleans it up instead of relying on
+a recovery file: an UNTICKED Start on the detected rig runs
+`GmslFreeRunGuard` (through the controller's same `gmsl_sync` slot, before
+any thread) - any node not at the driver's `default=` is reset and
+read back, and the TSC is always stopped; failure blocks Start, since a
+"free-running" baseline that is secretly still synced is worse than no
+run. A TICKED Start that finds a node already in the sync value restores
+it to the driver default at the end rather than "as found" (which would
+keep it stuck at 2 forever).
+
 `tools/tsc_trigger/ext_sync_gen.py` is the user's script vendored
 unchanged; `engine/gmsl_sync.KernelTscIO` imports its ioctl helpers
 lazily (it imports `fcntl`, Linux-only). Manual recovery if the app dies

@@ -32,6 +32,7 @@ V4L2_CTL = "v4l2-ctl"
 # ('2: External Sync') are never read as controls.
 _CONTROL_LINE_RE = re.compile(r"^\s*([a-zA-Z0-9_]+)\s+0x[0-9a-fA-F]+")
 _RANGE_RE = re.compile(r"\bmin=(-?\d+)\s+max=(-?\d+)")
+_DEFAULT_RE = re.compile(r"\bdefault=(-?\d+)")
 # librealsense udev creates a -md- METADATA node next to every stream node;
 # it matches the same glob but exposes no controls.
 _METADATA_MARKER = "-md-"
@@ -75,6 +76,14 @@ def control_range(text, name):
         return None
     match = _RANGE_RE.search(line)
     return (int(match.group(1)), int(match.group(2))) if match else None
+
+
+def control_default(text, name):
+    line = _control_line(text, name)
+    if line is None:
+        return None
+    match = _DEFAULT_RE.search(line)
+    return int(match.group(1)) if match else None
 
 
 def _trailing_index(path):
@@ -146,7 +155,10 @@ def apply_sync_mode(nodes, control, value, run_v4l2=run_v4l2):
     driver's own min/max BEFORE writing anything, then writes and reads
     back each node. Any write failure or readback mismatch restores every
     node already written and raises RuntimeError. Returns
-    {node: as_found_value_or_None}."""
+    {node: value_to_restore_or_None} - normally the as-found value, but the
+    driver's own default (0 if unknown) when a node was ALREADY in `value`:
+    that is almost always a killed earlier run's leftover, and restoring it
+    as-found would leave the camera stuck in external sync forever."""
     as_found = {}
     for node in nodes:
         code, listing, err = run_v4l2(node, "-L")
@@ -154,7 +166,11 @@ def apply_sync_mode(nodes, control, value, run_v4l2=run_v4l2):
         if limits is not None and not limits[0] <= value <= limits[1]:
             raise RuntimeError("{} on {} accepts {}..{}, so {} cannot be written".format(
                 control, node, limits[0], limits[1], value))
-        as_found[node] = _read_value(node, control, run_v4l2)
+        found = _read_value(node, control, run_v4l2)
+        if found == value:
+            default = control_default(listing, control) if code == 0 else None
+            found = default if default is not None else 0
+        as_found[node] = found
 
     written = {}
     for node in nodes:
@@ -289,6 +305,57 @@ class GmslTscSync:
         if self._as_found is not None:
             as_found, self._as_found = self._as_found, None
             restore_sync_mode(as_found, self._control, run_v4l2=self._run_v4l2)
+
+
+def reset_leftover_sync(control, run_v4l2=run_v4l2, tsc_io=None, glob_fn=glob.glob):
+    """Makes the rig genuinely free-running before an UNTICKED run: any
+    node not at the driver's default is written back to it (read-back
+    confirmed), and the TSC is always stopped - it has no GET ioctl, so a
+    trigger still pulsing from a killed ticked run cannot be detected, only
+    stopped. Raises RuntimeError if either step fails: a baseline that is
+    secretly still synced is worse than no run. Returns the nodes reset."""
+    nodes = resolve_sync_nodes(control, run_v4l2=run_v4l2, glob_fn=glob_fn)
+    reset_nodes = []
+    for node in nodes:
+        code, listing, err = run_v4l2(node, "-L")
+        default = control_default(listing, control) if code == 0 else None
+        default = 0 if default is None else default
+        if _read_value(node, control, run_v4l2) == default:
+            continue
+        code, out, err = run_v4l2(node, "-c", "{}={}".format(control, default))
+        if code != 0 or _read_value(node, control, run_v4l2) != default:
+            raise RuntimeError(
+                "{} on {} is left over from a previous run and could not be reset to {} ({}) - "
+                "a free-running run would still be externally synced".format(
+                    control, node, default, err or out or "readback mismatch"))
+        reset_nodes.append(node)
+    try:
+        (tsc_io or KernelTscIO()).stop()
+    except Exception as exc:
+        raise RuntimeError("Could not stop the TSC trigger before a free-running run: {}".format(exc))
+    return reset_nodes
+
+
+class GmslFreeRunGuard:
+    """Controller-compatible (engage/disengage) wrapper around
+    reset_leftover_sync for an unticked run on the detected GMSL rig - rides
+    MultiCameraSessionController's existing gmsl_sync slot, so it runs
+    before any camera thread, all-or-nothing. disengage() is a no-op:
+    nothing was applied that needs undoing."""
+
+    def __init__(self, control, run_v4l2=run_v4l2, tsc_io=None, glob_fn=glob.glob):
+        self._control = control
+        self._run_v4l2 = run_v4l2
+        self._tsc_io = tsc_io
+        self._glob_fn = glob_fn
+        self.reset_nodes = []
+
+    def engage(self):
+        self.reset_nodes = reset_leftover_sync(self._control, run_v4l2=self._run_v4l2,
+                                               tsc_io=self._tsc_io, glob_fn=self._glob_fn)
+
+    def disengage(self):
+        pass
 
 
 def disengage_all_engaged():

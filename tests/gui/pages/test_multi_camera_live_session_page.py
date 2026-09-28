@@ -1273,3 +1273,25 @@ def test_start_all_sessions_shows_gmsl_status_before_blocking_engage(qapp, tmp_p
     page.start_all_sessions()
 
     assert seen and "GMSL" in seen[0]
+
+
+def test_start_all_sessions_runs_free_run_guard_and_reports_reset(qapp, tmp_path):
+    page, _, _ = _page_with_fake_gmsl()
+    guards = []
+
+    def guard_factory(**kwargs):
+        guard = MagicMock()
+        guard.kwargs = kwargs
+        guard.reset_nodes = ["/dev/video2"]
+        guards.append(guard)
+        return guard
+
+    page._gmsl_free_run_guard_factory = guard_factory
+    page.set_cameras(object(), _two_cameras(tmp_path), gmsl_free_run_cleanup={"control": "camera_sync_mode"})
+
+    page.start_all_sessions()
+
+    assert guards[0].kwargs == {"control": "camera_sync_mode"}
+    assert page._controller._gmsl_sync is guards[0]
+    guards[0].engage.assert_called_once()
+    assert "left over" in page.status_label.text()
