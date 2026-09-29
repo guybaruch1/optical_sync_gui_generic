@@ -107,14 +107,16 @@ def _nodes_with_control(candidates, control, run_v4l2, errors):
     return found
 
 
-def resolve_sync_nodes(control, run_v4l2=run_v4l2, glob_fn=glob.glob, expected=2):
+def resolve_sync_nodes(control, run_v4l2=run_v4l2, glob_fn=glob.glob, expected=2, allow_none=False):
     """The /dev nodes carrying `control`: librealsense udev symlinks first
     (metadata nodes excluded), then every /dev/videoN. With expected=2 (a
     synced run) exactly 2 or RuntimeError - assigned in /dev order, which
     node is which camera does not matter since both cameras get the SAME
     value on D500. With expected=None (the free-run cleanup) every node
     that carries it, at least 1 - a leftover mode must be cleared on EVERY
-    GMSL camera, however many are attached."""
+    GMSL camera, however many are attached. allow_none (with
+    expected=None) returns [] instead of raising when no node carries it -
+    the app-launch cleanup on an Orin with no GMSL camera attached."""
     def enough(found):
         return len(found) == expected if expected is not None else len(found) >= 1
 
@@ -125,6 +127,8 @@ def resolve_sync_nodes(control, run_v4l2=run_v4l2, glob_fn=glob.glob, expected=2
     if not enough(found):
         scanned = sorted(glob_fn("/dev/video[0-9]*"), key=_trailing_index)
         found = _nodes_with_control(scanned, control, run_v4l2, errors)
+    if not found and expected is None and allow_none:
+        return []
     if not enough(found):
         raise RuntimeError(
             "Cannot place V4L2 control {!r}: {} node(s) expose it ({}), expected {}.{}".format(
@@ -359,7 +363,7 @@ class GmslTscSync:
         return problems
 
 
-def reset_leftover_sync(control, run_v4l2=run_v4l2, tsc_io=None, glob_fn=glob.glob):
+def reset_leftover_sync(control, run_v4l2=run_v4l2, tsc_io=None, glob_fn=glob.glob, allow_no_nodes=False):
     """Makes the rig genuinely free-running before an UNTICKED run: any
     node not at the driver's default is written back to it (read-back
     confirmed), and the TSC is always stopped - it has no GET ioctl, so a
@@ -367,8 +371,11 @@ def reset_leftover_sync(control, run_v4l2=run_v4l2, tsc_io=None, glob_fn=glob.gl
     stopped. Raises RuntimeError if either step fails: a baseline that is
     secretly still synced is worse than no run. Covers EVERY node carrying
     the control (not just two), so it also works for a single-camera run or
-    a rig with a third GMSL camera attached. Returns the nodes reset."""
-    nodes = resolve_sync_nodes(control, run_v4l2=run_v4l2, glob_fn=glob_fn, expected=None)
+    a rig with a third GMSL camera attached. Returns the nodes reset.
+    allow_no_nodes: no node carrying the control is not an error (the TSC
+    is still stopped) - for the app-launch cleanup."""
+    nodes = resolve_sync_nodes(control, run_v4l2=run_v4l2, glob_fn=glob_fn, expected=None,
+                               allow_none=allow_no_nodes)
     reset_nodes = []
     for node in nodes:
         code, listing, err = run_v4l2(node, "-L")
@@ -388,6 +395,25 @@ def reset_leftover_sync(control, run_v4l2=run_v4l2, tsc_io=None, glob_fn=glob.gl
     except Exception as exc:
         raise RuntimeError("Could not stop the TSC trigger before a free-running run: {}".format(exc))
     return reset_nodes
+
+
+def clear_leftover_sync_at_startup(panel_connection, control, run_v4l2=run_v4l2, tsc_io=None,
+                                   glob_fn=glob.glob, path_exists=os.path.exists):
+    """App launch on the Orin (remote panel mode, /dev/cdi_tsc present):
+    clears what a killed earlier GMSL-synced run left behind - cameras still
+    in external-sync mode and a trigger possibly still pulsing - BEFORE
+    Stream Config's preview, ROI Select, Calibration or Threshold Tuning
+    open any stream. None of those free-running pages checks the sync mode,
+    and a camera left in external sync with no trigger delivers no frames
+    there. Same reset as the unticked-run guard (reset_leftover_sync), so it
+    also stops a trigger started by hand with ext_sync_gen.py: on this rig
+    the app owns the TSC. No GMSL camera attached is not an error. Returns
+    the nodes reset ([] when there was nothing to do, or off the Orin);
+    raises RuntimeError when the cleanup itself fails."""
+    if (panel_connection or {}).get("mode") != "remote" or not path_exists(CDI_TSC_DEV):
+        return []
+    return reset_leftover_sync(control, run_v4l2=run_v4l2, tsc_io=tsc_io, glob_fn=glob_fn,
+                               allow_no_nodes=True)
 
 
 class GmslFreeRunGuard:

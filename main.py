@@ -6,14 +6,35 @@ import sys
 
 import pyqtgraph as pg
 import pyrealsense2 as rs
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from gui.main_window import MainWindow
 from state.gui_state import load_gui_state
 from settings import load_settings
 from engine.led_panel import configure_panel_connection
 from engine import panel_rpc_client
-from engine.gmsl_sync import disengage_all_engaged
+from engine.gmsl_sync import DEFAULT_GMSL_TSC_SYNC, clear_leftover_sync_at_startup, disengage_all_engaged
+
+
+def _clear_leftover_gmsl_sync(settings):
+    """On the Orin: undo what a killed earlier GMSL-synced run left behind
+    before any page opens a stream (see clear_leftover_sync_at_startup). A
+    failure warns but never blocks the app - a free-running page with no
+    frames is then the visible symptom, and the pop-up says why."""
+    gmsl_settings = {**DEFAULT_GMSL_TSC_SYNC,
+                     **((settings.get("camera_sync") or {}).get("gmsl_tsc_sync") or {})}
+    try:
+        reset_nodes = clear_leftover_sync_at_startup(settings.get("panel_connection"), gmsl_settings["control"])
+    except Exception as exc:
+        QMessageBox.warning(
+            None, "Could not clear leftover GMSL sync",
+            "{}\n\nCameras may still be in external-sync mode from a previous run and deliver no "
+            "frames. Recover on the Orin with 'python3 tools/tsc_trigger/ext_sync_gen.py --disable' "
+            "and 'v4l2-ctl -d <node> -c camera_sync_mode=0'.".format(exc))
+        return
+    if reset_nodes:
+        print("Reset camera sync mode left over from a previous run on {} and stopped the TSC "
+              "trigger.".format(", ".join(reset_nodes)), file=sys.stderr)
 
 
 def main():
@@ -36,6 +57,8 @@ def main():
             settings["panel_connection"]["remote_repo_path"],
             settings["panel_connection"].get("remote_python", "python"),
         )
+
+    _clear_leftover_gmsl_sync(settings)
 
     window = MainWindow(ctx, gui_state, settings)
     # Maximized (not a fixed resize()) so the window - and everything in

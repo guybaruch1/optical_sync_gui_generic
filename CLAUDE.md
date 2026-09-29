@@ -624,6 +624,13 @@ free-run cleanup covers EVERY node carrying the control, not just two
 SINGLE-camera run of a GMSL D585 (`detect_gmsl_camera` +
 `MainWindow._reset_leftover_gmsl_sync_for_solo_camera`) - the SDK
 `inter_cam_sync_mode` reset on that path never touches the kernel mode.
+The same reset also runs once at app launch on the Orin (`main.py`'s
+`_clear_leftover_gmsl_sync` -> `clear_leftover_sync_at_startup`: remote
+mode and `/dev/cdi_tsc` present; no GMSL camera attached is fine), since
+Stream Config's preview, ROI Select, Calibration and Threshold Tuning are
+free-running and never check the mode - a camera left in mode 2 would give
+them no frames. It also stops a trigger started by hand: on this rig the
+app owns the TSC. A failure is a warning pop-up, never a blocked launch.
 `restore_sync_mode`/`disengage()` still never raise, but now read back and
 return what could not be undone; the controller reports it via
 `camera_error("GMSL sync", ...)`. `MainWindow.closeEvent` waits for every

@@ -613,3 +613,76 @@ def test_verify_reports_unreadable_node_and_never_engaged():
     sync.engage()
     kernel.unreadable = {"/dev/video2"}
     assert sync.verify() == ["camera_sync_mode on /dev/video2 reads nothing after the streams opened, expected 2"]
+
+
+# --- App-launch cleanup on the Orin: before any free-running wizard page
+# opens a stream. ---
+
+def _startup(kernel, panel=REMOTE, tsc_exists=True, glob_map=None, tsc=None):
+    tsc = tsc or MagicMock()
+    reset = gmsl_sync.clear_leftover_sync_at_startup(
+        panel, "camera_sync_mode", run_v4l2=kernel, tsc_io=tsc,
+        glob_fn=_fake_glob({"/dev/video-rs-*": NODES} if glob_map is None else glob_map),
+        path_exists=lambda path: tsc_exists)
+    return reset, tsc
+
+
+def test_startup_cleanup_resets_leftover_mode_and_stops_trigger():
+    kernel = _FakeKernel({"/dev/video2": 2, "/dev/video10": 2})
+
+    reset, tsc = _startup(kernel)
+
+    assert reset == NODES
+    assert kernel.values == {"/dev/video2": 0, "/dev/video10": 0}
+    tsc.stop.assert_called_once()
+
+
+def test_startup_cleanup_on_clean_rig_writes_nothing():
+    kernel = _FakeKernel({"/dev/video2": 0, "/dev/video10": 0})
+
+    reset, tsc = _startup(kernel)
+
+    assert reset == [] and kernel.writes == []
+    tsc.stop.assert_called_once()
+
+
+def test_startup_cleanup_with_no_gmsl_camera_attached_is_not_an_error():
+    run = MagicMock(side_effect=AssertionError("no node to probe"))
+
+    reset, tsc = _startup(run, glob_map={})
+
+    assert reset == []
+    tsc.stop.assert_called_once()  # a trigger may still be pulsing
+
+
+@pytest.mark.parametrize("kwargs", [{"panel": {"mode": "local"}}, {"panel": None}, {"tsc_exists": False}])
+def test_startup_cleanup_does_nothing_off_the_orin(kwargs):
+    run = MagicMock()
+
+    reset, tsc = _startup(run, **kwargs)
+
+    assert reset == []
+    run.assert_not_called()
+    tsc.stop.assert_not_called()
+
+
+def test_startup_cleanup_raises_when_reset_does_not_stick():
+    kernel = _FakeKernel({"/dev/video2": 2, "/dev/video10": 0}, ignore_write_on={"/dev/video2"})
+
+    with pytest.raises(RuntimeError, match="/dev/video2"):
+        _startup(kernel)
+
+
+def test_startup_cleanup_raises_when_v4l2_ctl_is_missing():
+    run = MagicMock(return_value=(127, "", "v4l2-ctl not found on PATH. Install it with 'sudo apt install v4l-utils'."))
+
+    with pytest.raises(RuntimeError, match="v4l-utils"):
+        _startup(run)
+
+
+def test_unticked_guard_still_requires_at_least_one_node():
+    # allow_none is only for the launch cleanup - an unticked Start on the
+    # detected rig with no node found is still an error.
+    with pytest.raises(RuntimeError, match="at least 1"):
+        gmsl_sync.reset_leftover_sync("camera_sync_mode", run_v4l2=_fake_v4l2({}), tsc_io=MagicMock(),
+                                      glob_fn=_fake_glob({}))
