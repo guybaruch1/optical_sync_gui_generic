@@ -329,6 +329,24 @@ def draw_bundle_overlay(image, bundle_index, stream_a_frame_number, stream_b_fra
     return debug_img
 
 
+def draw_single_stream_overlay(image, bundle_index, frame_number, ts_us):
+    """Single-stream counterpart of draw_bundle_overlay for the Stream
+    Config preview of a single-stream test (pick_b is None) - there is no
+    second stream and so no A/B delta to show, only this stream's own
+    frame number and HW timestamp."""
+    debug_img = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR) if len(image.shape) == 2 else image.copy()
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    lines = [
+        ("Bundle: {}".format(bundle_index), (0, 255, 0)),
+        ("Frame: {}  |  Timestamp: {:.0f}".format(frame_number, ts_us), (0, 255, 255)),
+    ]
+    y = 25
+    for text, color in lines:
+        cv2.putText(debug_img, text, (10, y), font, 0.6, color, 2)
+        y += 25
+    return debug_img
+
+
 def draw_cross_camera_debug_overlay(image, cross_pair_index, master_pair_index, slave_pair_index,
                                      master_ts_us, slave_ts_us, master_global_ts_us, slave_global_ts_us,
                                      pairing_gap_us, global_ts_gap_us, position_gap_ms):

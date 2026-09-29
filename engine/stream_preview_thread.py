@@ -1,12 +1,13 @@
 """QThread wrapper for Stream Select's live pairing-quality preview:
 streams the two picked streams continuously via ContinuousCapture, burns
-a bundle/frame-number/timestamp/delta overlay onto Stream A's frame, and
+a bundle/frame-number/timestamp/delta overlay onto Stream A's frame (or, for
+a single-stream test, just Stream A's own frame number/timestamp), and
 prints the same info to the console."""
 
 from PySide6.QtCore import QThread, Signal
 
 from engine.streams import ContinuousCapture
-from domain.realsense_utils import draw_bundle_overlay
+from domain.realsense_utils import draw_bundle_overlay, draw_single_stream_overlay
 
 
 class StreamPreviewThread(QThread):
@@ -46,14 +47,19 @@ class StreamPreviewThread(QThread):
                     break
 
                 if bundle_index % self.display_stride == 0:
-                    delta_us = ts_a - ts_b
-                    print(
-                        "Bundle {:>6} | Stream A Frame {:>6} | Stream B Frame {:>6} | "
-                        "Stream A Timestamp {:>14.0f} | Stream B Timestamp {:>14.0f} | Delta {:>7.1f} us".format(
-                            bundle_index, num_a, num_b, ts_a, ts_b, delta_us,
+                    if self.pick_b is None:
+                        # Single-stream test - no second stream, no delta.
+                        print("Bundle {:>6} | Frame {:>6} | Timestamp {:>14.0f}".format(bundle_index, num_a, ts_a))
+                        overlay_image = draw_single_stream_overlay(image_a, bundle_index, num_a, ts_a)
+                    else:
+                        delta_us = ts_a - ts_b
+                        print(
+                            "Bundle {:>6} | Stream A Frame {:>6} | Stream B Frame {:>6} | "
+                            "Stream A Timestamp {:>14.0f} | Stream B Timestamp {:>14.0f} | Delta {:>7.1f} us".format(
+                                bundle_index, num_a, num_b, ts_a, ts_b, delta_us,
+                            )
                         )
-                    )
-                    overlay_image = draw_bundle_overlay(image_a, bundle_index, num_a, num_b, ts_a, ts_b, delta_us)
+                        overlay_image = draw_bundle_overlay(image_a, bundle_index, num_a, num_b, ts_a, ts_b, delta_us)
                     self.frame_ready.emit(overlay_image)
 
                 bundle_index += 1

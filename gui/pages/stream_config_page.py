@@ -30,7 +30,10 @@ sensor group actually contains that stream. A group containing BOTH
 streams (the Dual-RGB shape, one shared physical sensor) can only ever
 have one real exposure value in hardware regardless of what the UI offers
 per stream - Stream A's value wins in that case (see exposure_for_group's
-own docstring)."""
+own docstring).
+
+A single-stream test (no stream_b_identity) emits pick_b=None, hides
+Exposure B and disables the dual-panel checkbox."""
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
@@ -77,6 +80,9 @@ def _sensor_option_label(option):
     in full (e.g. for a device where the two streams' max resolutions
     genuinely differ) if resolution/fps themselves differ between sides."""
     pick_a, pick_b = option["pick_a"], option["pick_b"]
+    if pick_b is None:
+        # Single-stream test - just the one stream's own geometry/format.
+        return "{}x{} @ {}fps ({})".format(pick_a["width"], pick_a["height"], pick_a["fps"], pick_a["format"].name)
     same_res_fps = (
         (pick_a["width"], pick_a["height"], pick_a["fps"]) == (pick_b["width"], pick_b["height"], pick_b["fps"])
     )
@@ -207,6 +213,14 @@ class StreamConfigPage(QWidget):
         return option["pick_b"] if option is not None else None
 
     @property
+    def is_single_stream(self):
+        """True when the selected sensor option has no Stream B (a
+        single-stream settings.yaml test) - pick_b alone can't tell that
+        apart from "nothing selected yet", which is also None."""
+        option = self.combo_sensor_options.currentData()
+        return option is not None and option["pick_b"] is None
+
+    @property
     def current_test_name(self):
         """The currently-selected test's name (or None before a selection
         exists) - read by gui/main_window.py to persist as GuiState's
@@ -300,6 +314,25 @@ class StreamConfigPage(QWidget):
         self.combo_sensor_options.blockSignals(False)
         self._preselect_sensor_options()
         self._update_exposure_labels()
+        self._update_single_stream_controls()
+
+    def _update_single_stream_controls(self):
+        """Single-stream tests (no Stream B) hide Exposure B and never use
+        dual-panel mode (one stream only ever looks at one panel - the
+        single-panel hub target in main_window picks which). Re-run on
+        every test change, so switching back to a two-stream test restores
+        both."""
+        single_stream = self.is_single_stream
+        w = self._camera_controls
+        w["exposure_b_label"].setHidden(single_stream)
+        w["exposure_b_spin"].setHidden(single_stream)
+        if single_stream:
+            self.dual_panel_checkbox.setChecked(False)
+        self.dual_panel_checkbox.setEnabled(not single_stream)
+        self.dual_panel_checkbox.setToolTip(
+            "Dual LED panel mode needs two streams - not available for a single-stream test."
+            if single_stream else ""
+        )
 
     def _preselect_sensor_options(self):
         if not self._preferred_a:
@@ -425,7 +458,7 @@ class StreamConfigPage(QWidget):
             "emitter_enabled": not w["emitter_checkbox"].isChecked(),
             "auto_exposure": auto_exposure,
             "exposure_a": None if auto_exposure else w["exposure_a_spin"].value(),
-            "exposure_b": None if auto_exposure else w["exposure_b_spin"].value(),
+            "exposure_b": None if (auto_exposure or self.is_single_stream) else w["exposure_b_spin"].value(),
         }
 
     def _apply_camera_controls_to_widgets(self, camera_controls):
@@ -451,9 +484,9 @@ class StreamConfigPage(QWidget):
     def _on_start_preview_clicked(self):
         pick_a = self.pick_a
         pick_b = self.pick_b
-        if pick_a is None or pick_b is None:
+        if self.combo_sensor_options.currentData() is None:
             return
-        if self._streams_are_identical(pick_a, pick_b):
+        if pick_b is not None and self._streams_are_identical(pick_a, pick_b):
             # Defense-in-depth only: a well-formed settings.yaml test always
             # has distinct stream_a_identity/stream_b_identity, but a
             # misconfigured one could accidentally define the same stream
@@ -522,9 +555,9 @@ class StreamConfigPage(QWidget):
     def _on_next_clicked(self):
         pick_a = self.pick_a
         pick_b = self.pick_b
-        if pick_a is None or pick_b is None:
+        if self.combo_sensor_options.currentData() is None:
             return
-        if self._streams_are_identical(pick_a, pick_b):
+        if pick_b is not None and self._streams_are_identical(pick_a, pick_b):
             self.status_label.setText(
                 "This test's Stream A and Stream B are the same physical stream - fix its "
                 "settings.yaml entry."

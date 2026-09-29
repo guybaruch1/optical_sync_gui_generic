@@ -519,3 +519,11 @@ def test_draw_bundle_overlay_uses_stream_a_stream_b_naming():
         stream_a_ts_us=1000.0, stream_b_ts_us=1005.0, delta_us=-5.0,
     )
     assert result.shape == (100, 300, 3)
+
+
+def test_draw_single_stream_overlay_returns_bgr_copy():
+    from domain.realsense_utils import draw_single_stream_overlay
+    image = np.zeros((40, 200), dtype=np.uint8)
+    out = draw_single_stream_overlay(image, bundle_index=3, frame_number=10, ts_us=1234.0)
+    assert out.shape == (40, 200, 3)
+    assert image.max() == 0  # input untouched
