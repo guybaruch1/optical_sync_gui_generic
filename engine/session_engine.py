@@ -89,7 +89,7 @@ class SessionEngineThread(QThread):
                  hardware_reset_before_start=False,
                  hardware_reset_settle_s=8.0, output_dir=None,
                  position_gap_outlier_threshold_ms=None, position_gap_outlier_max_snapshots=200,
-                 parent=None):
+                 drive_panel=True, parent=None):
         super().__init__(parent)
         self.ctx = ctx
         self.device_serial = device_serial
@@ -98,6 +98,10 @@ class SessionEngineThread(QThread):
         self.camera_controls = camera_controls
         self.test_session = test_session
         self.dual_panel_config = dual_panel_config
+        # False when MultiCameraSessionController drives shared dual LED
+        # panels itself for the whole run (2+ cameras looking at the same
+        # two panels) - this thread must then never arm or stop them.
+        self.drive_panel = drive_panel
         # Two independent inter-sensor-sync knobs, both settings.yaml-driven
         # (camera_sync:) - see ContinuousCapture._depth_sync_stream and
         # run()'s reset block below for what each actually does and why.
@@ -304,7 +308,7 @@ class SessionEngineThread(QThread):
             # all during a live session (it's left in whatever mode
             # calibration/ROI selection last put it in, typically off), so
             # PositionGapMetric would only ever see misses.
-            if self.switch_time_ms is not None:
+            if self.drive_panel and self.switch_time_ms is not None:
                 start_scanning(self.switch_time_ms, self.scan_direction, self.dual_panel_config)
 
             self._capture = ContinuousCapture(
@@ -374,7 +378,8 @@ class SessionEngineThread(QThread):
             # surrounding try/except in QThread.run(), so let a cleanup failure
             # reach the UI via the error signal instead of crashing the thread
             # unhandled or masking whatever exception the try block above raised.
-            try:
-                stop_scanning(self.dual_panel_config)
-            except Exception as exc:
-                self.error.emit("Failed to stop LED panel during cleanup: {}".format(exc))
+            if self.drive_panel:
+                try:
+                    stop_scanning(self.dual_panel_config)
+                except Exception as exc:
+                    self.error.emit("Failed to stop LED panel during cleanup: {}".format(exc))

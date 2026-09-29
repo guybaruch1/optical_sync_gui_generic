@@ -18,7 +18,7 @@ design doc's "Design detail" section 4."""
 from dataclasses import dataclass
 
 from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QGroupBox
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QGroupBox, QCheckBox
 
 
 @dataclass
@@ -85,6 +85,21 @@ class CameraHubPage(QWidget):
         self.status_label = QLabel("")
         layout.addWidget(self.status_label)
 
+        # Only shown on the Orin with 2x D585 over GMSL (MainWindow runs
+        # engine.gmsl_sync.detect_gmsl_tsc_rig and calls
+        # set_gmsl_tsc_available). Pre-ticked on becoming available; the
+        # operator can untick it for a free-running baseline run.
+        self.gmsl_tsc_checkbox = QCheckBox("GMSL TSC sync (external trigger)")
+        self.gmsl_tsc_checkbox.setHidden(True)
+        self._gmsl_tsc_available = False
+        # The operator's own last click (None until they touch it). A
+        # programmatic setChecked never fires `clicked`, so this only ever
+        # records a real choice - and it wins over the pre-tick when the rig
+        # becomes available again after a transient lookup failure.
+        self._gmsl_tsc_operator_choice = None
+        self.gmsl_tsc_checkbox.clicked.connect(self._on_gmsl_tsc_clicked)
+        layout.addWidget(self.gmsl_tsc_checkbox)
+
         self.start_button = QPushButton("Start Multi-Camera Live Session")
         self.start_button.clicked.connect(self._on_start_clicked)
         layout.addWidget(self.start_button)
@@ -121,6 +136,28 @@ class CameraHubPage(QWidget):
 
         self.add_camera_button.setEnabled(len(self._summaries) < self.MAX_CAMERAS)
         self.start_button.setEnabled(self._can_start())
+
+    def set_gmsl_tsc_available(self, available):
+        """Pre-ticks only on the unavailable->available transition, so an
+        operator's untick survives a later hub refresh (e.g. after Edit)."""
+        if available and not self._gmsl_tsc_available:
+            self.gmsl_tsc_checkbox.setChecked(
+                True if self._gmsl_tsc_operator_choice is None else self._gmsl_tsc_operator_choice)
+        if not available:
+            self.gmsl_tsc_checkbox.setChecked(False)
+        self._gmsl_tsc_available = available
+        self.gmsl_tsc_checkbox.setHidden(not available)
+
+    def _on_gmsl_tsc_clicked(self, checked):
+        self._gmsl_tsc_operator_choice = checked
+
+    @property
+    def gmsl_tsc_available(self):
+        return self._gmsl_tsc_available
+
+    @property
+    def gmsl_tsc_checked(self):
+        return self._gmsl_tsc_available and self.gmsl_tsc_checkbox.isChecked()
 
     def _can_start(self):
         if not self._summaries:

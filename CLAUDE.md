@@ -579,6 +579,53 @@ therefore gained two new, always-empty columns after `stream_b_ts_us`.
 Name-keyed CSV consumers are unaffected; anything reading these CSVs by
 column INDEX would break.
 
+### GMSL TSC sync (2x D585 on the Orin)
+
+On the Orin (`panel_connection.mode: remote`) with two D585s on the GMSL
+deserializer, `engine/gmsl_sync.py` hardware-syncs both cameras instead of
+SDK genlock: kernel `camera_sync_mode=2` ("External Sync") written via
+`v4l2-ctl` with a read-back check, then the Orin's TSC signal generator
+(`/dev/cdi_tsc`) started at the streams' shared fps, then `settle_s` of
+wait before any stream opens. Why V4L2, not the SDK's
+`inter_cam_sync_mode`: on this D585 prototype firmware the SDK write
+succeeds silently and its readback throws, so the mode can never be
+confirmed. The kernel enum is NOT the SDK enum (kernel 2 = SDK 3).
+
+Gating is auto-detect + operator checkbox: `detect_gmsl_tsc_rig` (remote
+mode, exactly 2 cameras, both D585, neither reports
+`usb_type_descriptor`, `/dev/cdi_tsc` exists) decides whether Camera Hub
+shows its "GMSL TSC sync" checkbox, pre-ticked on becoming available.
+When ticked, every camera's `inter_cam_sync_value` is forced to `None` and
+the slave-color-resolution check is skipped - SDK genlock and GMSL sync
+are never applied together. `MultiCameraSessionController` engages
+`GmslTscSync` after the genlock step and before any thread
+(all-or-nothing), and disengages (TSC off, as-found mode restored) only
+once every thread's own `finished` has fired. On exit in remote mode,
+`main.py` calls `disengage_all_engaged()`, which undoes only what this
+process engaged (TSC off AND mode restored - a camera left in external
+sync with no trigger gives no frames on the next free-running run).
+
+**Self-heal after a killed run.** A killed/crashed process never reaches
+that exit path, leaving both cameras in `camera_sync_mode=2` and the
+trigger possibly still pulsing (the TSC has no GET ioctl, so it can't be
+detected, only stopped). The next Start cleans it up instead of relying on
+a recovery file: an UNTICKED Start on the detected rig runs
+`GmslFreeRunGuard` (through the controller's same `gmsl_sync` slot, before
+any thread) - any node not at the driver's `default=` is reset and
+read back, and the TSC is always stopped; failure blocks Start, since a
+"free-running" baseline that is secretly still synced is worse than no
+run. A TICKED Start that finds a node already in the sync value restores
+it to the driver default at the end rather than "as found" (which would
+keep it stuck at 2 forever).
+
+`tools/tsc_trigger/ext_sync_gen.py` is the user's script vendored
+unchanged; `engine/gmsl_sync.KernelTscIO` imports its ioctl helpers
+lazily (it imports `fcntl`, Linux-only). Manual recovery if the app dies
+mid-run: `python3 tools/tsc_trigger/ext_sync_gen.py --disable` on the
+Orin. Confirmed on the Orin rig (2026-09-28): both GMSL cameras report
+name `RealSense D585 Prototype` and `supports(usb_type_descriptor) == False`,
+so detection rules 3 and 4 hold there.
+
 ### Camera management: distinguishing cameras, hiding duplicates, and Edit's direct routing
 
 Three related fixes to the multi-camera Hub/Add/Edit flow, all driven by the same real-rig scenario: an operator running two same-model cameras (e.g. two D585s), or one camera used for more than one test shape.
@@ -592,6 +639,49 @@ Three related fixes to the multi-camera Hub/Add/Edit flow, all driven by the sam
 **The mode-switch refresh must survive its own failure, and must not silently discard camera controls.** `read_camera_controls()` (renamed from the private `_read_camera_controls` specifically for this) is threaded through the mode-switch repopulate call as `preferred_camera_controls`, alongside the other `preferred_*` values - an earlier version omitted it, which meant a mode switch silently reset the operator's already-dialed-in exposure/emitter choice to `DEFAULT_CAMERA_CONTROLS` with no indication anything had changed. Separately: if `_populate_stream_config_page()` returns `False` after `ensure_mode()` has already succeeded (e.g. no configured test matches the camera's new mode), `populate()` itself never runs, so `_current_rgb_mode` - normally refreshed by `populate()`'s own fresh `get_mode()` lookup - stays stale at the PRE-switch value. Left unhandled, the next Next click would see the radio still disagreeing with this stale value and fire `mode_switch_requested` again, re-running `ensure_mode()` for a switch that already succeeded - an unrecoverable retry loop with no way to notice the device already changed. `StreamConfigPage.note_mode_switch_applied(new_mode)` is the fix: called on exactly that failure branch, it updates `_current_rgb_mode` and the radio buttons directly, without going through a full `populate()`.
 
 **Edit jumps straight to Stream Config, skipping Device Select entirely, prefilled with that camera's own previous choices.** The device is already known for an existing camera, so re-picking it would be pointless - and would force Device Select's own `exclude_serials` to special-case not hiding the very camera being edited. `_on_edit_camera_requested` calls `_populate_stream_config_page()` directly with that camera's stored `device_serial`/label, passing `preferred_a`/`preferred_b`/`preferred_test_name`/`preferred_dual_panel`/`preferred_camera_controls` all read from that camera's own committed config - a genuine "continue editing", not "redo from scratch". `test_name` is a NEW field needed only for this prefill, stored as a **sibling** of each committed camera's `"config"` dict in `self._cameras[camera_id]`, not inside it - `"config"` is `**`-splatted directly into `LiveSessionPage.set_context()` (the 1-configured-camera path in `_on_start_multi_camera_session_requested`), which has no `test_name` parameter; read live off `stream_config_page.current_test_name` at `_on_tuning_done` commit time (unchanged since Stream Config ran, earlier in that same sub-flow). `StreamConfigPage.populate()` gained a matching `preferred_camera_controls` param (a new `_apply_camera_controls_to_widgets()`, the inverse of the existing `read_camera_controls()`) and a `DEFAULT_CAMERA_CONTROLS` constant applied explicitly on a fresh Add - same stale-carryover reasoning as `preferred_dual_panel`'s own explicit reset, since this page's one instance is reused across every camera's own sub-flow visit.
+
+### Shared dual LED panels across cameras
+
+Two cameras each doing IR vs RGB look at the SAME two panels (one IR, one
+color) on one Acroname hub and one relay. `engine/dual_panel_control.py`'s
+state (`_dual_panel_primed`, `_relay_connection`, `_dual_panel_lock`) is a
+single app-wide singleton, so two camera threads each calling
+`start_scanning`/`stop_scanning` would corrupt it, and whichever finished
+first would freeze the panels under the other - which is why this used to
+be capped at one dual-panel camera per run. `MultiCameraSessionController`
+now allows 2+ dual-panel cameras when their `dual_panel_config` dicts are
+identical (always true in practice - one `settings.yaml` `dual_panel`
+section), and then owns the panels: `start_all` arms them ONCE (Master's
+`switch_time_ms`/`scan_direction`) after the genlock/GMSL steps and before
+any thread, every thread gets `drive_panel=False`, and
+`_stop_shared_dual_panels` stops them ONCE from `_on_thread_finished` after
+every thread has finished (a stop failure goes to `camera_error` as
+"LED panels", never blocking `all_sessions_finished`). Differing wiring is
+still rejected at Start. Not handled: mixing one dual-panel camera with a
+single-panel camera - both would still drive panels independently.
+
+### Single-panel mode on a two-panel hub rig
+
+`LED-Panel.exe` talks to whichever panel is currently hub-exposed, and
+single-panel mode (`dual_panel_config is None`) historically never touched
+the hub. Every dual-panel sequence ends with stream_b's (color) panel
+exposed - `_run_on_both_panels` switches A then B, Calibration/ROI Select do
+stream_a then stream_b - and the Acroname hub keeps that port state across
+app restarts. Confirmed on the D585 rig: a single-panel IR-vs-IR test then
+drove the COLOR panel, so the IR panel never lit (ROI Select, Calibration)
+or stepped (Threshold Tuning). `engine/dual_panel_control.py` now keeps a
+single-panel target (`set_single_panel_target`, set by
+`MainWindow._apply_single_panel_target` on every Stream Config commit and
+again at Start): both picks infrared -> the IR panel (`stream_a`), both
+color -> the color panel (`stream_b`), anything else, or any dual-panel
+camera in the run, or cameras needing different panels -> no target
+(hub left alone). Every single-panel command path first exposes the target
+through the same `switched_to_stream_panel` enter/exit hub switch (so it
+works over the remote panel server too), skipping repeat switches until any
+dual-panel activity (`_mark_hub_changed`) may have moved the hub. A failed
+switch - e.g. a rig with no Acroname hub, which has only one panel - prints
+one warning to stderr and the commands still go out. `tests/conftest.py`
+resets the target around every test.
 
 ### `gui/widgets/live_plot.py` gotcha
 

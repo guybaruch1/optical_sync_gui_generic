@@ -1365,3 +1365,201 @@ def test_multi_camera_live_session_back_returns_to_camera_hub(qapp):
     window.multi_camera_live_session_page.back_requested.emit()
 
     assert window.stack.currentWidget() is window.camera_hub_page
+
+
+# --- GMSL TSC sync: detection on hub refresh, and the Start branch. ---
+
+def _two_camera_window(qapp, monkeypatch, tmp_path, slave_pick=COLOR0):
+    settings = _full_settings({"Intel RealSense D455": [_ir_vs_rgb_test()]})
+    settings["camera"]["inter_cam_sync"] = {
+        "Intel RealSense D455": {"master": 1, "slave": 2, "max_slave_color_resolution": {"width": 640, "height": 480}},
+    }
+    window = _make_window(qapp, settings)
+    monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [IR1, COLOR0])
+    monkeypatch.setattr(main_window_module, "save_gui_state", lambda state: None)
+    monkeypatch.setattr(window.roi_page, "set_context", lambda *a, **k: None)
+    monkeypatch.setattr(main_window_module, "ensure_output_dir", lambda settings: str(tmp_path))
+    monkeypatch.setattr(
+        main_window_module, "load_led_positions",
+        lambda *a, **k: ({"0": [1.0, 1.0, 300.0, 100.0, 200.0]}, {"0": [2.0, 2.0, 600.0, 200.0, 400.0]}),
+    )
+    master_id = _configure_one_camera(window, "SN123")
+    window._on_add_camera_requested()
+    slave_id = _configure_one_camera(window, "SN456", color_pick=slave_pick)
+    return window, master_id, slave_id
+
+
+def test_refresh_camera_hub_runs_gmsl_detection(qapp, monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(main_window_module, "detect_gmsl_tsc_rig",
+                        lambda panel_connection, serials, lookup: calls.append(sorted(serials)) or True)
+    window, _, _ = _two_camera_window(qapp, monkeypatch, tmp_path)
+
+    assert calls[-1] == ["SN123", "SN456"]
+    assert window.camera_hub_page.gmsl_tsc_checked is True
+
+
+def test_start_with_gmsl_ticked_skips_genlock_and_passes_config(qapp, monkeypatch, tmp_path):
+    monkeypatch.setattr(main_window_module, "detect_gmsl_tsc_rig", lambda *a: True)
+    # COLOR0 (1280x720) on the slave would normally fail the slave-color check.
+    window, master_id, slave_id = _two_camera_window(qapp, monkeypatch, tmp_path, slave_pick=COLOR0)
+    critical = _capture_critical(monkeypatch)
+    captured = {}
+    monkeypatch.setattr(window.multi_camera_live_session_page, "set_cameras",
+                        lambda ctx, cameras, gmsl_tsc_sync=None, gmsl_free_run_cleanup=None: captured.update(
+                            cameras=cameras, gmsl_tsc_sync=gmsl_tsc_sync,
+                            gmsl_free_run_cleanup=gmsl_free_run_cleanup))
+
+    window._on_start_multi_camera_session_requested()
+
+    assert critical == []
+    assert all(c["config"]["inter_cam_sync_value"] is None for c in captured["cameras"])
+    assert captured["gmsl_tsc_sync"] == {"control": "camera_sync_mode", "sync_mode_value": 2,
+                                         "duty_percent": 50, "settle_s": 5.0, "fps": 30}
+
+
+def test_start_with_gmsl_ticked_blocks_on_fps_mismatch(qapp, monkeypatch, tmp_path):
+    monkeypatch.setattr(main_window_module, "detect_gmsl_tsc_rig", lambda *a: True)
+    color_15fps = dict(COLOR0, fps=15)
+    window, _, _ = _two_camera_window(qapp, monkeypatch, tmp_path, slave_pick=color_15fps)
+    critical = _capture_critical(monkeypatch)
+    set_cameras = MagicMock()
+    monkeypatch.setattr(window.multi_camera_live_session_page, "set_cameras", set_cameras)
+
+    window._on_start_multi_camera_session_requested()
+
+    assert len(critical) == 1
+    set_cameras.assert_not_called()
+
+
+def test_start_with_gmsl_unticked_behaves_as_before(qapp, monkeypatch, tmp_path):
+    monkeypatch.setattr(main_window_module, "detect_gmsl_tsc_rig", lambda *a: True)
+    window, master_id, slave_id = _two_camera_window(qapp, monkeypatch, tmp_path, slave_pick=COLOR0_SAFE)
+    window.camera_hub_page.gmsl_tsc_checkbox.setChecked(False)
+    captured = {}
+    monkeypatch.setattr(window.multi_camera_live_session_page, "set_cameras",
+                        lambda ctx, cameras, gmsl_tsc_sync=None, gmsl_free_run_cleanup=None: captured.update(
+                            cameras=cameras, gmsl_tsc_sync=gmsl_tsc_sync,
+                            gmsl_free_run_cleanup=gmsl_free_run_cleanup))
+
+    window._on_start_multi_camera_session_requested()
+
+    configs = {c["camera_id"]: c["config"] for c in captured["cameras"]}
+    assert configs[master_id]["inter_cam_sync_value"] == 1
+    assert configs[slave_id]["inter_cam_sync_value"] == 2
+    assert captured["gmsl_tsc_sync"] is None
+    # Unticked on the detected rig = a free-running run: leftovers from a
+    # killed ticked run must be cleaned first.
+    assert captured["gmsl_free_run_cleanup"] == {"control": "camera_sync_mode"}
+
+
+def test_gmsl_settings_section_overrides_defaults(qapp, monkeypatch, tmp_path):
+    monkeypatch.setattr(main_window_module, "detect_gmsl_tsc_rig", lambda *a: True)
+    window, _, _ = _two_camera_window(qapp, monkeypatch, tmp_path)
+    window.settings["camera_sync"] = {"gmsl_tsc_sync": {"duty_percent": 25, "settle_s": 2.0}}
+    captured = {}
+    monkeypatch.setattr(window.multi_camera_live_session_page, "set_cameras",
+                        lambda ctx, cameras, gmsl_tsc_sync=None, gmsl_free_run_cleanup=None: captured.update(gmsl_tsc_sync=gmsl_tsc_sync))
+
+    window._on_start_multi_camera_session_requested()
+
+    assert captured["gmsl_tsc_sync"]["duty_percent"] == 25
+    assert captured["gmsl_tsc_sync"]["settle_s"] == 2.0
+    assert captured["gmsl_tsc_sync"]["sync_mode_value"] == 2
+
+
+def test_start_with_gmsl_ticked_rejects_unknown_settings_keys(qapp, monkeypatch, tmp_path):
+    # M4: a settings.yaml typo must be a clear message, not a TypeError.
+    monkeypatch.setattr(main_window_module, "detect_gmsl_tsc_rig", lambda *a: True)
+    window, _, _ = _two_camera_window(qapp, monkeypatch, tmp_path)
+    window.settings["camera_sync"] = {"gmsl_tsc_sync": {"duty_pct": 25}}
+    critical = _capture_critical(monkeypatch)
+    set_cameras = MagicMock()
+    monkeypatch.setattr(window.multi_camera_live_session_page, "set_cameras", set_cameras)
+
+    window._on_start_multi_camera_session_requested()
+
+    assert len(critical) == 1
+    assert "duty_pct" in critical[0][0][2]
+    set_cameras.assert_not_called()
+
+
+
+def test_start_on_undetected_rig_passes_no_gmsl_objects(qapp, monkeypatch, tmp_path):
+    monkeypatch.setattr(main_window_module, "detect_gmsl_tsc_rig", lambda *a: False)
+    window, _, _ = _two_camera_window(qapp, monkeypatch, tmp_path, slave_pick=COLOR0_SAFE)
+    captured = {}
+    monkeypatch.setattr(window.multi_camera_live_session_page, "set_cameras",
+                        lambda ctx, cameras, gmsl_tsc_sync=None, gmsl_free_run_cleanup=None: captured.update(
+                            gmsl_tsc_sync=gmsl_tsc_sync, gmsl_free_run_cleanup=gmsl_free_run_cleanup))
+
+    window._on_start_multi_camera_session_requested()
+
+    assert captured == {"gmsl_tsc_sync": None, "gmsl_free_run_cleanup": None}
+
+
+def test_start_with_gmsl_ticked_passes_no_free_run_cleanup(qapp, monkeypatch, tmp_path):
+    monkeypatch.setattr(main_window_module, "detect_gmsl_tsc_rig", lambda *a: True)
+    window, _, _ = _two_camera_window(qapp, monkeypatch, tmp_path)
+    captured = {}
+    monkeypatch.setattr(window.multi_camera_live_session_page, "set_cameras",
+                        lambda ctx, cameras, gmsl_tsc_sync=None, gmsl_free_run_cleanup=None: captured.update(
+                            gmsl_free_run_cleanup=gmsl_free_run_cleanup))
+
+    window._on_start_multi_camera_session_requested()
+
+    assert captured["gmsl_free_run_cleanup"] is None
+
+
+# --- Single-panel target on a two-panel hub rig: an IR-vs-IR test with
+# "Use dual LED panel" unticked must drive the IR panel, not whichever panel
+# the hub last left exposed (the color one, after any dual-panel activity). ---
+
+IR2 = dict(IR1, stream_index=2)
+
+
+def _config_chosen_with(qapp, monkeypatch, tmp_path, pick_a, pick_b, dual_panel=False):
+    targets = []
+    monkeypatch.setattr(main_window_module, "set_single_panel_target",
+                        lambda config, stream: targets.append((config, stream)))
+    settings = _full_settings({"Intel RealSense D455": [_ir_vs_rgb_test()]})
+    window = _make_window(qapp, settings)
+    monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [IR1, COLOR0])
+    monkeypatch.setattr(main_window_module, "save_gui_state", lambda state: None)
+    monkeypatch.setattr(window.roi_page, "set_context", lambda *a, **k: None)
+    window._on_device_chosen("SN123", "Intel RealSense D455")
+    window.stream_config_page.dual_panel_checkbox.setChecked(dual_panel)
+    window._on_config_chosen((pick_a, pick_b, {
+        "emitter_enabled": False, "auto_exposure": True, "exposure_a": None, "exposure_b": None,
+    }))
+    return window, targets
+
+
+def test_ir_vs_ir_single_panel_targets_the_ir_panel(qapp, monkeypatch, tmp_path):
+    window, targets = _config_chosen_with(qapp, monkeypatch, tmp_path, IR1, IR2)
+    assert targets[-1] == (window.settings["dual_panel"], "stream_a")
+
+
+def test_dual_panel_ticked_clears_the_single_panel_target(qapp, monkeypatch, tmp_path):
+    _, targets = _config_chosen_with(qapp, monkeypatch, tmp_path, IR1, IR2, dual_panel=True)
+    assert targets[-1][1] is None
+
+
+def test_ir_vs_rgb_single_panel_leaves_the_hub_alone(qapp, monkeypatch, tmp_path):
+    _, targets = _config_chosen_with(qapp, monkeypatch, tmp_path, IR1, COLOR0)
+    assert targets[-1][1] is None
+
+
+def test_start_with_one_ir_vs_ir_camera_re_applies_the_target(qapp, monkeypatch, tmp_path):
+    targets = []
+    monkeypatch.setattr(main_window_module, "set_single_panel_target",
+                        lambda config, stream: targets.append((config, stream)))
+    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+    _configure_one_camera(window, "SN999", ir_pick=IR1, color_pick=IR2)
+    targets.clear()
+    monkeypatch.setattr(window.live_session_page, "set_context", lambda **kwargs: None)
+    monkeypatch.setattr(main_window_module, "find_device_by_serial", MagicMock())
+
+    window._on_start_multi_camera_session_requested()
+
+    assert targets == [(window.settings["dual_panel"], "stream_a")]

@@ -159,3 +159,51 @@ def test_card_label_reflects_master_and_configured_state(qapp):
     assert "D455 (SN123)" in text
     assert "MASTER" in text
     assert "needs setup" in text.lower()
+
+
+def test_gmsl_checkbox_hidden_and_unchecked_by_default(qapp):
+    page = CameraHubPage()
+    assert page.gmsl_tsc_checkbox.isHidden()
+    assert page.gmsl_tsc_checked is False
+
+
+def test_gmsl_checkbox_pre_ticked_when_it_becomes_available(qapp):
+    page = CameraHubPage()
+    page.set_gmsl_tsc_available(True)
+    assert not page.gmsl_tsc_checkbox.isHidden()
+    assert page.gmsl_tsc_checked is True
+
+
+def test_gmsl_checkbox_untick_survives_refresh(qapp):
+    page = CameraHubPage()
+    page.set_gmsl_tsc_available(True)
+    page.gmsl_tsc_checkbox.setChecked(False)
+
+    page.set_gmsl_tsc_available(True)  # e.g. hub refresh after an Edit
+
+    assert page.gmsl_tsc_checked is False
+
+
+def test_gmsl_checkbox_unavailable_hides_and_reports_false(qapp):
+    page = CameraHubPage()
+    page.set_gmsl_tsc_available(True)
+    page.set_gmsl_tsc_available(False)
+    assert page.gmsl_tsc_checkbox.isHidden()
+    assert page.gmsl_tsc_checked is False
+
+    page.set_gmsl_tsc_available(True)  # becomes available again -> re-ticked
+    assert page.gmsl_tsc_checked is True
+
+
+def test_gmsl_checkbox_operator_untick_survives_a_transient_unavailable_refresh(qapp):
+    # M3: a lookup blip (available -> unavailable -> available) must not
+    # override the operator's own untick.
+    page = CameraHubPage()
+    page.set_gmsl_tsc_available(True)
+    page.gmsl_tsc_checkbox.click()  # operator unticks
+    assert page.gmsl_tsc_checked is False
+
+    page.set_gmsl_tsc_available(False)
+    page.set_gmsl_tsc_available(True)
+
+    assert page.gmsl_tsc_checked is False

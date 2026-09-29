@@ -243,7 +243,7 @@ camera_sync:
   # domain/realsense_utils.py's DECODERS already handles yuyv; costs a
   # per-frame cv2 color conversion instead). No-op for a color+color
   # (Dual RGB) pairing - there's no stereo module in play to sync against.
-  enable_depth_for_ir_sync: true
+  enable_depth_for_ir_sync: false
   # Read+validate each frame's RealSense GLOBAL_TIME-domain timestamp for
   # cross-camera matching (see engine/streams.py's _read_global_ts_us,
   # engine/cross_camera_reconciler.py's module docstring) - multi-camera
@@ -267,6 +267,22 @@ camera_sync:
   # Too short and the device won't have re-enumerated yet and
   # find_device_by_serial will fail.
   hardware_reset_settle_s: 8.0
+  # GMSL external sync for 2x D585 on the Orin (Camera Hub's "GMSL TSC
+  # sync" checkbox - only offered when panel_connection.mode is remote,
+  # both cameras are D585 with no USB descriptor, and /dev/cdi_tsc exists;
+  # see engine/gmsl_sync.py). The trigger rate is the streams' own fps,
+  # not a setting - every stream must share one fps.
+  gmsl_tsc_sync:
+    # Kernel V4L2 control and value - NOT the SDK enum. On this D585
+    # driver: 0 = Default, 1 = Master, 2 = External Sync (the SDK's
+    # d500_intercam_sync_mode numbers these differently; kernel 2 matches
+    # SDK 3). Confirmed via `v4l2-ctl -L` on the rig.
+    control: camera_sync_mode
+    sync_mode_value: 2
+    duty_percent: 50
+    # Trigger runs this long before any stream opens, so the sensors lock
+    # to a stable signal (matches the reference method that passes).
+    settle_s: 5.0
 
 # Only read when the operator checks Device Select's "Use dual LED panel"
 # box - two physically separate LED panels sharing one Acroname USB hub
@@ -306,11 +322,11 @@ panel_connection:
   # hardware (LED-Panel.exe, and the Acroname hub/relay in dual-panel
   # setups) is physically attached to. Needs key-based SSH login already
   # set up for this to connect without a password prompt.
-  ssh_user: ""
-  ssh_host: ""
+  ssh_user: "admin"
+  ssh_host: "percdsk615"
   # Where this same repo lives on that Windows machine, used to locate
   # tools/panel_server/panel_server_stdio.py to run over ssh.
-  remote_repo_path: ""
+  remote_repo_path: "C:/Users/admin/Downloads/sync/optical_sync_gui_generic"
   # The python command to invoke on the remote machine. Defaults to
   # "python" (not "python3") since the remote machine is BY DEFINITION
   # always Windows (the whole point of this feature) - the python.org
@@ -318,7 +334,7 @@ panel_connection:
   # and Windows 10/11 ships its own python3.exe App Execution Alias stub
   # that redirects to the Microsoft Store when no real Python 3 install is
   # present, failing non-interactively with a confusing error.
-  remote_python: python
+  remote_python: "C:/Users/admin/Downloads/sync/optical_sync_gui_generic/.venv/Scripts/python.exe"
 
 paths:
   config_path: config.yaml

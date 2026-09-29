@@ -1187,3 +1187,111 @@ def test_back_button_declining_confirmation_leaves_sessions_running(qapp, tmp_pa
     for thread in fake_threads.values():
         thread.request_stop.assert_not_called()
     assert emitted == []
+
+
+GMSL_CONFIG = {"control": "camera_sync_mode", "sync_mode_value": 2, "duty_percent": 50,
+               "settle_s": 0.0, "fps": 30}
+
+
+def _page_with_fake_gmsl():
+    page, fake_threads = _page_with_fake_threads()
+    created = []
+
+    def factory(**kwargs):
+        sync = MagicMock()
+        sync.kwargs = kwargs
+        created.append(sync)
+        return sync
+
+    page._gmsl_sync_factory = factory
+    return page, fake_threads, created
+
+
+def test_start_all_sessions_builds_gmsl_sync_from_config(qapp, tmp_path):
+    page, _, created = _page_with_fake_gmsl()
+    page.set_cameras(object(), _two_cameras(tmp_path), gmsl_tsc_sync=GMSL_CONFIG)
+
+    page.start_all_sessions()
+
+    assert len(created) == 1
+    assert created[0].kwargs == GMSL_CONFIG
+    assert page._controller._gmsl_sync is created[0]
+    created[0].engage.assert_called_once()
+
+
+def test_start_all_sessions_without_gmsl_config_passes_none(qapp, tmp_path):
+    page, _, created = _page_with_fake_gmsl()
+    page.set_cameras(object(), _two_cameras(tmp_path))
+
+    page.start_all_sessions()
+
+    assert created == []
+    assert page._controller._gmsl_sync is None
+
+
+def test_start_all_sessions_surfaces_gmsl_engage_failure_and_unlocks_ui(qapp, tmp_path, monkeypatch):
+    # Final-review C1: an engage() RuntimeError used to escape the Qt slot as
+    # a console-only traceback, leaving the page stuck "running".
+    from PySide6.QtWidgets import QMessageBox
+    shown = []
+    monkeypatch.setattr(QMessageBox, "critical", staticmethod(lambda *a, **k: shown.append(a) or QMessageBox.Ok))
+    page, fake_threads, created = _page_with_fake_gmsl()
+
+    def failing_factory(**kwargs):
+        sync = MagicMock()
+        sync.engage.side_effect = RuntimeError("v4l2-ctl not found on PATH. Install it with 'sudo apt install v4l-utils'.")
+        created.append(sync)
+        return sync
+
+    page._gmsl_sync_factory = failing_factory
+    page.set_cameras(object(), _two_cameras(tmp_path), gmsl_tsc_sync=GMSL_CONFIG)
+
+    page.start_all_sessions()  # must not raise out of the slot
+
+    assert fake_threads == {}
+    assert page._session_running is False
+    assert page.start_button.isEnabled()
+    assert not page.stop_button.isEnabled()
+    assert "v4l-utils" in page.status_label.text()
+    assert len(shown) == 1
+
+
+def test_start_all_sessions_shows_gmsl_status_before_blocking_engage(qapp, tmp_path):
+    # M1: engage() blocks the GUI thread for the V4L2 scan + settle_s - the
+    # operator must see why the window stopped responding.
+    page, _, _ = _page_with_fake_gmsl()
+    seen = []
+
+    def factory(**kwargs):
+        sync = MagicMock()
+        sync.engage.side_effect = lambda: seen.append(page.status_label.text())
+        return sync
+
+    page._gmsl_sync_factory = factory
+    page.set_cameras(object(), _two_cameras(tmp_path), gmsl_tsc_sync=GMSL_CONFIG)
+
+    page.start_all_sessions()
+
+    assert seen and "GMSL" in seen[0]
+
+
+def test_start_all_sessions_runs_free_run_guard_and_reports_reset(qapp, tmp_path):
+    page, _, _ = _page_with_fake_gmsl()
+    guards = []
+
+    def guard_factory(**kwargs):
+        guard = MagicMock()
+        guard.kwargs = kwargs
+        guard.reset_nodes = ["/dev/video2"]
+        guards.append(guard)
+        return guard
+
+    page._gmsl_free_run_guard_factory = guard_factory
+    page.set_cameras(object(), _two_cameras(tmp_path), gmsl_free_run_cleanup={"control": "camera_sync_mode"})
+
+    page.start_all_sessions()
+
+    assert guards[0].kwargs == {"control": "camera_sync_mode"}
+    assert page._controller._gmsl_sync is guards[0]
+    guards[0].engage.assert_called_once()
+    assert "left over" in page.status_label.text()

@@ -13,6 +13,7 @@ from state.gui_state import load_gui_state
 from settings import load_settings
 from engine.led_panel import configure_panel_connection
 from engine import panel_rpc_client
+from engine.gmsl_sync import disengage_all_engaged
 
 
 def main():
@@ -46,6 +47,10 @@ def main():
     exit_code = app.exec()
     if settings["panel_connection"]["mode"] == "remote":
         panel_rpc_client.close()
+        # Closing the window mid-run must not leave the Orin's TSC
+        # generator running or the cameras stuck in external-sync mode.
+        # Only undoes what this process engaged.
+        disengage_all_engaged()
     sys.exit(exit_code)
 
 

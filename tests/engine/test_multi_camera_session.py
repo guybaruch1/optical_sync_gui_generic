@@ -59,24 +59,28 @@ def _spec(camera_id, is_master, inter_cam_sync_value=1, stream_identities=None,
     )
 
 
-def _controller(camera_specs, sync_setter=None, device_lookup=None, camera_start_stagger_s=0):
+def _controller(camera_specs, sync_setter=None, device_lookup=None, camera_start_stagger_s=0,
+                gmsl_sync=None, thread_factory=None, panel_start=None, panel_stop=None):
     # Defaults the stagger to 0 (instant) - tests that don't care about
     # stagger behavior specifically shouldn't pay a real multi-second sleep
     # just because they happen to construct a 2+ camera controller. Tests
     # that DO care about stagger pass a real value explicitly.
     fake_threads = {}
 
-    def thread_factory(**kwargs):
+    def default_thread_factory(**kwargs):
         thread = _FakeSessionEngineThread(**kwargs)
         fake_threads[kwargs["device_serial"]] = thread
         return thread
 
     controller = MultiCameraSessionController(
         camera_specs=camera_specs,
-        thread_factory=thread_factory,
+        thread_factory=thread_factory or default_thread_factory,
         device_lookup=device_lookup or (lambda ctx, serial: MagicMock(name=serial)),
         sync_setter=sync_setter or MagicMock(return_value=True),
         camera_start_stagger_s=camera_start_stagger_s,
+        gmsl_sync=gmsl_sync,
+        panel_start=panel_start or MagicMock(),
+        panel_stop=panel_stop or MagicMock(),
     )
     return controller, fake_threads
 
@@ -225,26 +229,101 @@ def test_start_all_never_lets_a_camera_thread_redo_its_own_hardware_reset():
     assert fake_threads["cam1_serial"].kwargs["hardware_reset_before_start"] is False
 
 
-def test_start_all_raises_and_starts_nothing_when_two_cameras_want_dual_panel_mode():
-    # engine.dual_panel_control's relay/hub singletons (_dual_panel_primed,
-    # _relay_connection, _dual_panel_lock) represent exactly ONE shared
-    # relay/hub for the whole app - two cameras' threads both calling
-    # start_scanning()/stop_scanning() concurrently would corrupt each
-    # other's state (confirmed real wiring on the rig this was designed
-    # for: all panels across all cameras share one relay). v1 scope is "at
-    # most one configured camera may use dual-panel mode per run" - see the
-    # multi-camera design doc's "Design detail" section 6.
-    panel_config = {"stream_a_panel_port": 1, "stream_b_panel_port": 0, "relay_port": 6}
-    controller, fake_threads = _controller([
-        _spec("cam1", True, device_serial="s1", dual_panel_config=panel_config),
-        _spec("cam2", False, device_serial="s2", dual_panel_config=panel_config),
-    ])
+PANEL_CONFIG = {"stream_a_panel_port": 1, "stream_b_panel_port": 0, "relay_port": 6}
 
-    with pytest.raises(RuntimeError):
+
+def _shared_dual_panel_specs(second_config=PANEL_CONFIG):
+    master = _spec("cam1", True, device_serial="s1", dual_panel_config=dict(PANEL_CONFIG), switch_time_ms=2.5)
+    master.thread_kwargs["scan_direction"] = -1
+    slave = _spec("cam2", False, device_serial="s2", dual_panel_config=dict(second_config), switch_time_ms=9.0)
+    slave.thread_kwargs["scan_direction"] = 1
+    return [master, slave]
+
+
+def test_start_all_allows_two_cameras_sharing_the_same_dual_panels():
+    # Both cameras look at the same two panels (one IR, one color) on one
+    # hub + relay - allowed, as long as it is literally the same wiring.
+    controller, fake_threads = _controller(_shared_dual_panel_specs())
+
+    controller.start_all(ctx=object())
+
+    assert len(controller.threads) == 2
+    assert all(t.started for t in fake_threads.values())
+
+
+def test_shared_dual_panels_are_armed_once_with_masters_settings_before_any_thread():
+    events = []
+    panel_start = MagicMock(side_effect=lambda *a: events.append(("arm",) + a))
+
+    def thread_factory(**kwargs):
+        events.append(("thread", kwargs["device_serial"]))
+        return _FakeSessionEngineThread(**kwargs)
+
+    controller, _ = _controller(_shared_dual_panel_specs(), thread_factory=thread_factory,
+                                panel_start=panel_start)
+    controller.start_all(ctx=object())
+
+    assert events == [("arm", 2.5, -1, PANEL_CONFIG), ("thread", "s1"), ("thread", "s2")]
+
+
+def test_shared_dual_panels_are_never_driven_by_any_camera_thread():
+    controller, fake_threads = _controller(_shared_dual_panel_specs())
+
+    controller.start_all(ctx=object())
+
+    assert all(t.kwargs["drive_panel"] is False for t in fake_threads.values())
+
+
+def test_shared_dual_panels_stop_once_only_after_every_thread_finished():
+    panel_stop = MagicMock()
+    controller, fake_threads = _controller(_shared_dual_panel_specs(), panel_stop=panel_stop)
+    controller.start_all(ctx=object())
+
+    controller.stop_all()
+    fake_threads["s1"].finished.emit()
+    panel_stop.assert_not_called()  # cam2 may still be capturing
+    fake_threads["s2"].finished.emit()
+
+    panel_stop.assert_called_once_with(PANEL_CONFIG)
+
+
+def test_start_all_still_rejects_two_cameras_with_different_dual_panel_wiring():
+    other = {"stream_a_panel_port": 3, "stream_b_panel_port": 2, "relay_port": 6}
+    panel_start = MagicMock()
+    controller, fake_threads = _controller(_shared_dual_panel_specs(second_config=other),
+                                           panel_start=panel_start)
+
+    with pytest.raises(RuntimeError, match="same"):
         controller.start_all(ctx=object())
 
     assert controller.threads == {}
-    assert all(not t.started for t in fake_threads.values())
+    panel_start.assert_not_called()
+
+
+def test_shared_panel_arm_failure_starts_no_thread_and_undoes_gmsl():
+    gmsl = MagicMock()
+    panel_start = MagicMock(side_effect=RuntimeError("hub switch failed"))
+    controller, fake_threads = _controller(_shared_dual_panel_specs(), gmsl_sync=gmsl,
+                                           panel_start=panel_start)
+
+    with pytest.raises(RuntimeError, match="hub switch"):
+        controller.start_all(ctx=object())
+
+    assert fake_threads == {}
+    gmsl.disengage.assert_called_once()
+
+
+def test_one_dual_panel_camera_still_drives_its_own_panels():
+    panel_start = MagicMock()
+    controller, fake_threads = _controller([
+        _spec("cam1", True, device_serial="s1", dual_panel_config=dict(PANEL_CONFIG)),
+        _spec("cam2", False, device_serial="s2"),
+    ], panel_start=panel_start)
+
+    controller.start_all(ctx=object())
+
+    panel_start.assert_not_called()
+    assert all(t.kwargs["drive_panel"] is True for t in fake_threads.values())
 
 
 def test_start_all_allows_exactly_one_camera_in_dual_panel_mode():
@@ -577,3 +656,109 @@ def test_all_sessions_finished_still_emits_even_if_resetting_a_genlock_role_rais
     # rest, or suppress all_sessions_finished firing.
     assert sync_setter.call_count == 4
     assert len(finished_payloads) == 1
+
+
+# --- GMSL TSC sync: engaged after genlock, before any thread; disengaged
+# only after every thread finished. ---
+
+def _gmsl_specs():
+    return [_spec("cam1", True, inter_cam_sync_value=None, device_serial="s1"),
+            _spec("cam2", False, inter_cam_sync_value=None, device_serial="s2")]
+
+
+def test_start_all_engages_gmsl_before_any_thread_starts():
+    events = []
+    gmsl = MagicMock()
+    gmsl.engage.side_effect = lambda: events.append("engage")
+
+    def thread_factory(**kwargs):
+        events.append("thread")
+        return _FakeSessionEngineThread(**kwargs)
+
+    controller, _ = _controller(_gmsl_specs(), gmsl_sync=gmsl, thread_factory=thread_factory)
+    controller.start_all(ctx=object())
+
+    assert events == ["engage", "thread", "thread"]
+
+
+def test_start_all_starts_no_thread_when_gmsl_engage_fails():
+    gmsl = MagicMock()
+    gmsl.engage.side_effect = RuntimeError("readback mismatch")
+    controller, fake_threads = _controller(_gmsl_specs(), gmsl_sync=gmsl)
+
+    with pytest.raises(RuntimeError, match="readback"):
+        controller.start_all(ctx=object())
+    assert fake_threads == {}
+
+
+def test_start_all_disengages_gmsl_if_thread_start_raises():
+    gmsl = MagicMock()
+
+    def thread_factory(**kwargs):
+        raise RuntimeError("thread construction failed")
+
+    controller, _ = _controller(_gmsl_specs(), gmsl_sync=gmsl, thread_factory=thread_factory)
+
+    with pytest.raises(RuntimeError, match="thread construction"):
+        controller.start_all(ctx=object())
+    gmsl.disengage.assert_called_once()
+
+
+def test_gmsl_disengaged_only_after_every_thread_finished():
+    gmsl = MagicMock()
+    controller, fake_threads = _controller(_gmsl_specs(), gmsl_sync=gmsl)
+    controller.start_all(ctx=object())
+
+    fake_threads["s1"].finished.emit()
+    gmsl.disengage.assert_not_called()
+    fake_threads["s2"].finished.emit()
+    gmsl.disengage.assert_called_once()
+
+
+def test_stop_all_never_disengages_gmsl_by_itself():
+    gmsl = MagicMock()
+    controller, _ = _controller(_gmsl_specs(), gmsl_sync=gmsl)
+    controller.start_all(ctx=object())
+
+    controller.stop_all()
+
+    gmsl.disengage.assert_not_called()
+
+
+def test_partial_thread_start_failure_defers_gmsl_disengage_until_started_threads_finish():
+    # Final-review I1: disengaging while camera 1 is still streaming would
+    # stop its trigger and rewrite its V4L2 mode under a live pipeline.
+    gmsl = MagicMock()
+    started = {}
+
+    def thread_factory(**kwargs):
+        if kwargs["device_serial"] == "s2":
+            raise RuntimeError("second camera failed")
+        thread = _FakeSessionEngineThread(**kwargs)
+        started[kwargs["device_serial"]] = thread
+        return thread
+
+    controller, _ = _controller(_gmsl_specs(), gmsl_sync=gmsl, thread_factory=thread_factory)
+
+    with pytest.raises(RuntimeError, match="second camera"):
+        controller.start_all(ctx=object())
+
+    assert started["s1"].stop_requested is True
+    gmsl.disengage.assert_not_called()
+    started["s1"].finished.emit()
+    gmsl.disengage.assert_called_once()
+
+
+def test_shared_panel_stop_failure_is_reported_and_never_blocks_finishing():
+    panel_stop = MagicMock(side_effect=RuntimeError("relay COM port gone"))
+    controller, fake_threads = _controller(_shared_dual_panel_specs(), panel_stop=panel_stop)
+    errors, finished = [], []
+    controller.camera_error.connect(lambda cid, msg: errors.append((cid, msg)))
+    controller.all_sessions_finished.connect(finished.append)
+    controller.start_all(ctx=object())
+
+    fake_threads["s1"].finished.emit()
+    fake_threads["s2"].finished.emit()
+
+    assert len(finished) == 1
+    assert errors == [("LED panels", "Failed to stop the shared LED panels: relay COM port gone")]
