@@ -96,8 +96,12 @@ real-hardware-confirmed genlock scheme (`settings.yaml`'s
 (`rs.option.inter_cam_sync_mode`) automatically, master first, before
 starting capture - camera models with no confirmed entry there simply skip
 genlock rather than guess a value that hasn't been validated on real
-hardware. At most one configured camera may use the dual-LED-panel mode at
-a time, since it depends on a single shared relay/hub connection.
+hardware. Several cameras can use the dual-LED-panel mode in the same run
+(e.g. two cameras each doing IR vs RGB) as long as they look at the same
+two panels on the one shared hub and relay: the session then arms the
+panels once, before any camera starts, and stops them once, after every
+camera has finished. Cameras set up with different panel wiring are
+rejected at Start.
 
 On an NVIDIA Orin with **two D585 cameras on the GMSL deserializer** (not
 USB), the app can hardware-sync both cameras instead: it puts each camera
@@ -724,8 +728,13 @@ Calibration/ROI Select (tracked via a module-level flag), and skips
 reconfiguring entirely on a repeat Start with unchanged settings, since
 only the hub switch itself - not the handful of LED-panel CLI calls - is
 what actually costs time. Because the hub/relay are a single shared
-resource, at most one configured camera may use dual-panel mode in any one
-multi-camera run.
+resource, when 2+ cameras use dual-panel mode `MultiCameraSessionController`
+drives the panels itself - armed once with the Master's switch time and
+scan direction before any camera thread starts, stopped once after every
+thread finishes - and starts each `SessionEngineThread` with
+`drive_panel=False` so no thread touches them. Those cameras must share
+identical `dual_panel` settings (checked at Start). With a single
+dual-panel camera, its own thread drives the panels as before.
 
 ### Multi-camera orchestration and cross-camera reconciliation
 

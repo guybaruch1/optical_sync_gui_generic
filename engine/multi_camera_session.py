@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from PySide6.QtCore import QObject, Signal
 
 from engine.cross_camera_reconciler import CrossCameraReconciler, build_cross_camera_pair_specs
+from engine.dual_panel_control import start_scanning, stop_scanning
 from engine.session_engine import SessionEngineThread
 from engine.streams import find_device_by_serial, set_inter_cam_sync_mode, INTER_CAM_SYNC_DEFAULT
 
@@ -97,7 +98,8 @@ class MultiCameraSessionController(QObject):
 
     def __init__(self, camera_specs, pairing_gap_outlier_threshold_us=100_000,
                  thread_factory=None, device_lookup=None, sync_setter=None,
-                 camera_start_stagger_s=2.0, gmsl_sync=None, parent=None):
+                 camera_start_stagger_s=2.0, gmsl_sync=None, panel_start=None, panel_stop=None,
+                 parent=None):
         super().__init__(parent)
         self._camera_specs = camera_specs
         self._thread_factory = thread_factory or SessionEngineThread
@@ -108,6 +110,12 @@ class MultiCameraSessionController(QObject):
         # engaged after the genlock step and before any thread, disengaged
         # only once every thread has finished. None = today's behavior.
         self._gmsl_sync = gmsl_sync
+        # Used only when 2+ cameras share the same dual LED panels (see
+        # start_all): the controller then arms/stops those panels ONCE for
+        # the whole run instead of letting each camera thread do it.
+        self._panel_start = panel_start or start_scanning
+        self._panel_stop = panel_stop or stop_scanning
+        self._shared_dual_panel_config = None
         # Real-hardware finding: two cameras sharing a USB hub/controller
         # (e.g. an Acroname hub) can disrupt each other's device enumeration
         # if their rs.pipeline().start() calls (already documented elsewhere
@@ -165,25 +173,36 @@ class MultiCameraSessionController(QObject):
         genlock. 3. Only once every role is confirmed applied, construct and
         start one thread per camera.
 
-        Also enforces: at most one configured camera may use dual-panel
-        mode. engine.dual_panel_control's relay/hub singletons
+        Dual LED panels: engine.dual_panel_control's relay/hub singletons
         (_dual_panel_primed, _relay_connection, _dual_panel_lock) represent
-        exactly ONE shared relay/hub for the whole app - confirmed real
-        wiring on the rig this was designed for is that ALL panels across
-        ALL cameras share one relay, so two cameras' threads both calling
-        start_scanning()/stop_scanning() concurrently would corrupt each
-        other's state. Checked here, before anything else starts, rather
-        than left to fail unpredictably mid-run."""
-        dual_panel_camera_count = sum(
-            1 for spec in self._camera_specs if spec.thread_kwargs.get("dual_panel_config") is not None
-        )
-        if dual_panel_camera_count > 1:
-            raise RuntimeError(
-                "{} cameras are configured for dual-panel mode, but this rig's panels all share one "
-                "relay - at most one camera may use dual-panel mode per multi-camera run.".format(
-                    dual_panel_camera_count
+        exactly ONE shared relay/hub for the whole app - on the real rig ALL
+        panels across ALL cameras share one relay, so two camera threads
+        each calling start_scanning()/stop_scanning() would corrupt each
+        other's state, and whichever finished first would freeze the panels
+        under the other. When 2+ cameras use dual-panel mode they must
+        therefore be looking at the SAME two panels (identical
+        dual_panel_config - always true in practice, since every camera
+        reads settings.yaml's one dual_panel section; checked here anyway,
+        before anything starts). In that case the controller itself arms
+        the panels ONCE (master's switch time/scan direction), after the
+        genlock/GMSL steps and before any thread, starts every thread with
+        drive_panel=False, and stops the panels ONCE only after every thread
+        has finished. With 0 or 1 dual-panel cameras nothing changes: each
+        thread drives its own panel as before."""
+        dual_panel_configs = [
+            spec.thread_kwargs["dual_panel_config"] for spec in self._camera_specs
+            if spec.thread_kwargs.get("dual_panel_config") is not None
+        ]
+        shared_dual_panel_config = None
+        if len(dual_panel_configs) > 1:
+            if any(config != dual_panel_configs[0] for config in dual_panel_configs[1:]):
+                raise RuntimeError(
+                    "{} cameras are configured for dual-panel mode with different panel wiring. "
+                    "This rig's panels share one hub and relay, so every dual-panel camera must use "
+                    "the same dual_panel settings.".format(len(dual_panel_configs))
                 )
-            )
+            shared_dual_panel_config = dual_panel_configs[0]
+        self._shared_dual_panel_config = None
 
         self._ctx = ctx
         for spec in self._camera_specs:
@@ -217,6 +236,18 @@ class MultiCameraSessionController(QObject):
                 self._reset_genlock_roles()
                 raise
 
+        if shared_dual_panel_config is not None:
+            master = next((spec for spec in self._camera_specs if spec.is_master), self._camera_specs[0])
+            try:
+                self._panel_start(master.switch_time_ms, master.thread_kwargs.get("scan_direction"),
+                                  shared_dual_panel_config)
+            except Exception:
+                self._reset_genlock_roles()
+                if self._gmsl_sync is not None:
+                    self._gmsl_sync.disengage()
+                raise
+            self._shared_dual_panel_config = shared_dual_panel_config
+
         self._finished_rows_by_camera = {}
         try:
             for index, spec in enumerate(self._camera_specs):
@@ -235,6 +266,8 @@ class MultiCameraSessionController(QObject):
                     # wanted it - a thread redoing this internally could race or
                     # undo the genlock role just applied.
                     hardware_reset_before_start=False,
+                    # The controller drives shared dual panels itself (above).
+                    drive_panel=shared_dual_panel_config is None,
                     **spec.thread_kwargs,
                 )
                 self._wire_thread(spec.camera_id, thread)
@@ -248,8 +281,10 @@ class MultiCameraSessionController(QObject):
             # mode under a still-streaming pipeline.
             if self._threads:
                 self.stop_all()
-            elif self._gmsl_sync is not None:
-                self._gmsl_sync.disengage()
+            else:
+                self._stop_shared_dual_panels()
+                if self._gmsl_sync is not None:
+                    self._gmsl_sync.disengage()
             raise
 
     def stop_all(self):
@@ -294,9 +329,22 @@ class MultiCameraSessionController(QObject):
             # request_stop() is non-blocking) is it safe to touch these
             # devices again - see _reset_genlock_roles's own docstring.
             self._reset_genlock_roles()
+            self._stop_shared_dual_panels()
             if self._gmsl_sync is not None:
                 self._gmsl_sync.disengage()
             self.all_sessions_finished.emit(dict(self._finished_rows_by_camera))
+
+    def _stop_shared_dual_panels(self):
+        """Stops the shared dual panels the controller armed, once. A failure
+        is reported through camera_error rather than raised, so it can never
+        suppress all_sessions_finished."""
+        config, self._shared_dual_panel_config = self._shared_dual_panel_config, None
+        if config is None:
+            return
+        try:
+            self._panel_stop(config)
+        except Exception as exc:
+            self.camera_error.emit("LED panels", "Failed to stop the shared LED panels: {}".format(exc))
 
     def _reset_genlock_roles(self):
         """Resets every spec THIS attempt actually applied a genlock role to

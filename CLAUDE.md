@@ -640,6 +640,26 @@ Three related fixes to the multi-camera Hub/Add/Edit flow, all driven by the sam
 
 **Edit jumps straight to Stream Config, skipping Device Select entirely, prefilled with that camera's own previous choices.** The device is already known for an existing camera, so re-picking it would be pointless - and would force Device Select's own `exclude_serials` to special-case not hiding the very camera being edited. `_on_edit_camera_requested` calls `_populate_stream_config_page()` directly with that camera's stored `device_serial`/label, passing `preferred_a`/`preferred_b`/`preferred_test_name`/`preferred_dual_panel`/`preferred_camera_controls` all read from that camera's own committed config - a genuine "continue editing", not "redo from scratch". `test_name` is a NEW field needed only for this prefill, stored as a **sibling** of each committed camera's `"config"` dict in `self._cameras[camera_id]`, not inside it - `"config"` is `**`-splatted directly into `LiveSessionPage.set_context()` (the 1-configured-camera path in `_on_start_multi_camera_session_requested`), which has no `test_name` parameter; read live off `stream_config_page.current_test_name` at `_on_tuning_done` commit time (unchanged since Stream Config ran, earlier in that same sub-flow). `StreamConfigPage.populate()` gained a matching `preferred_camera_controls` param (a new `_apply_camera_controls_to_widgets()`, the inverse of the existing `read_camera_controls()`) and a `DEFAULT_CAMERA_CONTROLS` constant applied explicitly on a fresh Add - same stale-carryover reasoning as `preferred_dual_panel`'s own explicit reset, since this page's one instance is reused across every camera's own sub-flow visit.
 
+### Shared dual LED panels across cameras
+
+Two cameras each doing IR vs RGB look at the SAME two panels (one IR, one
+color) on one Acroname hub and one relay. `engine/dual_panel_control.py`'s
+state (`_dual_panel_primed`, `_relay_connection`, `_dual_panel_lock`) is a
+single app-wide singleton, so two camera threads each calling
+`start_scanning`/`stop_scanning` would corrupt it, and whichever finished
+first would freeze the panels under the other - which is why this used to
+be capped at one dual-panel camera per run. `MultiCameraSessionController`
+now allows 2+ dual-panel cameras when their `dual_panel_config` dicts are
+identical (always true in practice - one `settings.yaml` `dual_panel`
+section), and then owns the panels: `start_all` arms them ONCE (Master's
+`switch_time_ms`/`scan_direction`) after the genlock/GMSL steps and before
+any thread, every thread gets `drive_panel=False`, and
+`_stop_shared_dual_panels` stops them ONCE from `_on_thread_finished` after
+every thread has finished (a stop failure goes to `camera_error` as
+"LED panels", never blocking `all_sessions_finished`). Differing wiring is
+still rejected at Start. Not handled: mixing one dual-panel camera with a
+single-panel camera - both would still drive panels independently.
+
 ### `gui/widgets/live_plot.py` gotcha
 
 `LivePlot` subclasses `pg.PlotWidget`. Its own `clear()`-style method must be called `clear_data()`, not `clear()` - `pg.PlotWidget.__init__` copies several of its own methods (including `clear`) onto the *instance* itself, which in Python takes priority over a same-named method defined on the subclass, silently shadowing it. `add_series(name, color, display_name=None)` keeps `name` as the lookup key used everywhere (`add_point`, `get_series_data`, `set_series_visible`) and `display_name` as an independent, optional legend label.
