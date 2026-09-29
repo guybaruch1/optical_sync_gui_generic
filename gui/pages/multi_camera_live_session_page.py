@@ -62,6 +62,7 @@ LedDetectionMetric only (no intra-camera HW TS Latency/Optical Sync) and
 gets a slim tab with a single video panel - the Cross-Camera Sync tab is
 its real result."""
 
+import json
 import os
 
 import cv2
@@ -597,6 +598,17 @@ class MultiCameraLiveSessionPage(QWidget):
                 # an operator might need to disable).
                 record_recent_frames=True,
             )
+            if self._gmsl_tsc_sync is not None:
+                # GMSL TSC sync runs follow the reference script: global
+                # time explicitly enabled around every pipeline.start(), and
+                # depth only when camera_sync.gmsl_tsc_sync.enable_depth.
+                thread_kwargs["enable_global_time"] = True
+                thread_kwargs["enable_depth_for_ir_sync"] = bool(self._gmsl_tsc_sync.get("enable_depth", False))
+                if self._gmsl_tsc_sync.get("laser_off", True):
+                    # The projector is switched off through V4L2 by the sync
+                    # step; the SDK emitter setting would run after it and
+                    # could turn it back on, so leave the SDK emitter alone.
+                    thread_kwargs["camera_controls"] = {**config["camera_controls"], "emitter_enabled": None}
 
             camera_specs.append(CameraSessionSpec(
                 camera_id=camera_id, is_master=camera["is_master"],
@@ -668,6 +680,7 @@ class MultiCameraLiveSessionPage(QWidget):
             QMessageBox.critical(self, "Could not start the multi-camera session", str(exc))
             return
         if self._gmsl_tsc_sync is not None:
+            self._write_gmsl_run_record("engaged - waiting for every camera to stream")
             self.status_label.setText(
                 "GMSL sync engaged - confirming camera sync mode once every camera is streaming...")
         guard_reset_nodes = getattr(controller_kwargs.get("gmsl_sync"), "reset_nodes", None)
@@ -680,17 +693,43 @@ class MultiCameraLiveSessionPage(QWidget):
         if self._controller is not None:
             self._controller.stop_all()
 
+    def _write_gmsl_run_record(self, result, **extra):
+        """gmsl_tsc_sync.json in the run folder: the settings this run used
+        and how the sync check ended - the CSVs alone can't tell a ticked
+        run, or which reference-order switches were on, from another."""
+        if self._run_dir is None or self._gmsl_tsc_sync is None:
+            return
+        record = {"settings": dict(self._gmsl_tsc_sync), "result": result}
+        record.update(extra)
+        try:
+            with open(os.path.join(self._run_dir, "gmsl_tsc_sync.json"), "w", encoding="utf-8") as handle:
+                json.dump(record, handle, indent=2, default=str)
+        except OSError:
+            pass
+
     def _on_gmsl_sync_verified(self, nodes):
         config = self._gmsl_tsc_sync or {}
-        self.status_label.setText(
-            "GMSL sync verified: {}={} on {} with every camera streaming, TSC trigger at {} Hz.".format(
-                config.get("control", "camera_sync_mode"), config.get("sync_mode_value", "?"),
-                ", ".join(nodes) or "the camera nodes", config.get("fps", "?")))
+        text = "GMSL sync verified: {}={} on {} with every camera streaming, TSC trigger at {} Hz.".format(
+            config.get("control", "camera_sync_mode"), config.get("sync_mode_value", "?"),
+            ", ".join(nodes) or "the camera nodes", config.get("fps", "?"))
+        skip_s = config.get("global_ts_skip_s", 0)
+        if skip_s:
+            text += " Global TS Latency ignores the first {:g} s (clock warm-up).".format(skip_s)
+        warnings = getattr(self._controller_gmsl_sync(), "warnings", None)
+        if isinstance(warnings, list) and warnings:
+            text += " Warning: " + "; ".join(warnings)
+        self.status_label.setText(text)
+        self._write_gmsl_run_record("verified", nodes=list(nodes),
+                                    warnings=list(warnings) if isinstance(warnings, list) else [])
+
+    def _controller_gmsl_sync(self):
+        return getattr(self._controller, "_gmsl_sync", None) if self._controller is not None else None
 
     def _on_gmsl_sync_failed(self, message):
         # The controller has already stopped every camera; the toolbar
         # unlocks on all_sessions_finished as for any other stop.
         self.status_label.setText("GMSL sync check failed - run stopped.")
+        self._write_gmsl_run_record("failed", message=message)
         QMessageBox.critical(self, "Cameras are not in GMSL sync", message)
 
     def session_threads(self):

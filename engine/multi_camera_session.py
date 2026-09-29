@@ -144,9 +144,39 @@ class MultiCameraSessionController(QObject):
         # real-hardware-tunable starting guess, not a proven-correct value -
         # keep raising it if two-camera collisions are still observed.
         self._camera_start_stagger_s = camera_start_stagger_s
+        # GMSL TSC sync runs (GmslTscSync.start_cameras_back_to_back): open
+        # each camera right after the previous camera's pipeline.start()
+        # returned (SessionEngineThread.capture_started), like the reference
+        # script - GMSL has no shared USB hub for the stagger to protect.
+        self._start_back_to_back = getattr(gmsl_sync, "start_cameras_back_to_back", False) is True
+        self._pending_specs = []
+        self._drive_panel = True
 
         pair_specs = build_cross_camera_pair_specs(camera_specs, pairing_gap_outlier_threshold_us)
-        self._reconciler = CrossCameraReconciler(pair_specs) if pair_specs else None
+        # A GMSL TSC sync run asks for the reference's global-time warm-up
+        # exclusion; anything else (genlock, free-running) keeps 0.
+        warmup_s = getattr(gmsl_sync, "global_ts_skip_s", 0.0)
+        if not isinstance(warmup_s, (int, float)) or isinstance(warmup_s, bool):
+            warmup_s = 0.0
+        # Pair frames at most HALF a frame apart when every stream shares one
+        # fps. The matcher pairs each row with the nearest row that has
+        # ALREADY arrived; with a 50 ms window, two cameras offset by e.g.
+        # +12 ms at 30 fps got paired one frame off (-21 ms) whenever the
+        # right partner hadn't arrived yet - real-hardware runs showed up to
+        # 100% of pairs misreported that way (e.g. -47 ms for a +19.6 ms
+        # offset at 15 fps). Half a period rejects the wrong neighbour, so
+        # the row waits for its real partner. Mixed fps keeps 50 ms.
+        fps_values = {
+            pick.get("fps") for spec in camera_specs
+            for pick in (spec.thread_kwargs.get("pick_a"), spec.thread_kwargs.get("pick_b"))
+            if isinstance(pick, dict) and pick.get("fps")
+        }
+        max_match_gap_us = 50_000.0
+        if len(fps_values) == 1:
+            max_match_gap_us = min(max_match_gap_us, 0.5 * 1_000_000.0 / next(iter(fps_values)))
+        self._reconciler = CrossCameraReconciler(
+            pair_specs, max_match_gap_us=max_match_gap_us,
+            global_ts_warmup_s=warmup_s) if pair_specs else None
         self._latest_cross_row_by_pair = {}
 
         self._threads = {}
@@ -262,30 +292,25 @@ class MultiCameraSessionController(QObject):
             self._shared_dual_panel_config = shared_dual_panel_config
 
         self._finished_rows_by_camera = {}
+        # The controller drives shared dual panels itself (above).
+        self._drive_panel = shared_dual_panel_config is None
+        self._pending_specs = []
         try:
-            for index, spec in enumerate(self._camera_specs):
-                # See __init__'s own comment - staggered so each camera's
-                # rs.pipeline().start() gets a moment to finish its own noisy
-                # USB open/negotiate window before the next camera starts its
-                # own, if they share a USB hub/controller. No delay before the
-                # very first camera - nothing else is starting concurrently
-                # with it yet.
-                if index > 0 and self._camera_start_stagger_s > 0:
-                    time.sleep(self._camera_start_stagger_s)
-                thread = self._thread_factory(
-                    ctx=ctx,
-                    device_serial=spec.device_serial,
-                    # Already handled above, sequentially, for every camera that
-                    # wanted it - a thread redoing this internally could race or
-                    # undo the genlock role just applied.
-                    hardware_reset_before_start=False,
-                    # The controller drives shared dual panels itself (above).
-                    drive_panel=shared_dual_panel_config is None,
-                    **spec.thread_kwargs,
-                )
-                self._wire_thread(spec.camera_id, thread)
-                self._threads[spec.camera_id] = thread
-                thread.start()
+            if self._start_back_to_back:
+                # The rest start from _on_capture_started, one at a time.
+                self._pending_specs = list(self._camera_specs[1:])
+                self._start_camera_thread(self._camera_specs[0])
+            else:
+                for index, spec in enumerate(self._camera_specs):
+                    # See __init__'s own comment - staggered so each camera's
+                    # rs.pipeline().start() gets a moment to finish its own
+                    # noisy USB open/negotiate window before the next camera
+                    # starts its own, if they share a USB hub/controller. No
+                    # delay before the very first camera - nothing else is
+                    # starting concurrently with it yet.
+                    if index > 0 and self._camera_start_stagger_s > 0:
+                        time.sleep(self._camera_start_stagger_s)
+                    self._start_camera_thread(spec)
             self._begin_gmsl_verification()
         except Exception:
             # The trigger must not keep running for a run that never got
@@ -301,9 +326,45 @@ class MultiCameraSessionController(QObject):
                     self._gmsl_sync.disengage()
             raise
 
+    def _start_camera_thread(self, spec):
+        thread = self._thread_factory(
+            ctx=self._ctx,
+            device_serial=spec.device_serial,
+            # Already handled in start_all, sequentially, for every camera
+            # that wanted it - a thread redoing this internally could race
+            # or undo the genlock role just applied.
+            hardware_reset_before_start=False,
+            drive_panel=self._drive_panel,
+            **spec.thread_kwargs,
+        )
+        self._wire_thread(spec.camera_id, thread)
+        self._threads[spec.camera_id] = thread
+        thread.start()
+        if self._start_back_to_back and getattr(thread, "capture_started", None) is None:
+            # A thread type with no capture_started signal can't tell us
+            # when its stream is open - don't stall the rest of the run.
+            self._start_next_pending_camera()
+
+    def _on_capture_started(self, camera_id):
+        if self._start_back_to_back:
+            self._start_next_pending_camera()
+
+    def _start_next_pending_camera(self):
+        if not self._pending_specs:
+            return
+        spec = self._pending_specs.pop(0)
+        try:
+            self._start_camera_thread(spec)
+        except Exception as exc:
+            self._pending_specs = []
+            self.camera_error.emit(spec.camera_id, "Could not start this camera: {}".format(exc))
+            self.stop_all()
+
     def stop_all(self):
         # An operator Stop before every camera streamed is not a sync
-        # failure - cancel the pending check silently.
+        # failure - cancel the pending check silently. Cameras not opened
+        # yet (back-to-back start) are never opened.
+        self._pending_specs = []
         self._cancel_gmsl_verification()
         for thread in self._threads.values():
             thread.request_stop()
@@ -320,7 +381,9 @@ class MultiCameraSessionController(QObject):
         verify() (GmslTscSync) - never the free-run guard."""
         if not callable(getattr(self._gmsl_sync, "verify", None)):
             return
-        self._awaiting_first_row = set(self._threads)
+        # Every configured camera, not just the threads started so far - a
+        # back-to-back start opens the rest one at a time.
+        self._awaiting_first_row = {spec.camera_id for spec in self._camera_specs}
         self._last_error_by_camera = {}
         self._gmsl_verify_done = False
         self._gmsl_verify_timer.start(int(self._gmsl_verify_timeout_s * 1000))
@@ -369,6 +432,9 @@ class MultiCameraSessionController(QObject):
         )
         thread.error.connect(lambda message, cid=camera_id: self._on_thread_error(cid, message))
         thread.finished.connect(lambda cid=camera_id: self._on_thread_finished(cid))
+        capture_started = getattr(thread, "capture_started", None)
+        if capture_started is not None:
+            capture_started.connect(lambda cid=camera_id: self._on_capture_started(cid))
 
     def _on_thread_error(self, camera_id, message):
         self._last_error_by_camera[camera_id] = message
@@ -397,6 +463,9 @@ class MultiCameraSessionController(QObject):
         # errored before ever reaching AcquisitionLoop - default to an empty
         # row list rather than KeyError-ing on a camera that never produced any.
         self._finished_rows_by_camera.setdefault(camera_id, [])
+        # A camera that ended before the next one was opened ends the
+        # back-to-back chain - never open more cameras into a finishing run.
+        self._pending_specs = []
         if not self._gmsl_verify_done and camera_id in self._awaiting_first_row:
             self._fail_gmsl_verification(
                 "Camera {} stopped before delivering any frame, so the run was stopped{}. Under GMSL "

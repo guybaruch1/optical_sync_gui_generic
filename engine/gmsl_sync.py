@@ -217,7 +217,34 @@ DEFAULT_GMSL_TSC_SYNC = {
     "sync_mode_value": 2,
     "duty_percent": 50,
     "settle_s": 5.0,
+    # Both from the reference check_d585_sync_v4l2.py: projector off via
+    # V4L2 for the run (its default), and the first seconds of global
+    # timestamps left out of Global TS Latency while librealsense's
+    # device-to-host clock fit converges (measured there: -2.1 ms in the
+    # first second, +61 us after ten).
+    "laser_off": True,
+    "global_ts_skip_s": 10.0,
+    # Real-hardware finding (2026-09-29, 24 app runs vs the reference on the
+    # same rig): with the app's old sequence the cameras never locked - each
+    # Start left them a random, fixed offset apart (0.3-23.5 ms, like the
+    # reference's no-TSC phase), while the reference locked to ~0.1 ms on
+    # every start. These three follow the reference's sequence; each can be
+    # switched back to find which one matters.
+    # tsc_before_mode: start the TSC and wait settle_s BEFORE switching the
+    # cameras to external sync (the reference order); False = the old order
+    # (mode first, then TSC, then settle).
+    "tsc_before_mode": True,
+    # enable_depth: co-enable depth with IR in ticked runs (the reference
+    # runs IR + color only). Overrides camera_sync.enable_depth_for_ir_sync
+    # for ticked runs only.
+    "enable_depth": False,
+    # start_cameras_back_to_back: open each camera's stream right after the
+    # previous camera's stream is open (the reference opens them back to
+    # back) instead of the fixed 2 s USB stagger.
+    "start_cameras_back_to_back": True,
 }
+
+LASER_CONTROL = "laser_power_on_off"
 
 CDI_TSC_DEV = "/dev/cdi_tsc"
 
@@ -283,15 +310,33 @@ class KernelTscIO:
 
 
 class GmslTscSync:
-    """engage(): resolve the two nodes -> external-sync mode on both
-    (read-back confirmed) -> start the TSC -> wait settle_s so the sensors
-    lock to a stable signal before any stream opens. Any failure undoes
-    what was applied and raises. disengage(): stop TSC, restore as-found
-    mode; best-effort, idempotent, never raises."""
+    """engage(), reference order (tsc_before_mode, the default): resolve the
+    two nodes -> start the TSC -> wait settle_s -> external-sync mode on both
+    (read-back confirmed) -> projector off; the streams open right after.
+    Old order (tsc_before_mode=False): mode -> TSC -> settle. Any failure
+    undoes what was applied and raises. disengage(): stop TSC, restore
+    as-found mode; best-effort, idempotent, never raises."""
 
-    def __init__(self, control, sync_mode_value, fps, duty_percent, settle_s,
-                 run_v4l2=run_v4l2, tsc_io=None, sleep=time.sleep, glob_fn=glob.glob):
+    def __init__(self, control, sync_mode_value, fps, duty_percent, settle_s, laser_off=True,
+                 global_ts_skip_s=10.0, tsc_before_mode=True, enable_depth=False,
+                 start_cameras_back_to_back=True, run_v4l2=run_v4l2, tsc_io=None, sleep=time.sleep,
+                 glob_fn=glob.glob):
         self._control = control
+        self._laser_off = laser_off
+        self._tsc_before_mode = tsc_before_mode
+        # Not used here - read by the page (enable_depth -> each camera
+        # thread's enable_depth_for_ir_sync) and the controller
+        # (start_cameras_back_to_back) for this run.
+        self.enable_depth = enable_depth
+        self.start_cameras_back_to_back = start_cameras_back_to_back
+        # Not used here - the controller hands it to CrossCameraReconciler
+        # (Global TS Latency warm-up exclusion) for this run.
+        self.global_ts_skip_s = global_ts_skip_s
+        self._laser_as_found = None
+        # Non-fatal notes (laser could not be switched off/confirmed) - a
+        # projector left on changes the IR image, not the sync, so it never
+        # blocks a run; the page shows these with the verified status.
+        self.warnings = []
         self._value = sync_mode_value
         self._fps = fps
         self._duty = duty_percent
@@ -310,18 +355,78 @@ class GmslTscSync:
 
     def engage(self):
         nodes = resolve_sync_nodes(self._control, run_v4l2=self._run_v4l2, glob_fn=self._glob_fn)
-        self._as_found = apply_sync_mode(nodes, self._control, self._value, run_v4l2=self._run_v4l2)
         self._nodes = list(nodes)
-        try:
-            self._tsc_io.start(self._fps, self._duty)
-        except Exception:
+        self.warnings = []
+        if self._tsc_before_mode:
+            # The reference check_d585_sync_v4l2.py's order: the trigger is
+            # already running and settled when the cameras are switched to
+            # external sync, and the streams open right after that.
+            self._start_tsc()
+            self._settle()
+            try:
+                self._apply_modes()
+            except Exception:
+                self._stop_tsc_quietly()
+                raise
+        else:
+            self._apply_modes()
+            try:
+                self._start_tsc()
+            except Exception:
+                self._undo_modes()
+                raise
+            self._settle()
+
+    def _apply_modes(self):
+        self._as_found = apply_sync_mode(self._nodes, self._control, self._value, run_v4l2=self._run_v4l2)
+        if self._laser_off:
+            self._switch_laser_off()
+
+    def _undo_modes(self):
+        if self._as_found is not None:
             restore_sync_mode(self._as_found, self._control, run_v4l2=self._run_v4l2)
             self._as_found = None
-            raise
+        if self._laser_as_found:
+            restore_sync_mode(self._laser_as_found, LASER_CONTROL, run_v4l2=self._run_v4l2)
+        self._laser_as_found = None
+
+    def _start_tsc(self):
+        self._tsc_io.start(self._fps, self._duty)
         self._tsc_running = True
-        _ENGAGED.append(self)
+        if self not in _ENGAGED:
+            _ENGAGED.append(self)
+
+    def _stop_tsc_quietly(self):
+        if self in _ENGAGED:
+            _ENGAGED.remove(self)
+        if self._tsc_running:
+            self._tsc_running = False
+            try:
+                self._tsc_io.stop()
+            except Exception:
+                pass
+
+    def _settle(self):
         if self._settle_s > 0:
             self._sleep(self._settle_s)
+
+    def _switch_laser_off(self):
+        """laser_power_on_off=0 on every sync node (same node and driver, per
+        the reference), remembering as-found values for disengage."""
+        self._laser_as_found = {}
+        for node in self._nodes:
+            found = _read_value(node, LASER_CONTROL, self._run_v4l2)
+            if found is None:
+                self.warnings.append("{}: no readable {} - projector state unknown".format(
+                    node, LASER_CONTROL))
+                continue
+            self._laser_as_found[node] = found
+            if found == 0:
+                continue
+            code, out, err = self._run_v4l2(node, "-c", "{}=0".format(LASER_CONTROL))
+            if code != 0 or _read_value(node, LASER_CONTROL, self._run_v4l2) != 0:
+                self.warnings.append("{}: could not switch the projector off ({})".format(
+                    node, err or out or "readback mismatch"))
 
     def verify(self):
         """Called once every camera is actually streaming: engage()'s own
@@ -343,6 +448,17 @@ class GmslTscSync:
             if value != self._value:
                 problems.append("{} on {} reads {} after the streams opened, expected {}".format(
                     self._control, node, "nothing" if value is None else value, self._value))
+        if self._laser_off:
+            # The driver can turn the projector back on at stream start
+            # (the reference re-applies it before every start for this) -
+            # switch it off again now that the streams are open.
+            for node in self._laser_as_found or {}:
+                if _read_value(node, LASER_CONTROL, self._run_v4l2) == 0:
+                    continue
+                code, out, err = self._run_v4l2(node, "-c", "{}=0".format(LASER_CONTROL))
+                if code != 0 or _read_value(node, LASER_CONTROL, self._run_v4l2) != 0:
+                    self.warnings.append("{}: projector came back on after the stream started and "
+                                         "could not be switched off".format(node))
         return problems
 
     def disengage(self):
@@ -360,6 +476,9 @@ class GmslTscSync:
         if self._as_found is not None:
             as_found, self._as_found = self._as_found, None
             problems.extend(restore_sync_mode(as_found, self._control, run_v4l2=self._run_v4l2))
+        if self._laser_as_found:
+            laser_as_found, self._laser_as_found = self._laser_as_found, None
+            problems.extend(restore_sync_mode(laser_as_found, LASER_CONTROL, run_v4l2=self._run_v4l2))
         return problems
 
 

@@ -651,6 +651,50 @@ operator Stop before streaming cancels the check silently. The TSC has no
 GET ioctl, so "trigger running" is what this process started, not a
 readback. Frame RATE is not checked against the trigger rate.
 
+**Parity with the reference `check_d585_sync_v4l2.py` (ticked runs only).**
+Three things the reference does are applied in ticked GMSL TSC runs, never
+otherwise: (1) `global_time_enabled=1` on every sensor before AND after each
+`pipeline.start()` (`engine/streams.py`'s `enable_global_time`, via
+`ContinuousCapture(enable_global_time=True)` / `SessionEngineThread`); (2)
+Global TS Latency samples from the first `global_ts_skip_s` (10 s) of
+matched pairs are excluded as `global_ts_warmup`
+(`CrossCameraReconciler(global_ts_warmup_s=...)`, fed by the controller from
+`GmslTscSync.global_ts_skip_s`) while librealsense's clock fit converges -
+matching and HW TS Latency are untouched; (3) `laser_off`: projector off via
+V4L2 `laser_power_on_off=0` on the sync nodes at engage, re-checked (and
+re-applied) in `verify()` since the driver can re-enable it at stream
+start, restored at disengage. Projector problems are `GmslTscSync.warnings`
+(shown with the verified status), never a failed run. In these runs the SDK
+emitter setting is left alone (`camera_controls["emitter_enabled"] = None`)
+so it can't turn the projector back on after the V4L2 write.
+
+**The reference's start sequence (ticked runs, each a `gmsl_tsc_sync`
+switch).** Real-hardware finding (2026-09-29): 24 ticked app runs never
+locked - each Start left the two cameras a random, FIXED 0.3-23.5 ms apart
+(the reference's own no-TSC signature), with the LED-based cross Optical
+Sync agreeing with Global TS to ~1 ms, while `check_d585_sync_v4l2.py` on
+the same rig locked to ~0.1 ms on all 9 starts. The app now follows the
+reference by default: `tsc_before_mode` (TSC -> `settle_s` -> mode 2 ->
+streams; `False` = the old mode -> TSC -> settle), `enable_depth` (IR +
+color only in ticked runs; overrides `enable_depth_for_ir_sync` for them),
+and `start_cameras_back_to_back` (the controller opens each camera right
+after the previous one's `SessionEngineThread.capture_started` - emitted
+right after `pipeline.start()` returns - instead of the 2 s USB stagger;
+still one capture thread per camera, since reading frames doesn't decide
+exposure timing, only when each stream opens does). Which of the three
+matters is not yet known. Every ticked run writes `gmsl_tsc_sync.json`
+(settings + sync-check result) to its run folder so runs can be told apart.
+Still different from the reference: the TSC/mode are stopped and restored
+after every run (the reference keeps both between repeated starts).
+
+**Cross-camera match window is half a frame** when every stream shares one
+fps (50 ms otherwise). The matcher pairs each row with the nearest row that
+has ALREADY arrived; with 50 ms, cameras offset by e.g. +12 ms at 30 fps
+were paired one frame off (-21 ms) whenever the right partner hadn't
+arrived yet - up to 100% of a run's pairs (e.g. -47 ms reported for a
++19.6 ms offset at 15 fps). It exaggerated real offsets, never created
+them.
+
 `tools/tsc_trigger/ext_sync_gen.py` is the user's script vendored
 unchanged; `engine/gmsl_sync.KernelTscIO` imports its ioctl helpers
 lazily (it imports `fcntl`, Linux-only). Manual recovery if the app dies

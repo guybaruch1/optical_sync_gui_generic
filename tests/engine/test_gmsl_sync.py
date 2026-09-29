@@ -244,7 +244,7 @@ def test_kernel_tsc_io_permission_error_mentions_udev_rule():
         io.start(30, 50)
 
 
-def _gmsl_sync(order, kernel=None, tsc_start_error=None):
+def _gmsl_sync(order, kernel=None, tsc_start_error=None, laser_off=False, tsc_before_mode=False):
     kernel = kernel or _FakeKernel({"/dev/video2": 0, "/dev/video10": 0})
 
     def run(node, *args, timeout=15):
@@ -263,7 +263,8 @@ def _gmsl_sync(order, kernel=None, tsc_start_error=None):
     glob_fn = _fake_glob({"/dev/video-rs-*": NODES})
     sync = gmsl_sync.GmslTscSync(
         control="camera_sync_mode", sync_mode_value=2, fps=30, duty_percent=50, settle_s=5.0,
-        run_v4l2=run, tsc_io=tsc, sleep=lambda s: order.append(("sleep", s)), glob_fn=glob_fn,
+        laser_off=laser_off, tsc_before_mode=tsc_before_mode, run_v4l2=run, tsc_io=tsc, sleep=lambda s: order.append(("sleep", s)),
+        glob_fn=glob_fn,
     )
     return sync, kernel, tsc
 
@@ -686,3 +687,188 @@ def test_unticked_guard_still_requires_at_least_one_node():
     with pytest.raises(RuntimeError, match="at least 1"):
         gmsl_sync.reset_leftover_sync("camera_sync_mode", run_v4l2=_fake_v4l2({}), tsc_io=MagicMock(),
                                       glob_fn=_fake_glob({}))
+
+
+# --- Projector off via V4L2 for GMSL TSC sync runs (reference script). ---
+
+class _FakeControls:
+    """Per-(node, control) values answering -L/-C/-c for both
+    camera_sync_mode and laser_power_on_off."""
+
+    def __init__(self, values, fail_write=(), ignore_write=(), missing=()):
+        self.values = dict(values)
+        self.fail_write = set(fail_write)
+        self.ignore_write = set(ignore_write)
+        self.missing = set(missing)
+        self.writes = []
+
+    def __call__(self, node, *args, timeout=15):
+        if args == ("-L",):
+            return 0, "camera_sync_mode 0x009a4010 (menu) : min=0 max=2 default=0 value={}".format(
+                self.values[(node, "camera_sync_mode")]), ""
+        if len(args) == 2 and args[0] == "-C":
+            key = (node, args[1])
+            if key in self.missing or key not in self.values:
+                return 1, "", "unknown control"
+            return 0, "{}: {}".format(args[1], self.values[key]), ""
+        if len(args) == 2 and args[0] == "-c":
+            name, value = args[1].split("=")
+            key = (node, name)
+            self.writes.append((node, name, int(value)))
+            if key in self.fail_write:
+                return 1, "", "VIDIOC_S_EXT_CTRLS: failed"
+            if key not in self.ignore_write:
+                self.values[key] = int(value)
+            return 0, "", ""
+        raise AssertionError(args)
+
+
+def _laser_values(laser=1, mode=0):
+    values = {}
+    for node in NODES:
+        values[(node, "camera_sync_mode")] = mode
+        values[(node, "laser_power_on_off")] = laser
+    return values
+
+
+def _laser_sync(kernel, laser_off=True):
+    return gmsl_sync.GmslTscSync(
+        control="camera_sync_mode", sync_mode_value=2, fps=30, duty_percent=50, settle_s=0,
+        laser_off=laser_off, run_v4l2=kernel, tsc_io=MagicMock(), sleep=lambda s: None,
+        glob_fn=_fake_glob({"/dev/video-rs-*": NODES}))
+
+
+def test_engage_switches_projector_off_and_disengage_restores_it():
+    kernel = _FakeControls(_laser_values(laser=1))
+    sync = _laser_sync(kernel)
+
+    sync.engage()
+    assert all(kernel.values[(node, "laser_power_on_off")] == 0 for node in NODES)
+    assert sync.warnings == []
+
+    assert sync.disengage() == []
+    assert all(kernel.values[(node, "laser_power_on_off")] == 1 for node in NODES)
+    assert all(kernel.values[(node, "camera_sync_mode")] == 0 for node in NODES)
+
+
+def test_projector_already_off_is_not_rewritten():
+    kernel = _FakeControls(_laser_values(laser=0))
+
+    _laser_sync(kernel).engage()
+
+    assert not any(name == "laser_power_on_off" for _, name, _ in kernel.writes)
+
+
+def test_projector_that_cannot_be_switched_off_is_a_warning_not_a_failure():
+    kernel = _FakeControls(_laser_values(laser=1), fail_write={(NODES[0], "laser_power_on_off")},
+                           missing={(NODES[1], "laser_power_on_off")})
+    sync = _laser_sync(kernel)
+
+    sync.engage()  # must not raise
+
+    assert len(sync.warnings) == 2
+    assert any(NODES[0] in warning for warning in sync.warnings)
+    assert any(NODES[1] in warning for warning in sync.warnings)
+    assert sync.verify() == []
+
+
+def test_verify_switches_projector_off_again_if_stream_start_turned_it_on():
+    kernel = _FakeControls(_laser_values(laser=1))
+    sync = _laser_sync(kernel)
+    sync.engage()
+    kernel.values[(NODES[1], "laser_power_on_off")] = 1  # driver re-enabled it at stream start
+
+    assert sync.verify() == []
+
+    assert kernel.values[(NODES[1], "laser_power_on_off")] == 0
+    assert sync.warnings == []
+
+
+def test_verify_warns_when_projector_keeps_coming_back_on():
+    kernel = _FakeControls(_laser_values(laser=1))
+    sync = _laser_sync(kernel)
+    sync.engage()
+    kernel.values[(NODES[1], "laser_power_on_off")] = 1
+    kernel.ignore_write = {(NODES[1], "laser_power_on_off")}
+
+    assert sync.verify() == []  # the projector never fails the sync check
+
+    assert any("came back on" in warning for warning in sync.warnings)
+
+
+def test_laser_off_false_never_touches_the_projector():
+    kernel = _FakeControls(_laser_values(laser=1))
+    sync = _laser_sync(kernel, laser_off=False)
+
+    sync.engage()
+    sync.disengage()
+
+    assert not any(name == "laser_power_on_off" for _, name, _ in kernel.writes)
+
+
+def test_default_gmsl_settings_follow_the_reference():
+    assert gmsl_sync.DEFAULT_GMSL_TSC_SYNC["laser_off"] is True
+    assert gmsl_sync.DEFAULT_GMSL_TSC_SYNC["global_ts_skip_s"] == 10.0
+    sync = gmsl_sync.GmslTscSync(fps=30, **gmsl_sync.DEFAULT_GMSL_TSC_SYNC)
+    assert sync.global_ts_skip_s == 10.0
+
+
+# --- Reference order (the default): TSC -> settle -> mode -> streams. ---
+
+def test_default_engage_follows_the_reference_order_tsc_settle_then_mode():
+    order = []
+    sync, kernel, _ = _gmsl_sync(order, tsc_before_mode=True)
+
+    sync.engage()
+
+    assert order == [("tsc_start", 30, 50), ("sleep", 5.0),
+                     ("write", "/dev/video2", "camera_sync_mode=2"),
+                     ("write", "/dev/video10", "camera_sync_mode=2")]
+    assert kernel.values == {"/dev/video2": 2, "/dev/video10": 2}
+
+
+def test_reference_order_mode_failure_stops_the_trigger_and_raises():
+    order = []
+    kernel = _FakeKernel({"/dev/video2": 0, "/dev/video10": 0}, fail_write_on={"/dev/video10"})
+    sync, _, tsc = _gmsl_sync(order, kernel=kernel, tsc_before_mode=True)
+
+    with pytest.raises(RuntimeError, match="/dev/video10"):
+        sync.engage()
+
+    tsc.stop.assert_called_once()
+    assert kernel.values["/dev/video2"] == 0  # the node already written is put back
+    assert sync not in gmsl_sync._ENGAGED
+    sync.disengage()  # nothing left to undo - must not stop the TSC again
+    tsc.stop.assert_called_once()
+
+
+def test_reference_order_trigger_failure_writes_nothing():
+    order = []
+    sync, kernel, _ = _gmsl_sync(order, tsc_start_error=RuntimeError("ioctl failed"), tsc_before_mode=True)
+
+    with pytest.raises(RuntimeError, match="ioctl"):
+        sync.engage()
+
+    assert kernel.writes == []
+    assert ("sleep", 5.0) not in order
+
+
+def test_reference_order_disengage_stops_trigger_and_restores_mode():
+    order = []
+    sync, kernel, tsc = _gmsl_sync(order, kernel=_FakeKernel({"/dev/video2": 1, "/dev/video10": 0}),
+                                   tsc_before_mode=True)
+    sync.engage()
+
+    assert sync.disengage() == []
+
+    tsc.stop.assert_called_once()
+    assert kernel.values == {"/dev/video2": 1, "/dev/video10": 0}
+
+
+def test_run_level_switches_default_to_the_reference():
+    defaults = gmsl_sync.DEFAULT_GMSL_TSC_SYNC
+    assert defaults["tsc_before_mode"] is True
+    assert defaults["enable_depth"] is False
+    assert defaults["start_cameras_back_to_back"] is True
+    sync = gmsl_sync.GmslTscSync(fps=30, **defaults)
+    assert sync.enable_depth is False and sync.start_cameras_back_to_back is True

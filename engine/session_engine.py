@@ -80,12 +80,17 @@ class SessionEngineThread(QThread):
     stats_ready = Signal(dict)
     session_finished = Signal(list)
     error = Signal(str)
+    # Right after this camera's pipeline.start() returned - lets
+    # MultiCameraSessionController open the next camera back to back (GMSL
+    # TSC sync runs) instead of after a fixed stagger.
+    capture_started = Signal()
 
     def __init__(self, ctx, device_serial, pick_a, pick_b, camera_controls,
                  test_session, stream_a_xy=None, stream_b_xy=None, neighborhood_size=5,
                  scan_direction=None, switch_time_ms=None,
                  display_stride=10, position_gap_metric=None, dual_panel_config=None,
                  enable_depth_for_ir_sync=True, capture_global_ts=False, record_recent_frames=False,
+                 enable_global_time=False,
                  hardware_reset_before_start=False,
                  hardware_reset_settle_s=8.0, output_dir=None,
                  position_gap_outlier_threshold_ms=None, position_gap_outlier_max_snapshots=200,
@@ -111,6 +116,8 @@ class SessionEngineThread(QThread):
         # ContinuousCapture.__init__'s own capture_global_ts docstring for
         # why single-camera runs never set this.
         self.capture_global_ts = capture_global_ts
+        # GMSL TSC sync runs only - see ContinuousCapture's enable_global_time.
+        self.enable_global_time = enable_global_time
         # Cross-camera-only concept (backs gui/pages/multi_camera_live_session_page.py's
         # debug-image feature) - single-camera LiveSessionPage runs never
         # set this, since nothing there ever reads the buffer; recording
@@ -337,8 +344,10 @@ class SessionEngineThread(QThread):
                 self.device_serial, self.pick_a, self.pick_b,
                 enable_depth_for_ir_sync=self.enable_depth_for_ir_sync,
                 capture_global_ts=self.capture_global_ts,
+                enable_global_time=self.enable_global_time,
             )
             self._capture.start()
+            self.capture_started.emit()
             self._start_time = time.time()
 
             def on_row(row):

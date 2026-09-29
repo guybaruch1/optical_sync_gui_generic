@@ -666,3 +666,46 @@ def test_real_led_detection_metric_key_names_connect_end_to_end_for_single_strea
     # Slave-side exclusion: the slave's own "miss" carries through.
     assert cross_rows[2]["position_gap_ms"] is None
     assert cross_rows[2]["position_gap_ms_exclude_reason"] == "miss"
+
+
+# --- GMSL TSC sync runs: Global TS Latency ignores the first seconds while
+# librealsense's device-to-host clock fit converges (reference script). ---
+
+def _feed_synced(reconciler, n_frames, period_us=33_333, start_us=1_000_000):
+    rows = []
+    for n in range(n_frames):
+        ts = start_us + n * period_us
+        reconciler.ingest_row("cam1", _row(n, ts))
+        rows.extend(reconciler.ingest_row("cam2", _row(n, ts + 150)))
+    return rows
+
+
+def test_global_ts_warmup_excludes_only_the_first_seconds_of_global_ts_gap():
+    reconciler = CrossCameraReconciler([_spec()], global_ts_warmup_s=1.0)
+
+    rows = _feed_synced(reconciler, 60)  # 2 s at 30 fps
+
+    early = [row for row in rows if row["master_global_ts_us"] - 1_000_000 < 1_000_000]
+    late = [row for row in rows if row["master_global_ts_us"] - 1_000_000 >= 1_000_000]
+    assert early and late
+    assert all(row["global_ts_gap_us_excluded"] and row["global_ts_gap_us_exclude_reason"] == "global_ts_warmup"
+               for row in early)
+    assert not any(row["global_ts_gap_us_excluded"] for row in late)
+    # Matching and HW TS Latency are untouched by the warm-up.
+    assert len(rows) == 60
+    assert not any(row["pairing_gap_us_excluded"] for row in rows)
+
+
+def test_no_global_ts_warmup_by_default():
+    rows = _feed_synced(CrossCameraReconciler([_spec()]), 10)
+
+    assert not any(row["global_ts_gap_us_excluded"] for row in rows)
+
+
+def test_global_ts_warmup_keeps_a_real_exclusion_reason():
+    reconciler = CrossCameraReconciler([_spec(outlier_threshold_us=100)], global_ts_warmup_s=10.0)
+
+    reconciler.ingest_row("cam1", _row(0, 1_000_000))
+    [row] = reconciler.ingest_row("cam2", _row(0, 1_000_500))  # 500 us > 100 us outlier threshold
+
+    assert row["global_ts_gap_us_exclude_reason"] == "syncer_outlier"

@@ -23,7 +23,7 @@ No Qt, no pyrealsense2 - pure Python, fully unit-testable with fake row
 dicts, same layering convention as engine.test_session/engine.metrics.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from engine.metrics import FramePairSample, PairingGapMetric, compute_position_gap
 
@@ -194,8 +194,16 @@ class CrossCameraReconciler:
     as expected, this number stays near zero with no drift, directly
     comparable pair-for-pair against its HW-ts counterpart, which may not."""
 
-    def __init__(self, pair_specs, buffer_seconds=1.0, max_match_gap_us=50_000.0, fps_hint=30.0):
+    def __init__(self, pair_specs, buffer_seconds=1.0, max_match_gap_us=50_000.0, fps_hint=30.0,
+                 global_ts_warmup_s=0.0):
         self._pair_specs = pair_specs
+        # GMSL TSC sync runs: Global TS Latency samples from the first
+        # global_ts_warmup_s of each spec's matched pairs are excluded
+        # ("global_ts_warmup") - librealsense's device-to-host clock fit
+        # has not converged yet (the reference script discards 10 s). 0 =
+        # today's behavior. Matching itself is unaffected.
+        self._global_ts_warmup_us = global_ts_warmup_s * 1_000_000.0
+        self._first_global_ts_us = [None] * len(pair_specs)
         self._max_match_gap_us = max_match_gap_us
         buffer_len = max(1, int(fps_hint * buffer_seconds))
         self._pair_counter = 0
@@ -312,6 +320,11 @@ class CrossCameraReconciler:
             stream_b_frame_drop=slave_frame_drop,
         )
         global_result = spec.global_ts_gap_metric.update(global_sample)
+        if self._first_global_ts_us[index] is None:
+            self._first_global_ts_us[index] = master_global_ts
+        if (not global_result.excluded
+                and master_global_ts - self._first_global_ts_us[index] < self._global_ts_warmup_us):
+            global_result = replace(global_result, excluded=True, exclude_reason="global_ts_warmup")
 
         position_gap_ms, position_gap_excluded, position_gap_exclude_reason = _compute_cross_position_gap(
             spec, master_row, slave_row, master_frame_drop, slave_frame_drop,

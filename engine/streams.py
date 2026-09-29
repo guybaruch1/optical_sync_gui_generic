@@ -708,8 +708,26 @@ def _read_global_ts_us(frame_a, frame_b=None):
     return frame_a.get_timestamp() * 1000.0, global_ts_b
 
 
+def enable_global_time(device):
+    """Sets global_time_enabled=1 on every sensor of `device` that supports
+    it - what the reference check_d585_sync_v4l2.py does before AND right
+    after each pipeline.start() on the GMSL D585 rig. Best-effort: returns
+    one message per sensor that refused; _read_global_ts_us still fails
+    loudly later if frames don't actually arrive in the global domain."""
+    problems = []
+    for sensor in device.query_sensors():
+        if not sensor.supports(rs.option.global_time_enabled):
+            continue
+        try:
+            sensor.set_option(rs.option.global_time_enabled, 1)
+        except Exception as exc:
+            problems.append("{}: {}".format(sensor.get_info(rs.camera_info.name), exc))
+    return problems
+
+
 class ContinuousCapture:
-    def __init__(self, device_serial, pick_a, pick_b, enable_depth_for_ir_sync=True, capture_global_ts=False):
+    def __init__(self, device_serial, pick_a, pick_b, enable_depth_for_ir_sync=True, capture_global_ts=False,
+                 enable_global_time=False):
         self.device_serial = device_serial
         self.pick_a = pick_a
         self.pick_b = pick_b
@@ -722,6 +740,11 @@ class ContinuousCapture:
         # Global TS Latency metric), so single-camera runs never need or
         # request it.
         self.capture_global_ts = capture_global_ts
+        # GMSL TSC sync runs only: explicitly enable global time on every
+        # sensor before and after pipeline.start(), like the reference
+        # script (see enable_global_time). Off = today's behavior (rely on
+        # the SDK default).
+        self.enable_global_time = enable_global_time
         # Set on start() to whether a depth stream was actually requested
         # (self._depth_sync_stream() is not None) - not a resolve/success
         # check, just what start() attempted, for callers that want to report.
@@ -809,9 +832,15 @@ class ContinuousCapture:
         # stoppable, and pyrealsense2 itself raises "stop() cannot be called
         # before start()" for that. If start(config) raises, self._pipeline
         # stays None (its __init__ default), so stop() correctly no-ops.
+        if self.enable_global_time:
+            enable_global_time(find_device_by_serial(rs.context(), self.device_serial))
         pipeline = rs.pipeline()
-        pipeline.start(config)
+        profile = pipeline.start(config)
         self._pipeline = pipeline
+        if self.enable_global_time:
+            # Again on the device the pipeline actually opened - the
+            # reference re-applies it here too.
+            enable_global_time(profile.get_device())
 
     def _get_frame(self, frameset, pick):
         if pick["stream_type"] == rs.stream.infrared:

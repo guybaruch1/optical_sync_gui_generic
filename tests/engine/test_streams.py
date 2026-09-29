@@ -1310,3 +1310,74 @@ def test_frames_with_diagnostics_single_pick_yields_none_for_stream_b():
     assert image_a.shape == (2, 4)
     assert (image_b, ts_b, num_b, global_b) == (None, None, None, None)
     assert (ts_a, num_a, global_a) == (1234.0, 7, 5000.0)
+
+
+# --- GMSL TSC sync runs: global time explicitly enabled around every
+# pipeline.start(), like the reference check_d585_sync_v4l2.py. ---
+
+class _FakeGlobalTimeSensor:
+    def __init__(self, name, supported=True, fails=False):
+        self._name, self._supported, self._fails = name, supported, fails
+        self.set_calls = []
+
+    def supports(self, option):
+        return self._supported and option == rs.option.global_time_enabled
+
+    def set_option(self, option, value):
+        if self._fails:
+            raise RuntimeError("option not settable")
+        self.set_calls.append((option, value))
+
+    def get_info(self, info):
+        return self._name
+
+
+class _FakeGlobalTimeDevice:
+    def __init__(self, sensors):
+        self._sensors = sensors
+
+    def query_sensors(self):
+        return self._sensors
+
+
+def test_enable_global_time_sets_every_supporting_sensor_and_reports_refusals():
+    from engine.streams import enable_global_time
+    stereo, rgb = _FakeGlobalTimeSensor("Stereo Module"), _FakeGlobalTimeSensor("RGB Camera", fails=True)
+    motion = _FakeGlobalTimeSensor("Motion Module", supported=False)
+
+    problems = enable_global_time(_FakeGlobalTimeDevice([stereo, rgb, motion]))
+
+    assert stereo.set_calls == [(rs.option.global_time_enabled, 1)]
+    assert motion.set_calls == []
+    assert problems == ["RGB Camera: option not settable"]
+
+
+class _FakeStartedPipeline:
+    def __init__(self, device):
+        self._device = device
+
+    def start(self, config):
+        device = self._device
+
+        class _Profile:
+            def get_device(self):
+                return device
+        return _Profile()
+
+    def stop(self):
+        pass
+
+
+def test_continuous_capture_enables_global_time_before_and_after_start_only_when_asked():
+    for flag, expected_calls in ((True, 1), (False, 0)):
+        before_device = _FakeGlobalTimeDevice([_FakeGlobalTimeSensor("Stereo Module")])
+        after_device = _FakeGlobalTimeDevice([_FakeGlobalTimeSensor("Stereo Module")])
+        capture = ContinuousCapture("SN1", _ir_pick(), _color_pick(), enable_depth_for_ir_sync=False,
+                                    enable_global_time=flag)
+        with patch("engine.streams.rs.pipeline", return_value=_FakeStartedPipeline(after_device)), \
+             patch("engine.streams.find_device_by_serial", return_value=before_device), \
+             patch("engine.streams.rs.context"):
+            capture.start()
+
+        assert len(before_device._sensors[0].set_calls) == expected_calls
+        assert len(after_device._sensors[0].set_calls) == expected_calls

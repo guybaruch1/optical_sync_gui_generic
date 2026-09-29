@@ -1499,7 +1499,10 @@ def test_start_with_gmsl_ticked_skips_genlock_and_passes_config(qapp, monkeypatc
     assert critical == []
     assert all(c["config"]["inter_cam_sync_value"] is None for c in captured["cameras"])
     assert captured["gmsl_tsc_sync"] == {"control": "camera_sync_mode", "sync_mode_value": 2,
-                                         "duty_percent": 50, "settle_s": 5.0, "fps": 30}
+                                         "duty_percent": 50, "settle_s": 5.0,
+                                         "laser_off": True, "global_ts_skip_s": 10.0,
+                                         "tsc_before_mode": True, "enable_depth": False,
+                                         "start_cameras_back_to_back": True, "fps": 30}
 
 
 def test_start_with_gmsl_ticked_blocks_on_fps_mismatch(qapp, monkeypatch, tmp_path):

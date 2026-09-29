@@ -1,3 +1,5 @@
+import gc
+import os
 from unittest.mock import MagicMock
 
 import cv2
@@ -9,6 +11,18 @@ from PySide6.QtWidgets import QMessageBox
 
 from gui.pages.multi_camera_live_session_page import MultiCameraLiveSessionPage
 
+
+
+@pytest.fixture(autouse=True)
+def _collect_finished_pages():
+    # This page holds pyqtgraph plots and controller signal connections in
+    # reference cycles, so a finished test's page is freed by Python's
+    # garbage collector at a random later moment - once that was halfway
+    # through the NEXT test's page construction, crashing pyqtgraph there
+    # ("Internal C++ object (LabelItem) already deleted"). Free it at this
+    # test's own teardown instead.
+    yield
+    gc.collect()
 
 class _FakeSessionEngineThread(QObject):
     """Same fake used by tests/engine/test_multi_camera_session.py - a real
@@ -1234,7 +1248,7 @@ def test_start_all_sessions_surfaces_gmsl_engage_failure_and_unlocks_ui(qapp, tm
     # a console-only traceback, leaving the page stuck "running".
     from PySide6.QtWidgets import QMessageBox
     shown = []
-    monkeypatch.setattr(QMessageBox, "critical", staticmethod(lambda *a, **k: shown.append(a) or QMessageBox.Ok))
+    monkeypatch.setattr(QMessageBox, "critical", staticmethod(lambda parent, *a, **k: shown.append(a) or QMessageBox.Ok))
     page, fake_threads, created = _page_with_fake_gmsl()
 
     def failing_factory(**kwargs):
@@ -1361,7 +1375,7 @@ def test_mixed_run_keeps_intra_camera_metrics_for_the_two_stream_camera(qapp, tm
 def test_gmsl_sync_check_failure_pops_up_and_success_shows_status(qapp, tmp_path, monkeypatch):
     from PySide6.QtWidgets import QMessageBox
     shown = []
-    monkeypatch.setattr(QMessageBox, "critical", staticmethod(lambda *a, **k: shown.append(a) or QMessageBox.Ok))
+    monkeypatch.setattr(QMessageBox, "critical", staticmethod(lambda parent, *a, **k: shown.append(a) or QMessageBox.Ok))
     page, _, _ = _page_with_fake_gmsl()
     page.set_cameras(object(), _two_cameras(tmp_path), gmsl_tsc_sync=GMSL_CONFIG)
     page.start_all_sessions()
@@ -1372,5 +1386,94 @@ def test_gmsl_sync_check_failure_pops_up_and_success_shows_status(qapp, tmp_path
     assert "30 Hz" in page.status_label.text()
 
     page._controller.gmsl_sync_failed.emit("camera_sync_mode on /dev/video2 reads 0")
-    assert len(shown) == 1 and "reads 0" in shown[0][2]
+    assert len(shown) == 1 and "reads 0" in shown[0][1]
     assert "failed" in page.status_label.text()
+
+
+def test_gmsl_run_enables_global_time_and_leaves_the_sdk_emitter_alone(qapp, tmp_path):
+    page, fake_threads, _ = _page_with_fake_gmsl()
+    page.set_cameras(object(), _two_cameras(tmp_path), gmsl_tsc_sync={**GMSL_CONFIG, "laser_off": True})
+
+    page.start_all_sessions()
+
+    assert fake_threads
+    for thread in fake_threads.values():
+        assert thread.kwargs["enable_global_time"] is True
+        assert thread.kwargs["camera_controls"]["emitter_enabled"] is None
+
+
+def test_non_gmsl_run_keeps_capture_defaults(qapp, tmp_path):
+    page, fake_threads, _ = _page_with_fake_gmsl()
+    cameras = _two_cameras(tmp_path)
+    page.set_cameras(object(), cameras)
+
+    page.start_all_sessions()
+
+    assert fake_threads
+    for thread in fake_threads.values():
+        assert "enable_global_time" not in thread.kwargs
+        assert thread.kwargs["camera_controls"] == cameras[0]["config"]["camera_controls"]
+
+
+def test_verified_status_mentions_warmup_and_projector_warnings(qapp, tmp_path):
+    page, _, created = _page_with_fake_gmsl()
+    page.set_cameras(object(), _two_cameras(tmp_path), gmsl_tsc_sync={**GMSL_CONFIG, "global_ts_skip_s": 10.0})
+    page.start_all_sessions()
+    created[0].warnings = ["/dev/video2: could not switch the projector off (failed)"]
+
+    page._controller.gmsl_sync_verified.emit(["/dev/video2", "/dev/video10"])
+
+    text = page.status_label.text()
+    assert "first 10 s" in text and "projector" in text
+
+
+def test_gmsl_run_follows_the_depth_switch(qapp, tmp_path):
+    for enable_depth in (False, True):
+        page, fake_threads, _ = _page_with_fake_gmsl()
+        page.set_cameras(object(), _two_cameras(tmp_path), gmsl_tsc_sync={**GMSL_CONFIG, "enable_depth": enable_depth})
+
+        page.start_all_sessions()
+
+        assert fake_threads
+        assert all(t.kwargs["enable_depth_for_ir_sync"] is enable_depth for t in fake_threads.values())
+
+
+def test_gmsl_run_writes_its_settings_and_result_to_the_run_folder(qapp, tmp_path):
+    import json
+    page, _, _ = _page_with_fake_gmsl()
+    page.set_cameras(object(), _two_cameras(tmp_path), gmsl_tsc_sync=GMSL_CONFIG)
+    page.start_all_sessions()
+    record_path = os.path.join(page._run_dir, "gmsl_tsc_sync.json")
+
+    with open(record_path, encoding="utf-8") as handle:
+        record = json.load(handle)
+    assert record["settings"] == GMSL_CONFIG
+    assert record["result"].startswith("engaged")
+
+    page._controller.gmsl_sync_verified.emit(["/dev/video2", "/dev/video10"])
+    with open(record_path, encoding="utf-8") as handle:
+        record = json.load(handle)
+    assert record["result"] == "verified" and record["nodes"] == ["/dev/video2", "/dev/video10"]
+
+
+def test_gmsl_run_record_keeps_the_failure_message(qapp, tmp_path, monkeypatch):
+    import json
+    from PySide6.QtWidgets import QMessageBox
+    monkeypatch.setattr(QMessageBox, "critical", staticmethod(lambda *a, **k: QMessageBox.Ok))
+    page, _, _ = _page_with_fake_gmsl()
+    page.set_cameras(object(), _two_cameras(tmp_path), gmsl_tsc_sync=GMSL_CONFIG)
+    page.start_all_sessions()
+
+    page._controller.gmsl_sync_failed.emit("camera_sync_mode on /dev/video2 reads 0")
+
+    with open(os.path.join(page._run_dir, "gmsl_tsc_sync.json"), encoding="utf-8") as handle:
+        record = json.load(handle)
+    assert record["result"] == "failed" and "reads 0" in record["message"]
+
+
+def test_non_gmsl_run_writes_no_gmsl_record(qapp, tmp_path):
+    page, _, _ = _page_with_fake_gmsl()
+    page.set_cameras(object(), _two_cameras(tmp_path))
+    page.start_all_sessions()
+
+    assert not os.path.exists(os.path.join(page._run_dir, "gmsl_tsc_sync.json"))
