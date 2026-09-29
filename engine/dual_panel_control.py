@@ -105,13 +105,15 @@ _dual_panel_primed = {"primed": False, "switch_time_ms": None, "scan_direction":
 _single_panel_target = {"config": None, "stream": None, "exposed": False}
 
 
-def single_panel_stream_for_picks(pick_a, pick_b):
+def single_panel_stream_for_picks(pick_a, pick_b=None):
     """Which panel a single-panel test needs on a two-panel rig: both
     infrared -> "stream_a" (the IR panel, stream_a_panel_port), both color
     -> "stream_b" (the color panel), anything else -> None (leave the hub
-    alone - an IR-vs-RGB test on one panel has no single right answer)."""
+    alone - an IR-vs-RGB test on one panel has no single right answer).
+    pick_b is None for a single-stream camera - its one stream alone
+    decides the panel."""
     import pyrealsense2 as rs
-    types = {pick_a["stream_type"], pick_b["stream_type"]}
+    types = {pick["stream_type"] for pick in (pick_a, pick_b) if pick is not None}
     if types == {rs.stream.infrared}:
         return "stream_a"
     if types == {rs.stream.color}:

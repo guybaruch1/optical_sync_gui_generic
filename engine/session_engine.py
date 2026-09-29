@@ -138,6 +138,8 @@ class SessionEngineThread(QThread):
         self.scan_direction = scan_direction
         self.switch_time_ms = switch_time_ms
         self.display_stride = display_stride
+        # May be a LedDetectionMetric for a single-stream camera (same
+        # last_stream_*_on_mask attributes).
         self.position_gap_metric = position_gap_metric
         # Optical Sync outlier debug images - see _maybe_save_position_gap_outlier.
         # output_dir/position_gap_outlier_threshold_ms are both None-able (rather
@@ -245,6 +247,26 @@ class SessionEngineThread(QThread):
                     return stream_a_image, stream_b_image
         return None
 
+    def _emit_frames(self, stream_a_image, stream_b_image, pair_index):
+        # Read+copy here, synchronously, still within the same
+        # acquisition-loop iteration that just processed this exact
+        # pair_index (process_pair() runs immediately before
+        # on_frames() in AcquisitionLoop.run_until_stopped) - the
+        # copy is what makes it safe to read on the GUI thread
+        # later, since last_stream_a_on_mask/last_stream_b_on_mask will keep
+        # changing underneath it on this thread in the meantime.
+        if self.position_gap_metric is not None:
+            stream_a_mask = self.position_gap_metric.last_stream_a_on_mask
+            stream_b_mask = self.position_gap_metric.last_stream_b_on_mask
+            stream_a_mask = stream_a_mask.copy() if stream_a_mask is not None else None
+            stream_b_mask = stream_b_mask.copy() if stream_b_mask is not None else None
+        else:
+            stream_a_mask = stream_b_mask = None
+        self.frame_ready.emit("stream_a", stream_a_image, pair_index, stream_a_mask)
+        # A single-stream camera (pick_b is None) has no stream B frame at all.
+        if self.pick_b is not None:
+            self.frame_ready.emit("stream_b", stream_b_image, pair_index, stream_b_mask)
+
     def run(self):
         import time
 
@@ -319,24 +341,6 @@ class SessionEngineThread(QThread):
             self._capture.start()
             self._start_time = time.time()
 
-            def on_frames(stream_a_image, stream_b_image, pair_index):
-                # Read+copy here, synchronously, still within the same
-                # acquisition-loop iteration that just processed this exact
-                # pair_index (process_pair() runs immediately before
-                # on_frames() in AcquisitionLoop.run_until_stopped) - the
-                # copy is what makes it safe to read on the GUI thread
-                # later, since last_stream_a_on_mask/last_stream_b_on_mask will keep
-                # changing underneath it on this thread in the meantime.
-                if self.position_gap_metric is not None:
-                    stream_a_mask = self.position_gap_metric.last_stream_a_on_mask
-                    stream_b_mask = self.position_gap_metric.last_stream_b_on_mask
-                    stream_a_mask = stream_a_mask.copy() if stream_a_mask is not None else None
-                    stream_b_mask = stream_b_mask.copy() if stream_b_mask is not None else None
-                else:
-                    stream_a_mask = stream_b_mask = None
-                self.frame_ready.emit("stream_a", stream_a_image, pair_index, stream_a_mask)
-                self.frame_ready.emit("stream_b", stream_b_image, pair_index, stream_b_mask)
-
             def on_row(row):
                 self.row_ready.emit(row)
 
@@ -348,7 +352,7 @@ class SessionEngineThread(QThread):
                 self._maybe_save_position_gap_outlier(stream_a_image, stream_b_image, row)
 
             callbacks = AcquisitionCallbacks(
-                on_frames=on_frames, on_row=on_row, on_stats=on_stats, on_frame_pair=on_frame_pair,
+                on_frames=self._emit_frames, on_row=on_row, on_stats=on_stats, on_frame_pair=on_frame_pair,
             )
             loop = AcquisitionLoop(
                 self._frame_pairs_with_brightness(), self.test_session, callbacks,
