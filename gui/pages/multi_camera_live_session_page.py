@@ -55,7 +55,12 @@ reach this page in the running app at all - gui/main_window.py's
 _on_start_multi_camera_session_requested routes exactly 1 configured camera
 to gui/pages/live_session_page.py's LiveSessionPage instead - but this
 page's own single-camera branch is kept for direct unit-test coverage and
-as defensive robustness against ever being reached with 1 camera.)"""
+as defensive robustness against ever being reached with 1 camera.)
+
+A camera may also be configured with ONE stream (pick_b None): it runs
+LedDetectionMetric only (no intra-camera HW TS Latency/Optical Sync) and
+gets a slim tab with a single video panel - the Cross-Camera Sync tab is
+its real result."""
 
 import os
 
@@ -72,7 +77,7 @@ from gui.widgets.stats_panel import StatsPanel
 from engine.multi_camera_session import CameraSessionSpec, MultiCameraSessionController
 from engine.gmsl_sync import GmslTscSync, GmslFreeRunGuard
 from engine.cross_camera_reconciler import build_cross_camera_pair_specs
-from engine.metrics import PairingGapMetric, PositionGapMetric, is_position_gap_debug_outlier
+from engine.metrics import PairingGapMetric, PositionGapMetric, LedDetectionMetric, is_position_gap_debug_outlier
 from engine.test_session import TestSession, TestSessionConfig
 from engine.streams import stream_slug
 from domain.run_output import create_run_dir, create_camera_subdir
@@ -100,7 +105,13 @@ class _IdentitySpec:
 
 
 def _stream_identities(config):
-    return {"stream_a": stream_slug(config["pick_a"]), "stream_b": stream_slug(config["pick_b"])}
+    # A single-stream camera (pick_b None) only has a stream A identity -
+    # engine.cross_camera_reconciler.build_cross_camera_pair_specs already
+    # skips identities a camera doesn't have.
+    identities = {"stream_a": stream_slug(config["pick_a"])}
+    if config["pick_b"] is not None:
+        identities["stream_b"] = stream_slug(config["pick_b"])
+    return identities
 
 
 def _row_role_for_identity(config, identity):
@@ -302,8 +313,8 @@ class MultiCameraLiveSessionPage(QWidget):
 
         roles = _camera_roles(cameras)
         for camera in cameras:
-            panel = CameraLiveSessionPanel(camera["camera_id"])
             config = camera["config"]
+            panel = CameraLiveSessionPanel(camera["camera_id"], single_stream=config["pick_b"] is None)
             panel.set_camera_labels(
                 camera["label"], config["device_serial"], config["stream_a_label"], config["stream_b_label"]
             )
@@ -520,18 +531,29 @@ class MultiCameraLiveSessionPage(QWidget):
             config = camera["config"]
             panel = self._panels[camera_id]
 
-            position_gap_metric = PositionGapMetric(
-                stream_a_threshold=config["stream_a_threshold"], stream_b_threshold=config["stream_b_threshold"],
-                num_leds=config["num_leds"], switch_time_ms=self._last_confirmed_switch_time_ms,
-                warmup_pairs_to_skip=config["warmup_pairs_to_skip"],
-            )
-            metrics = [
-                PairingGapMetric(outlier_threshold_us=config["pairing_gap_outlier_threshold_us"]),
-                position_gap_metric,
-            ]
+            single_stream = config["pick_b"] is None
+            if single_stream:
+                # One stream, no intra-camera sync - only the detected LED
+                # (for the cross-camera Optical Sync) is measured per camera.
+                position_gap_metric = LedDetectionMetric(
+                    stream_a_threshold=config["stream_a_threshold"],
+                    warmup_pairs_to_skip=config["warmup_pairs_to_skip"],
+                )
+                metrics = [position_gap_metric]
+            else:
+                position_gap_metric = PositionGapMetric(
+                    stream_a_threshold=config["stream_a_threshold"], stream_b_threshold=config["stream_b_threshold"],
+                    num_leds=config["num_leds"], switch_time_ms=self._last_confirmed_switch_time_ms,
+                    warmup_pairs_to_skip=config["warmup_pairs_to_skip"],
+                )
+                metrics = [
+                    PairingGapMetric(outlier_threshold_us=config["pairing_gap_outlier_threshold_us"]),
+                    position_gap_metric,
+                ]
             test_session = TestSession(TestSessionConfig(
                 metrics=metrics, duration_s=duration_s,
-                stream_a_fps=config["pick_a"]["fps"], stream_b_fps=config["pick_b"]["fps"],
+                stream_a_fps=config["pick_a"]["fps"],
+                stream_b_fps=None if single_stream else config["pick_b"]["fps"],
                 frame_drop_threshold_factor=config["frame_drop_threshold_factor"],
             ))
             test_session.start()

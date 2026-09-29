@@ -1295,3 +1295,64 @@ def test_start_all_sessions_runs_free_run_guard_and_reports_reset(qapp, tmp_path
     assert page._controller._gmsl_sync is guards[0]
     guards[0].engage.assert_called_once()
     assert "left over" in page.status_label.text()
+
+
+def _single_stream_config(tmp_path, **overrides):
+    return _camera_config(
+        tmp_path, pick_b=None, stream_b_threshold=None, stream_b_xy=None, stream_b_roi=None,
+        stream_b_label=None, **overrides,
+    )
+
+
+def _two_single_stream_cameras(tmp_path):
+    return [
+        {"camera_id": "cam1", "label": "D455 A", "is_master": True,
+         "config": _single_stream_config(tmp_path, device_serial="SN1")},
+        {"camera_id": "cam2", "label": "D455 B", "is_master": False,
+         "config": _single_stream_config(tmp_path, device_serial="SN2")},
+    ]
+
+
+def test_stream_identities_omit_stream_b_for_a_single_stream_camera(tmp_path):
+    from gui.pages.multi_camera_live_session_page import _stream_identities
+    assert _stream_identities(_single_stream_config(tmp_path)) == {"stream_a": "infrared1"}
+
+
+def test_single_stream_cameras_get_slim_panels_and_one_cross_series(qapp, tmp_path):
+    page, _ = _page_with_fake_threads()
+    page.set_cameras(object(), _two_single_stream_cameras(tmp_path))
+    assert all(panel.stream_b_panel is None for panel in page._panels.values())
+    assert page._cross_pair_series_keys == {("cam2", "infrared1"): "infrared1"}
+
+
+def test_start_all_sessions_uses_led_detection_metric_for_single_stream_cameras(qapp, tmp_path):
+    from engine.metrics import LedDetectionMetric
+    page, fake_threads = _page_with_fake_threads()
+    page.set_cameras(object(), _two_single_stream_cameras(tmp_path))
+
+    page.start_all_sessions()
+
+    kwargs = fake_threads["SN1"].kwargs
+    assert kwargs["pick_b"] is None
+    assert kwargs["stream_b_xy"] is None
+    assert isinstance(kwargs["position_gap_metric"], LedDetectionMetric)
+    metric_names = [m.name for m in kwargs["test_session"].config.metrics]
+    assert metric_names == ["led_detection"]
+    assert kwargs["test_session"].config.stream_b_fps is None
+
+
+def test_mixed_run_keeps_intra_camera_metrics_for_the_two_stream_camera(qapp, tmp_path):
+    page, fake_threads = _page_with_fake_threads()
+    cameras = [
+        {"camera_id": "cam1", "label": "D455 A", "is_master": True,
+         "config": _single_stream_config(tmp_path, device_serial="SN1")},
+        {"camera_id": "cam2", "label": "D455 B", "is_master": False,
+         "config": _camera_config(tmp_path, device_serial="SN2")},
+    ]
+    page.set_cameras(object(), cameras)
+
+    page.start_all_sessions()
+
+    assert [m.name for m in fake_threads["SN2"].kwargs["test_session"].config.metrics] == [
+        "pairing_gap_us", "position_gap_ms"]
+    assert page._panels["cam2"].stream_b_panel is not None
