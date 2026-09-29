@@ -53,17 +53,26 @@ does its own full-frame grayscale conversion per call and would lag on a
 color stream if run on every single tick. "Continue to Live Test" persists
 whatever the current positions are (retuned or original, a safe no-op
 rewrite if untouched) to config.yaml via update_config_leds too, not just
-to Live Session in-memory - same as Calibration's own original write."""
+to Live Session in-memory - same as Calibration's own original write.
+
+When no threshold finds every LED, "Edit LED positions..." opens
+gui.widgets.led_position_editor on the same cropped all-on frame: add,
+move and delete circles by mouse. OK hands the edited list to the SAME
+commit step the slider uses (_commit_detection_threshold), so grid order,
+per-LED on/off sampling and the config.yaml write are unchanged. Once a
+stream has hand edits, moving its slider or Reset to Auto asks before
+re-detecting over them."""
 
 import numpy as np
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QSpinBox, QDoubleSpinBox, QSlider, QLabel, QFrame,
-    QScrollArea, QApplication, QMessageBox,
+    QScrollArea, QApplication, QMessageBox, QDialog,
 )
 from PySide6.QtCore import Signal, Qt, QTimer
 
 from gui.widgets.video_panel import VideoPanel
+from gui.widgets.led_position_editor import LedPositionEditorDialog
 from gui.pages.live_session_page import _camera_display_name
 from engine.threshold_preview_thread import ThresholdPreviewThread
 from engine.led_panel import LEDPanel
@@ -140,6 +149,14 @@ class ThresholdTuningPage(QWidget):
         self._stream_b_detection_commit_timer.timeout.connect(lambda: self._commit_detection_threshold("stream_b"))
         self._stream_a_pending_centroids = []
         self._stream_b_pending_centroids = []
+        # Hand edits from the LED position editor, per stream - while True,
+        # re-detection (slider / Reset to Auto) asks before discarding them.
+        # _last_detection_value is what the slider goes back to on "No".
+        self._stream_a_manual_edits = False
+        self._stream_b_manual_edits = False
+        self._stream_a_last_detection_value = None
+        self._stream_b_last_detection_value = None
+        self._led_editor_factory = LedPositionEditorDialog
         # Tracked so a change to one stream's detected count can also
         # refresh the OTHER stream's mismatch styling (Live Session's math
         # needs both streams' LED counts to agree, not just each vs
@@ -307,6 +324,15 @@ class ThresholdTuningPage(QWidget):
         setattr(self, "{}_reset_to_auto_button".format(stream_name), reset_button)
         column.addWidget(reset_button)
 
+        edit_button = QPushButton("Edit LED positions...")
+        edit_button.setToolTip(
+            "Fix what no threshold gets right: add missing LEDs, move misplaced circles and "
+            "delete false detections by hand, on the calibration all-LEDs-on frame."
+        )
+        edit_button.clicked.connect(lambda: self._open_led_editor(stream_name))
+        setattr(self, "{}_edit_positions_button".format(stream_name), edit_button)
+        column.addWidget(edit_button)
+
         return column
 
     def _link_slider_and_spinbox(self, slider, spinbox, on_change):
@@ -339,6 +365,11 @@ class ThresholdTuningPage(QWidget):
             return
         if ctx["{}_cropped_on".format(stream_name)] is None:
             return  # single-stream camera - no Stream B to detect
+        if not self._confirm_discard_manual_edits(stream_name):
+            self._set_detection_value_silently(
+                stream_name, getattr(self, "_{}_last_detection_value".format(stream_name)))
+            return
+        setattr(self, "_{}_last_detection_value".format(stream_name), value)
         cropped = ctx["{}_cropped_on".format(stream_name)]
         centroids, _ = detect_led_centroids(cropped, value, ctx["min_blob_area"])
         centroids = merge_close_centroids(centroids)
@@ -411,8 +442,69 @@ class ThresholdTuningPage(QWidget):
         # same Tier 1/Tier 2 pipeline above.
         if self._context is None:
             return
+        if not self._confirm_discard_manual_edits(stream_name):
+            return
         slider = getattr(self, "{}_detection_slider".format(stream_name))
-        slider.setValue(self._context["{}_otsu_threshold".format(stream_name)])
+        otsu = self._context["{}_otsu_threshold".format(stream_name)]
+        if slider.value() == otsu:
+            # setValue() to the same value fires nothing - after discarding
+            # hand edits the re-detect must still happen.
+            self._on_detection_threshold_changed(stream_name, otsu)
+        else:
+            slider.setValue(otsu)
+
+    def _confirm_discard_manual_edits(self, stream_name):
+        """True when re-detection may proceed: no hand edits, or the operator
+        agreed to discard them (which clears the flag)."""
+        if not getattr(self, "_{}_manual_edits".format(stream_name)):
+            return True
+        answer = QMessageBox.question(
+            self, "Discard manual LED edits?",
+            "You edited this stream's LED positions by hand. Re-detecting will replace them.\n\n"
+            "Discard your manual LED edits and re-detect?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return False
+        setattr(self, "_{}_manual_edits".format(stream_name), False)
+        return True
+
+    def _set_detection_value_silently(self, stream_name, value):
+        if value is None:
+            return
+        for widget in (getattr(self, "{}_detection_slider".format(stream_name)),
+                       getattr(self, "{}_detection_spinbox".format(stream_name))):
+            widget.blockSignals(True)
+            widget.setValue(value)
+            widget.blockSignals(False)
+
+    def _open_led_editor(self, stream_name):
+        ctx = self._context
+        if ctx is None or ctx["{}_cropped_on".format(stream_name)] is None:
+            return
+        # A slider tick still waiting on its debounce must land BEFORE the
+        # editor opens on its result, never after (and over) the edit.
+        timer = getattr(self, "_{}_detection_commit_timer".format(stream_name))
+        if timer.isActive():
+            timer.stop()
+            self._commit_detection_threshold(stream_name)
+        cropped = ctx["{}_cropped_on".format(stream_name)]
+        title_label = getattr(self, "{}_title_label".format(stream_name))
+        dialog = self._led_editor_factory(
+            cropped, list(getattr(self, "_{}_pending_centroids".format(stream_name))),
+            num_leds=ctx["num_leds"], row_gap_px=ctx["row_gap_px"],
+            title="Edit LED positions - {}".format(title_label.text()), parent=self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        points = [(float(x), float(y)) for x, y in dialog.points()]
+        if not points:
+            return
+        setattr(self, "_{}_pending_centroids".format(stream_name), points)
+        setattr(self, "_{}_manual_edits".format(stream_name), True)
+        getattr(self, "{}_detection_panel".format(stream_name)).set_frame(draw_detected_centroids(cropped, points))
+        self._update_detected_count_label(stream_name, len(points))
+        self._commit_detection_threshold(stream_name)
 
     def set_context(self, ctx, device_serial, pick_a, pick_b, camera_controls,
                      stream_a_xy, stream_b_xy, stream_a_on, stream_a_off, stream_b_on, stream_b_off,
@@ -483,6 +575,10 @@ class ThresholdTuningPage(QWidget):
 
         self._stream_a_last_detected_count = None
         self._stream_b_last_detected_count = None
+        # A new context starts from its own detection - hand edits from a
+        # previous visit belong to other positions.
+        self._stream_a_manual_edits = False
+        self._stream_b_manual_edits = False
         # setValue() to the SAME value a widget already holds (e.g.
         # revisiting this page with an unchanged camera) won't fire
         # valueChanged, so the detection preview/count could otherwise show
@@ -577,6 +673,7 @@ class ThresholdTuningPage(QWidget):
             getattr(self, "{}_detection_slider".format(stream_name)).setEnabled(enabled)
             getattr(self, "{}_detection_spinbox".format(stream_name)).setEnabled(enabled)
             getattr(self, "{}_reset_to_auto_button".format(stream_name)).setEnabled(enabled)
+            getattr(self, "{}_edit_positions_button".format(stream_name)).setEnabled(enabled)
 
     def _on_error(self, message):
         self.status_label.setText(message)

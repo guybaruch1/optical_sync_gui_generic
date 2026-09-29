@@ -11,11 +11,18 @@ import yaml
 from domain.realsense_utils import sample_neighborhood_brightness, safe_neighborhood_size, safe_row_gap_px
 
 
-def assign_grid_ids(centroids, row_gap_px=15):
+def grid_rows(centroids, row_gap_px=15):
+    """The row-major grid order assign_grid_ids numbers LEDs by, as rows of
+    INDEXES into `centroids` (top row first, each row left to right) - so a
+    caller that keeps its own per-point objects (Threshold Tuning's manual
+    LED position editor) can label each one with the exact led_id
+    assign_grid_ids would give it. Raises the same RuntimeError as
+    assign_grid_ids on an empty list."""
     if not centroids:
         raise RuntimeError("No LEDs detected at all - check threshold/min_area/framing.")
 
-    sorted_pts = sorted(centroids, key=lambda p: p[1])
+    order = sorted(range(len(centroids)), key=lambda i: centroids[i][1])
+    sorted_pts = [centroids[i] for i in order]
     # Caps row_gap_px at what's actually safe for THIS stream's real
     # measured centroid spacing (see safe_row_gap_px's docstring) - a fixed
     # configured gap can otherwise end up larger than the real row-to-row
@@ -23,17 +30,22 @@ def assign_grid_ids(centroids, row_gap_px=15):
     # merging rows and scrambling led_id numbering. See
     # docs/algorithm_review_log.md's Issue 4.
     safe_gap_px = safe_row_gap_px(sorted_pts, row_gap_px)
-    rows = [[sorted_pts[0]]]
-    for prev, curr in zip(sorted_pts, sorted_pts[1:]):
-        if curr[1] - prev[1] > safe_gap_px:
+    rows = [[order[0]]]
+    for prev, curr in zip(order, order[1:]):
+        if centroids[curr][1] - centroids[prev][1] > safe_gap_px:
             rows.append([])
         rows[-1].append(curr)
-    rows = [sorted(row, key=lambda p: p[0]) for row in rows]
+    return [sorted(row, key=lambda i: centroids[i][0]) for row in rows]
+
+
+def assign_grid_ids(centroids, row_gap_px=15):
+    rows = grid_rows(centroids, row_gap_px)
 
     positions = {}
     led_id = 0
     for row in rows:
-        for (x, y) in row:
+        for index in row:
+            x, y = centroids[index]
             positions[str(led_id)] = [round(float(x), 2), round(float(y), 2)]
             led_id += 1
 
