@@ -576,3 +576,49 @@ def test_real_position_gap_metric_key_names_connect_end_to_end_through_test_sess
 
     assert len(cross_rows) == 1
     assert cross_rows[0]["position_gap_ms"] is not None
+
+
+def _single_stream_row(pair_index, ts_us, last_led, excluded=False, exclude_reason=None, frame_drop=False):
+    """A single-stream camera's row: LedDetectionMetric output, no
+    position_gap_ms_* keys at all (no intra-camera metric)."""
+    return {
+        "pair_index": pair_index,
+        "stream_a_ts_us": ts_us, "stream_a_global_ts_us": ts_us, "stream_a_frame_drop": frame_drop,
+        "stream_a_last_led": last_led,
+        "led_detection": last_led, "led_detection_excluded": excluded, "led_detection_exclude_reason": exclude_reason,
+    }
+
+
+def test_cross_position_gap_between_two_single_stream_cameras():
+    reconciler = CrossCameraReconciler([_spec(num_leds=10, switch_time_ms=1.0)])
+    reconciler.ingest_row("cam1", _single_stream_row(1, 1_000_000.0, last_led=5))
+    cross_rows = reconciler.ingest_row("cam2", _single_stream_row(1, 1_000_010.0, last_led=3))
+
+    assert cross_rows[0]["position_gap_ms"] == 2.0
+    assert cross_rows[0]["position_gap_ms_excluded"] is False
+
+
+def test_cross_position_gap_reuses_a_single_stream_cameras_warmup_exclusion():
+    reconciler = CrossCameraReconciler([_spec()])
+    reconciler.ingest_row("cam1", _single_stream_row(1, 1_000_000.0, last_led=5, excluded=True, exclude_reason="warmup"))
+    cross_rows = reconciler.ingest_row("cam2", _single_stream_row(1, 1_000_010.0, last_led=3))
+
+    assert cross_rows[0]["position_gap_ms"] is None
+    assert cross_rows[0]["position_gap_ms_exclude_reason"] == "warmup"
+
+
+def test_cross_position_gap_single_stream_master_vs_two_stream_slave_on_its_stream_b():
+    # Master runs "Color only" (its color is stream_a); the slave runs IR vs
+    # RGB (its color is stream_b) - roles resolve per camera.
+    specs = build_cross_camera_pair_specs(
+        [_CamSpec("cam1", True, {"stream_a": "color"}),
+         _CamSpec("cam2", False, {"stream_a": "infrared1", "stream_b": "color"})],
+        outlier_threshold_us=100_000,
+    )
+    assert [(s.stream_identity, s.master_row_role, s.slave_row_role) for s in specs] == [("color", "stream_a", "stream_b")]
+    reconciler = CrossCameraReconciler(specs)
+    reconciler.ingest_row("cam1", _single_stream_row(1, 1_000_000.0, last_led=4))
+    cross_rows = reconciler.ingest_row("cam2", _row(1, 1_000_010.0, role="stream_b", last_led=4))
+
+    assert cross_rows[0]["position_gap_ms"] == 0.0
+    assert cross_rows[0]["position_gap_ms_excluded"] is False

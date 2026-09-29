@@ -12,8 +12,9 @@ concurrently: the "{role}_ts_us"/"{role}_global_ts_us"/"{role}_frame_drop"
 keys drive the HW TS Latency and Global TS Latency metrics (both reusing
 engine.metrics.PairingGapMetric completely unmodified, on two independent
 instances per pair-spec), and the "{role}_last_led"/"position_gap_ms_excluded"/
-"position_gap_ms_exclude_reason" keys - folded into each row by
-engine.metrics.PositionGapMetric's own MetricResult.extra - drive the
+"position_gap_ms_exclude_reason" keys (or, for a single-stream camera,
+"led_detection_excluded"/"led_detection_exclude_reason") - folded into each
+row by engine.metrics.PositionGapMetric's/LedDetectionMetric's own MetricResult.extra - drive the
 third, Optical Sync metric (engine.metrics.compute_position_gap, reused on
 the SAME already-matched pair, no second matching pass) - see
 docs/superpowers's multi-camera design doc's "Design detail" section 1.
@@ -358,6 +359,17 @@ class CrossCameraReconciler:
         ]
 
 
+def _own_led_exclusion(row):
+    """A camera's OWN already-computed LED exclusion for this row - its
+    intra-camera PositionGapMetric's position_gap_ms_excluded/_exclude_reason
+    for a two-stream camera, or LedDetectionMetric's led_detection_*
+    equivalents for a single-stream camera (which has no position_gap_ms
+    keys at all, since it has no second stream)."""
+    if "position_gap_ms_excluded" in row:
+        return row.get("position_gap_ms_excluded"), row.get("position_gap_ms_exclude_reason")
+    return row.get("led_detection_excluded"), row.get("led_detection_exclude_reason")
+
+
 def _compute_cross_position_gap(spec, master_row, slave_row, master_frame_drop, slave_frame_drop):
     """Cross-camera Optical Sync value for one already-matched pair - reuses
     the SAME matched (master_row, slave_row) the HW-timestamp reconciler
@@ -373,7 +385,9 @@ def _compute_cross_position_gap(spec, master_row, slave_row, master_frame_drop, 
     detection logic invented. Master's own num_leds/switch_time_ms (see
     CrossCameraPairSpec) are authoritative for the circular wraparound math
     and unit conversion - the slave's own configured values are never read
-    or validated here."""
+    or validated here. For a single-stream camera the fallback reads
+    LedDetectionMetric's led_detection_* keys instead (see
+    _own_led_exclusion)."""
     master_led = master_row.get(f"{spec.master_row_role}_last_led")
     slave_led = slave_row.get(f"{spec.slave_row_role}_last_led")
     if master_led is None or slave_led is None:
@@ -383,8 +397,8 @@ def _compute_cross_position_gap(spec, master_row, slave_row, master_frame_drop, 
 
     if master_frame_drop or slave_frame_drop:
         return gap_ms, True, "frame_drop"
-    if master_row.get("position_gap_ms_excluded"):
-        return None, True, master_row.get("position_gap_ms_exclude_reason")
-    if slave_row.get("position_gap_ms_excluded"):
-        return None, True, slave_row.get("position_gap_ms_exclude_reason")
+    for row in (master_row, slave_row):
+        excluded, reason = _own_led_exclusion(row)
+        if excluded:
+            return None, True, reason
     return gap_ms, False, None
