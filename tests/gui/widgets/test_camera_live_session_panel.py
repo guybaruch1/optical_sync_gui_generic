@@ -232,3 +232,61 @@ def test_save_chart_images_writes_three_named_png_files(qapp, tmp_path):
         path = os.path.join(str(tmp_path), filename)
         assert os.path.exists(path)
         assert os.path.getsize(path) > 0
+
+
+# --- Single-stream mode: one video panel, frame drops + detected LED only ---
+
+def _prepared_single_stream_panel(tmp_path):
+    panel = CameraLiveSessionPanel("cam1", single_stream=True)
+    panel.prepare_for_run(
+        output_dir=str(tmp_path), kept_csv_filename="kept.csv", dropped_csv_filename="dropped.csv",
+        stream_a_xy=np.array([(1, 1), (2, 2)]), stream_b_xy=None,
+        stream_a_roi=(0, 0, 4, 4), stream_b_roi=None,
+        snapshot_every_n_pairs=20, max_snapshots=2, switch_time_ms=1.0,
+    )
+    return panel
+
+
+def test_single_stream_panel_has_no_intra_camera_widgets(qapp):
+    panel = CameraLiveSessionPanel("cam1", single_stream=True)
+    assert panel.stream_b_panel is None
+    assert panel.pairing_plot is None
+    assert panel.position_plot is None
+    assert panel.drop_plot is not None
+
+
+def test_single_stream_set_camera_labels_only_titles_stream_a(qapp):
+    panel = CameraLiveSessionPanel("cam1", single_stream=True)
+    panel.set_camera_labels("Intel RealSense D455", "SN789", "Infrared 1", None)
+    assert panel.stream_a_title_label.text() == "D455 [SN789] - Infrared 1"
+
+
+def test_single_stream_periodic_snapshot_saves_stream_a_only(qapp, tmp_path):
+    panel = _prepared_single_stream_panel(tmp_path)
+    panel.on_frame_ready("stream_a", np.zeros((4, 4), dtype=np.uint8), 20, np.array([True, False]))
+    assert os.path.exists(os.path.join(str(tmp_path), "periodic_led_state_pair00020.png"))
+
+
+def test_single_stream_on_stats_ready_shows_detected_led_and_skips_gap_plots(qapp, tmp_path):
+    panel = _prepared_single_stream_panel(tmp_path)
+    assert panel.pairing_plot is None and panel.position_plot is None
+    panel.on_row_ready({"pair_index": 0, "stream_a_frame_drop": True})
+    panel.on_stats_ready({"pair_index": 0, "stream_a_last_led": 3, "stream_a_frame_drop": True})
+    assert panel.stats_panel._value_labels["stream_a_last_led"].text() == "3"
+    assert panel.stats_panel._value_labels["stream_a_frame_drops"].text() == "1"
+
+
+def test_single_stream_save_debug_snapshot_writes_one_file(qapp, tmp_path):
+    panel = _prepared_single_stream_panel(tmp_path)
+    panel.on_frame_ready("stream_a", np.zeros((4, 4), dtype=np.uint8), 1, np.array([True, False]))
+    panel._save_led_state_debug_images()
+    assert os.path.exists(os.path.join(str(tmp_path), "live_led_state_stream_a.png"))
+    assert not os.path.exists(os.path.join(str(tmp_path), "live_led_state_stream_b.png"))
+
+
+def test_single_stream_session_finished_writes_csvs_plot_and_drop_chart(qapp, tmp_path):
+    panel = _prepared_single_stream_panel(tmp_path)
+    panel.on_session_finished([{"pair_index": 0, "stream_a_frame_drop": False, "stream_b_frame_drop": False}])
+    for name in ("kept.csv", "pipeline_sync_plot.png", "frame_drops_chart.png"):
+        assert os.path.exists(os.path.join(str(tmp_path), name)), name
+    assert not os.path.exists(os.path.join(str(tmp_path), "hw_ts_latency_chart.png"))
