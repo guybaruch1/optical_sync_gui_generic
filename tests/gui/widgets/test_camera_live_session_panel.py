@@ -290,3 +290,32 @@ def test_single_stream_session_finished_writes_csvs_plot_and_drop_chart(qapp, tm
     for name in ("kept.csv", "pipeline_sync_plot.png", "frame_drops_chart.png"):
         assert os.path.exists(os.path.join(str(tmp_path), name)), name
     assert not os.path.exists(os.path.join(str(tmp_path), "hw_ts_latency_chart.png"))
+
+
+def test_single_stream_detected_led_resets_to_dash_when_no_led_is_reported(qapp, tmp_path):
+    panel = _prepared_single_stream_panel(tmp_path)
+    panel.on_stats_ready({"pair_index": 0, "stream_a_last_led": 3})
+    assert panel.stats_panel._value_labels["stream_a_last_led"].text() == "3"
+    panel.on_stats_ready({"pair_index": 1, "stream_a_last_led": None})
+    assert panel.stats_panel._value_labels["stream_a_last_led"].text() == "-"
+
+
+def test_single_stream_session_finished_with_realistic_rows_exports_kept_csv_and_charts(qapp, tmp_path):
+    panel = _prepared_single_stream_panel(tmp_path)
+    rows = [
+        {"pair_index": i, "stream_a_ts_us": 1000.0 * i, "stream_b_ts_us": None,
+         "stream_a_global_ts_us": 1000.0 * i, "stream_b_global_ts_us": None,
+         "led_detection": 1 if i else None, "led_detection_excluded": i == 0,
+         "led_detection_exclude_reason": "warmup" if i == 0 else "",
+         "stream_a_last_led": 2 if i else None,
+         "stream_a_frame_drop": i == 2, "stream_b_frame_drop": False}
+        for i in range(4)
+    ]
+    panel.on_session_finished(rows)
+    kept = os.path.join(str(tmp_path), "kept.csv")
+    with open(kept, encoding="utf-8") as f:
+        header = f.readline()
+    assert "led_detection" in header
+    assert "pairing_gap_us" not in header
+    for name in ("pipeline_sync_plot.png", "frame_drops_chart.png"):
+        assert os.path.exists(os.path.join(str(tmp_path), name)), name

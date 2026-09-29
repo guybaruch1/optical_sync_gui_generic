@@ -54,7 +54,7 @@ from gui.pages.roi_select_page import RoiSelectPage, stream_label
 from gui.pages.calibration_page import CalibrationPage
 from gui.pages.threshold_tuning_page import ThresholdTuningPage
 from gui.pages.camera_hub_page import CameraHubPage, CameraSummary
-from gui.pages.multi_camera_live_session_page import MultiCameraLiveSessionPage
+from gui.pages.multi_camera_live_session_page import MultiCameraLiveSessionPage, _stream_identities
 from gui.pages.live_session_page import LiveSessionPage
 from state.gui_state import GuiState, save_gui_state
 from engine.streams import (
@@ -495,8 +495,8 @@ class MainWindow(QMainWindow):
                     self,
                     "LED count mismatch",
                     "Calibration detected {} {} LED(s), but settings.yaml's test.num_leds is {}. "
-                    "The live session's position-gap math assumes these match - proceeding "
-                    "anyway, but treat position-gap results with caution until this is resolved "
+                    "The cross-camera Optical Sync math assumes these match - proceeding "
+                    "anyway, but treat Optical Sync results with caution until this is resolved "
                     "(re-run calibration, or fix test.num_leds).".format(
                         len(stream_a_ids), stream_label(pick_a), num_leds
                     ),
@@ -840,6 +840,47 @@ class MainWindow(QMainWindow):
                 "in Stream Config, or make this camera the master instead.".format(
                     "\n".join(conflicts)
                 ),
+            )
+            return
+        # A single-stream camera has no result of its own - it only measures
+        # cross-camera, against streams it shares with the master. If it (or
+        # the master) is single-stream and they share no stream identity,
+        # build_cross_camera_pair_specs yields zero pairs and the run would
+        # start and measure nothing. Two two-stream cameras keep today's
+        # behavior (no new check).
+        master = next((c for c in cameras if c["is_master"]), None)
+        if master is not None:
+            master_identities = set(_stream_identities(master["config"]).values())
+            unmatched = [
+                "{} [{}]".format(c["label"], c["config"]["device_serial"])
+                for c in cameras
+                if c is not master
+                and not master_identities & set(_stream_identities(c["config"]).values())
+                and (master["config"]["pick_b"] is None or c["config"]["pick_b"] is None)
+            ]
+            if unmatched:
+                QMessageBox.critical(
+                    self, "No shared stream with the master",
+                    "The following camera(s) share no stream with the master ({} [{}]), and "
+                    "at least one camera in each pair has a single stream, so nothing "
+                    "would be measured between them:\n\n{}\n\nPick a test whose stream "
+                    "matches the master's in Stream Config, or make a different camera the "
+                    "master.".format(
+                        master["label"], master["config"]["device_serial"], "\n".join(unmatched)),
+                )
+                return
+        # With exactly ONE dual-panel camera, MultiCameraSessionController does
+        # not own the panels (it only does for 2+ sharing one wiring), so a
+        # single-stream camera's thread would drive single-panel commands at
+        # whatever panel the hub exposes while the dual-panel thread drives
+        # both.
+        dual_panel_count = sum(1 for c in cameras if c["config"].get("dual_panel_config") is not None)
+        if dual_panel_count == 1 and any(c["config"]["pick_b"] is None for c in cameras):
+            QMessageBox.critical(
+                self, "Dual-panel camera can't share a run with a single-stream camera",
+                "A single-stream camera can join a dual-panel run only when the panels are "
+                "shared by two or more dual-panel cameras. With exactly one dual-panel "
+                "camera, run the single-stream camera separately.",
             )
             return
         self.multi_camera_live_session_page.set_cameras(

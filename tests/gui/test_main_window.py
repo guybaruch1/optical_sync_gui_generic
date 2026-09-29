@@ -419,7 +419,8 @@ def _window_after_config_chosen(qapp, monkeypatch, tmp_path, dual_panel=False):
 
 
 def _configure_one_camera(window, serial, model_name="Intel RealSense D455",
-                           ir_pick=IR1, color_pick=COLOR0, camera_controls=None):
+                           ir_pick=IR1, color_pick=COLOR0, camera_controls=None,
+                           dual_panel=False):
     """Runs one camera's full sub-flow (Device Select -> Stream Config ->
     [ROI Select/Calibration skipped, same shorthand as _window_after_config_
     chosen above] -> Threshold Tuning) against an ALREADY-CONSTRUCTED
@@ -438,6 +439,8 @@ def _configure_one_camera(window, serial, model_name="Intel RealSense D455",
             "exposure_a": None, "exposure_b": None,
         }
     window._on_device_chosen(serial, model_name)
+    if dual_panel:
+        window.stream_config_page.dual_panel_checkbox.setChecked(True)
     window._on_config_chosen((ir_pick, color_pick, camera_controls))
     window.gui_state.stream_a_roi = [0, 0, 50, 50]
     window.gui_state.stream_b_roi = [0, 0, 50, 50]
@@ -1581,8 +1584,16 @@ def _ir1_only_test():
     }
 
 
+def _color_only_test():
+    return {
+        "test_name": "Color only",
+        "stream_a_identity": {"stream_type": "color", "stream_index": 0},
+        "sensor_options": [{"stream_a": {"width": 1280, "height": 720, "fps": 30, "format": "bgr8"}}],
+    }
+
+
 def _single_stream_window(qapp, monkeypatch, tmp_path):
-    settings = _full_settings({"Intel RealSense D455": [_ir_vs_rgb_test(), _ir1_only_test()]})
+    settings = _full_settings({"Intel RealSense D455": [_ir_vs_rgb_test(), _ir1_only_test(), _color_only_test()]})
     window = _make_window(qapp, settings)
     monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [IR1, COLOR0])
     monkeypatch.setattr(main_window_module, "save_gui_state", lambda state: None)
@@ -1597,11 +1608,11 @@ def _single_stream_window(qapp, monkeypatch, tmp_path):
     return window
 
 
-def _configure_single_stream_camera(window, serial):
+def _configure_single_stream_camera(window, serial, test_name="IR1 only", pick=IR1):
     window._on_device_chosen(serial, "Intel RealSense D455")
     window.stream_config_page.combo_test.setCurrentIndex(
-        window.stream_config_page.combo_test.findData("IR1 only"))
-    window._on_config_chosen((IR1, None, {
+        window.stream_config_page.combo_test.findData(test_name))
+    window._on_config_chosen((pick, None, {
         "emitter_enabled": False, "auto_exposure": True, "exposure_a": None, "exposure_b": None,
     }))
     window._on_roi_chosen(([0, 0, 50, 50], None))
@@ -1677,3 +1688,40 @@ def test_two_single_stream_cameras_reach_the_multi_camera_page_with_gmsl_fps_che
 
     assert received["gmsl_tsc_sync"]["fps"] == 30
     assert [c["config"]["pick_b"] for c in received["cameras"]] == [None, None]
+
+
+def test_start_refuses_a_single_stream_slave_sharing_no_stream_with_the_master(qapp, monkeypatch, tmp_path):
+    window = _single_stream_window(qapp, monkeypatch, tmp_path)
+    monkeypatch.setattr(window.calibration_page, "set_context", lambda *a, **k: None)
+    _configure_single_stream_camera(window, "SN1")
+    window._on_add_camera_requested()
+    _configure_single_stream_camera(window, "SN2", test_name="Color only", pick=COLOR0)
+    calls = _capture_critical(monkeypatch)
+    set_cameras_calls = []
+    monkeypatch.setattr(window.multi_camera_live_session_page, "set_cameras",
+                        lambda *a, **k: set_cameras_calls.append((a, k)))
+
+    window._on_start_multi_camera_session_requested()
+
+    assert len(calls) == 1
+    assert calls[0][0][1] == "No shared stream with the master"
+    assert "D455 [SN2]" in calls[0][0][2]
+    assert set_cameras_calls == []
+
+
+def test_start_refuses_a_single_stream_camera_with_exactly_one_dual_panel_camera(qapp, monkeypatch, tmp_path):
+    window = _single_stream_window(qapp, monkeypatch, tmp_path)
+    monkeypatch.setattr(window.calibration_page, "set_context", lambda *a, **k: None)
+    _configure_one_camera(window, "SN1", dual_panel=True)
+    window._on_add_camera_requested()
+    _configure_single_stream_camera(window, "SN2")
+    calls = _capture_critical(monkeypatch)
+    set_cameras_calls = []
+    monkeypatch.setattr(window.multi_camera_live_session_page, "set_cameras",
+                        lambda *a, **k: set_cameras_calls.append((a, k)))
+
+    window._on_start_multi_camera_session_requested()
+
+    assert len(calls) == 1
+    assert calls[0][0][1] == "Dual-panel camera can't share a run with a single-stream camera"
+    assert set_cameras_calls == []

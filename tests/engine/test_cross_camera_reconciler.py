@@ -14,7 +14,7 @@ import pytest
 from engine.cross_camera_reconciler import (
     CrossCameraPairSpec, CrossCameraReconciler, build_cross_camera_pair_specs,
 )
-from engine.metrics import FramePairSample, PairingGapMetric, PositionGapMetric
+from engine.metrics import FramePairSample, LedDetectionMetric, PairingGapMetric, PositionGapMetric
 from engine.test_session import TestSession, TestSessionConfig
 
 
@@ -622,3 +622,47 @@ def test_cross_position_gap_single_stream_master_vs_two_stream_slave_on_its_stre
 
     assert cross_rows[0]["position_gap_ms"] == 0.0
     assert cross_rows[0]["position_gap_ms_excluded"] is False
+
+
+def _single_stream_sample(pair_index, bright):
+    return FramePairSample(
+        pair_index=pair_index, stream_a_ts_us=1_000_000.0 + 50.0 * pair_index, stream_b_ts_us=None,
+        stream_a_global_ts_us=2_000_000.0 + 50.0 * pair_index, stream_b_global_ts_us=None,
+        stream_a_bright=np.array(bright), stream_b_bright=None,
+    )
+
+
+def test_real_led_detection_metric_key_names_connect_end_to_end_for_single_stream_cameras():
+    def make_session():
+        metric = LedDetectionMetric(stream_a_threshold=np.full(4, 150.0), warmup_pairs_to_skip=1)
+        session = TestSession(TestSessionConfig(metrics=[metric]))
+        session.start()
+        return session
+
+    master_session, slave_session = make_session(), make_session()
+    specs = build_cross_camera_pair_specs(
+        [_CamSpec("cam1", True, {"stream_a": "infrared1"}, num_leds=4),
+         _CamSpec("cam2", False, {"stream_a": "infrared1"}, num_leds=4)],
+        outlier_threshold_us=100_000,
+    )
+    reconciler = CrossCameraReconciler(specs)
+
+    on_leds = [[50.0, 200.0, 50.0, 50.0], [50.0, 50.0, 200.0, 50.0], [50.0, 50.0, 50.0, 200.0]]
+    all_dark = [50.0, 50.0, 50.0, 50.0]
+    cross_rows = []
+    for pair_index in range(3):
+        master_row = master_session.process_pair(_single_stream_sample(pair_index, on_leds[pair_index]))
+        # The slave's last pair sees no LED lit at all - a detection miss.
+        slave_bright = all_dark if pair_index == 2 else on_leds[pair_index]
+        slave_row = slave_session.process_pair(_single_stream_sample(pair_index, slave_bright))
+        reconciler.ingest_row("cam1", master_row)
+        cross_rows.extend(reconciler.ingest_row("cam2", slave_row))
+
+    assert len(cross_rows) == 3
+    assert cross_rows[0]["position_gap_ms_excluded"] is True
+    assert cross_rows[0]["position_gap_ms_exclude_reason"] == "warmup"
+    assert cross_rows[1]["position_gap_ms"] is not None
+    assert cross_rows[1]["position_gap_ms_excluded"] is False
+    # Slave-side exclusion: the slave's own "miss" carries through.
+    assert cross_rows[2]["position_gap_ms"] is None
+    assert cross_rows[2]["position_gap_ms_exclude_reason"] == "miss"

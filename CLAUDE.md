@@ -682,7 +682,12 @@ Single-stream cameras never use dual-panel mode (Stream Config disables the
 checkbox); the single-panel hub target picks the IR panel for an IR pick,
 the color panel for a color pick. A run of one single-stream camera can't
 start (Camera Hub disables Start, and `_on_start_multi_camera_session_requested`
-refuses defensively) - `LiveSessionPage` never sees `pick_b=None`.
+refuses defensively) - `LiveSessionPage` never sees `pick_b=None`. Start also
+refuses a single-stream camera that shares no stream identity with its
+master/slave partner, and a single-stream camera mixed with exactly ONE
+dual-panel camera (the controller only owns the panels when 2+ dual-panel
+cameras share them, so a single-stream camera can join a dual-panel run only
+then; otherwise run them separately).
 
 ### Single-panel mode on a two-panel hub rig
 

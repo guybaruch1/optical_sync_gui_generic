@@ -440,6 +440,10 @@ class CameraLiveSessionPanel(QWidget):
 
         if stats.get("stream_a_last_led") is not None:
             self.stats_panel.set_value("stream_a_last_led", stats["stream_a_last_led"])
+        elif self._single_stream:
+            # No LED detected this stats tick - don't leave the previous
+            # tick's LED number on screen as if it were current.
+            self.stats_panel.set_value("stream_a_last_led", "-")
 
         if self.pairing_plot is not None and stats.get("pairing_gap_us") is not None:
             self.stats_panel.set_value("pairing_gap_us", stats["pairing_gap_us"])

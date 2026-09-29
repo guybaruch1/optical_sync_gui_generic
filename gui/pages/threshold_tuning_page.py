@@ -427,8 +427,8 @@ class ThresholdTuningPage(QWidget):
         # A single-stream camera (pick_b None) has no Stream B to preview,
         # tune or persist.
         single_stream = pick_b is None
-        self._context = dict(single_stream=single_stream,
-
+        self._context = dict(
+            single_stream=single_stream,
             ctx=ctx, device_serial=device_serial, pick_a=pick_a, pick_b=pick_b, camera_controls=camera_controls,
             stream_a_xy=stream_a_xy, stream_b_xy=stream_b_xy,
             stream_a_on=stream_a_on, stream_a_off=stream_a_off,
