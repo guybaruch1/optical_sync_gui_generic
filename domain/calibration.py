@@ -129,7 +129,9 @@ def compute_threshold(on_values, off_values, fraction):
 
 
 def update_config_leds(config_path, camera_name, stream_a_slug, stream_a_positions, stream_a_res,
-                        stream_b_slug, stream_b_positions, stream_b_res):
+                        stream_b_slug=None, stream_b_positions=None, stream_b_res=None):
+    """stream_b_* are None for a single-stream camera - only stream A's own
+    slug block is written then."""
     with open(config_path, "r") as f:
         cfg = yaml.safe_load(f) or {}
     cfg.setdefault("leds", {})
@@ -137,31 +139,37 @@ def update_config_leds(config_path, camera_name, stream_a_slug, stream_a_positio
     cfg["leds"][camera_name][stream_a_slug] = {
         "frame_width": stream_a_res[0], "frame_height": stream_a_res[1], "positions": stream_a_positions,
     }
-    cfg["leds"][camera_name][stream_b_slug] = {
-        "frame_width": stream_b_res[0], "frame_height": stream_b_res[1], "positions": stream_b_positions,
-    }
+    if stream_b_slug is not None:
+        cfg["leds"][camera_name][stream_b_slug] = {
+            "frame_width": stream_b_res[0], "frame_height": stream_b_res[1], "positions": stream_b_positions,
+        }
     with open(config_path, "w") as f:
         yaml.safe_dump(cfg, f, sort_keys=False)
 
 
-def load_led_positions(config_path, camera_name, stream_a_slug, stream_a_res, stream_b_slug, stream_b_res):
+def load_led_positions(config_path, camera_name, stream_a_slug, stream_a_res, stream_b_slug=None, stream_b_res=None):
     """stream_a_res/stream_b_res are (width, height) tuples for the
     CURRENTLY-picked stream resolution - checked against what
     update_config_leds stored at calibration time, since Stream Select lets
     an operator freely pick any resolution and silently sampling calibrated
     pixel coordinates against a differently-sized live frame produces
-    garbage position_gap_ms results with no warning otherwise."""
+    garbage position_gap_ms results with no warning otherwise.
+    stream_b_slug/stream_b_res are None for a
+    single-stream camera - the returned stream B positions are then None."""
     with open(config_path, "r") as f:
         cfg = yaml.safe_load(f)
     leds_by_camera = cfg.get("leds", {})
     camera_entry = leds_by_camera.get(camera_name, {})
-    if stream_a_slug not in camera_entry or stream_b_slug not in camera_entry:
+    wanted = [(stream_a_slug, stream_a_res)]
+    if stream_b_slug is not None:
+        wanted.append((stream_b_slug, stream_b_res))
+    if any(slug not in camera_entry for slug, _ in wanted):
         raise KeyError(
-            "No LED calibration yet for camera {!r} streams {!r}/{!r} - run calibration with "
-            "this exact stream pair first.".format(camera_name, stream_a_slug, stream_b_slug)
+            "No LED calibration yet for camera {!r} stream(s) {} - run calibration with "
+            "this exact stream selection first.".format(camera_name, "/".join(repr(slug) for slug, _ in wanted))
         )
 
-    for slug, current_res in ((stream_a_slug, stream_a_res), (stream_b_slug, stream_b_res)):
+    for slug, current_res in wanted:
         entry = camera_entry[slug]
         stored_res = (entry["frame_width"], entry["frame_height"])
         if stored_res != tuple(current_res):
@@ -173,4 +181,5 @@ def load_led_positions(config_path, camera_name, stream_a_slug, stream_a_res, st
                 )
             )
 
-    return camera_entry[stream_a_slug]["positions"], camera_entry[stream_b_slug]["positions"]
+    stream_b_positions = camera_entry[stream_b_slug]["positions"] if stream_b_slug is not None else None
+    return camera_entry[stream_a_slug]["positions"], stream_b_positions

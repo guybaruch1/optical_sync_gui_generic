@@ -208,6 +208,55 @@ class PositionGapMetric(Metric):
         return MetricResult(name=self.name, value=gap_ms, excluded=False, exclude_reason=None, extra=extra)
 
 
+class LedDetectionMetric(Metric):
+    """Single-stream counterpart of PositionGapMetric, for a camera that
+    contributes ONE stream to a multi-camera run (pick_b is None - a
+    single-stream settings.yaml test). There is no second stream to compare
+    against inside the camera, so there is no intra-camera value to report;
+    what the cross-camera reconciler needs is each frame's detected on-LED
+    index, emitted under the SAME "stream_a_last_led" extra key
+    PositionGapMetric uses, so engine.cross_camera_reconciler's
+    _compute_cross_position_gap works unchanged. value is that index (handy
+    in the CSV); exclusions mirror PositionGapMetric's own order
+    (no_led_data, miss, frame_drop, warmup), and the reconciler reads them
+    from this metric's led_detection_excluded/_exclude_reason keys when a
+    row has no position_gap_ms_* keys."""
+
+    name = "led_detection"
+
+    def __init__(self, stream_a_threshold, warmup_pairs_to_skip):
+        self.stream_a_threshold = stream_a_threshold
+        self.warmup_pairs_to_skip = warmup_pairs_to_skip
+        self._pair_count = 0
+        # Same side-channel attributes as PositionGapMetric, so
+        # engine/session_engine.py's overlay-mask copy works with either
+        # metric. Stream B's is always None - there is no stream B.
+        self.last_stream_a_on_mask = None
+        self.last_stream_b_on_mask = None
+
+    def update(self, sample: FramePairSample) -> MetricResult:
+        self._pair_count += 1
+        is_warmup = self._pair_count <= self.warmup_pairs_to_skip
+
+        if sample.stream_a_bright is None:
+            return MetricResult(name=self.name, value=None, excluded=True, exclude_reason="no_led_data")
+
+        stream_a_on = sample.stream_a_bright > self.stream_a_threshold
+        self.last_stream_a_on_mask = stream_a_on
+        stream_a_last, _ = find_last_on_led(stream_a_on)
+        extra = {"stream_a_last_led": stream_a_last}
+
+        if stream_a_last is None:
+            return MetricResult(name=self.name, value=None, excluded=True, exclude_reason="miss", extra=extra)
+        if sample.stream_a_frame_drop:
+            return MetricResult(name=self.name, value=stream_a_last, excluded=True, exclude_reason="frame_drop",
+                                extra=extra)
+        if is_warmup:
+            return MetricResult(name=self.name, value=stream_a_last, excluded=True, exclude_reason="warmup",
+                                extra=extra)
+        return MetricResult(name=self.name, value=stream_a_last, excluded=False, exclude_reason=None, extra=extra)
+
+
 def is_position_gap_debug_outlier(row, threshold_ms):
     """Decides whether a frame pair's position_gap_ms ("Optical Sync" in the
     UI) is large enough, and not already explained by another exclusion

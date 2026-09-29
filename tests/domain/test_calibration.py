@@ -261,3 +261,32 @@ def test_update_config_leds_preserves_other_stream_slugs_on_same_camera(tmp_path
     assert "color" in camera_entry and "color2" in camera_entry
     assert camera_entry["infrared1"]["positions"]["0"] == [1.0, 2.0, 255.0, 100.0, 177.5]
     assert camera_entry["color"]["positions"]["0"] == [5.0, 6.0, 200.0, 80.0, 140.0]
+
+
+def test_update_config_leds_single_stream_writes_only_stream_a(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump({"leds": {"Test Camera": {"color": {"frame_width": 1, "frame_height": 1, "positions": {}}}}}))
+
+    update_config_leds(str(config_path), "Test Camera", "infrared1", {"0": [1.0, 2.0, 255.0, 100.0, 177.5]}, (1280, 720))
+
+    camera_entry = yaml.safe_load(config_path.read_text())["leds"]["Test Camera"]
+    assert set(camera_entry) == {"color", "infrared1"}  # existing slug untouched, no "None" slug written
+
+
+def test_load_led_positions_single_stream_returns_none_for_stream_b(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump({"leds": {"Test Camera": {
+        "infrared1": {"frame_width": 1280, "frame_height": 720, "positions": {"0": [1.0, 2.0, 255.0, 100.0, 177.5]}},
+    }}}))
+
+    positions_a, positions_b = load_led_positions(str(config_path), "Test Camera", "infrared1", (1280, 720))
+
+    assert positions_a["0"] == [1.0, 2.0, 255.0, 100.0, 177.5]
+    assert positions_b is None
+
+
+def test_load_led_positions_single_stream_raises_when_uncalibrated(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump({"leds": {"Test Camera": {}}}))
+    with pytest.raises(KeyError):
+        load_led_positions(str(config_path), "Test Camera", "infrared1", (1280, 720))
