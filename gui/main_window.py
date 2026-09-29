@@ -64,6 +64,7 @@ from engine.streams import (
     find_device_by_serial, set_inter_cam_sync_mode, INTER_CAM_SYNC_DEFAULT,
 )
 from engine.rgb_mode import ensure_mode
+from engine.dual_panel_control import set_single_panel_target, single_panel_stream_for_picks
 from engine.gmsl_sync import detect_gmsl_tsc_rig, DEFAULT_GMSL_TSC_SYNC, unknown_gmsl_tsc_settings_keys
 from domain.calibration import load_led_positions
 from settings import ensure_output_dir
@@ -377,6 +378,11 @@ class MainWindow(QMainWindow):
         self._dual_panel_config = (
             self.settings["dual_panel"] if self.stream_config_page.dual_panel_checkbox.isChecked() else None
         )
+        # This camera's own ROI Select/Calibration/Threshold Tuning run next -
+        # point single-panel commands at the panel this test needs.
+        self._apply_single_panel_target([
+            {"pick_a": pick_a, "pick_b": pick_b, "dual_panel_config": self._dual_panel_config},
+        ])
 
         # camera_controls' emitter/auto_exposure MODE is one shared choice
         # (GuiState just mirrors the same value into both stream_a_*/
@@ -716,6 +722,7 @@ class MainWindow(QMainWindow):
             # dict's own keys already match set_context()'s parameters
             # exactly - see _on_tuning_done's own comment.
             only_camera = next(iter(self._cameras.values()))
+            self._apply_single_panel_target([only_camera["config"]])
             # Best-effort self-heal, mirroring engine/multi_camera_session.py's
             # own _reset_genlock_roles: a camera left stuck in
             # INTER_CAM_SYNC_SLAVE from an earlier crashed/killed multi-camera
@@ -738,6 +745,7 @@ class MainWindow(QMainWindow):
         # every Start is what keeps this correct rather than stale.
         inter_cam_sync_settings = self.settings["camera"].get("inter_cam_sync", {})
         camera_sync_settings = self.settings.get("camera_sync") or {}
+        self._apply_single_panel_target([camera["config"] for camera in self._cameras.values()])
         gmsl_tsc_on = self.camera_hub_page.gmsl_tsc_checked
         gmsl_tsc_sync = None
         # Unticked on the detected GMSL rig = a free-running run: a killed
@@ -807,6 +815,19 @@ class MainWindow(QMainWindow):
         self.multi_camera_live_session_page.set_cameras(
             self.ctx, cameras, gmsl_tsc_sync=gmsl_tsc_sync, gmsl_free_run_cleanup=gmsl_free_run_cleanup)
         self.stack.setCurrentWidget(self.multi_camera_live_session_page)
+
+    def _apply_single_panel_target(self, camera_configs):
+        """On a two-panel hub rig, single-panel mode must drive the panel the
+        test actually looks at (see engine.dual_panel_control's
+        _single_panel_target comment): an IR-vs-IR test -> the IR panel,
+        color-vs-color -> the color panel. Cleared (hub left alone, today's
+        behavior) when any camera uses dual-panel mode, when the cameras
+        would need different panels, or when no dual_panel hub is
+        configured."""
+        streams = {single_panel_stream_for_picks(c["pick_a"], c["pick_b"]) for c in camera_configs}
+        any_dual = any(c.get("dual_panel_config") is not None for c in camera_configs)
+        stream = streams.pop() if len(streams) == 1 and not any_dual else None
+        set_single_panel_target(self.settings.get("dual_panel") if stream else None, stream)
 
     def _current_device_name(self):
         # Cached from DeviceSelectPage.device_chosen's payload (see

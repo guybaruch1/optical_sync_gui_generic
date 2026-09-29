@@ -587,6 +587,15 @@ own timestamped subfolder so a new run never overwrites a previous one:
   ```bash
   v4l2-ctl -d <node> -c camera_sync_mode=0
   ```
+- **Single-panel test (e.g. D585 IR vs IR) lights or steps the wrong LED
+  panel** - on a rig with two panels on the Acroname hub, `LED-Panel.exe`
+  only reaches whichever panel's hub port is on, and dual-panel runs leave
+  the color panel on. With "Use dual LED panel" unticked, the app now
+  switches the hub itself: both streams infrared -> the IR panel
+  (`dual_panel.stream_a_panel_port`), both color -> the color panel. An IR
+  vs RGB test on one panel leaves the hub as it is. If the terminal prints
+  "could not switch the LED-panel hub", the hub wasn't reachable and the
+  commands went to whichever panel was connected.
 - **`Panel server returned malformed response` on the Orin** - usually a
   `settings.yaml` that doesn't match a working setup (e.g. a fresh zip
   download's default copy). Copy `settings.yaml` from a folder that works;

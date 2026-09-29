@@ -42,6 +42,7 @@ dual_panel_config takes) IS tested, by mocking
 _run_on_both_panels/_relay_on/_relay_off/LEDPanel - see
 tests/engine/test_dual_panel_control.py."""
 
+import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -87,24 +88,91 @@ _dual_panel_lock = threading.RLock()
 _dual_panel_primed = {"primed": False, "switch_time_ms": None, "scan_direction": None}
 
 
+# Single-panel mode on a TWO-panel hub rig. LEDPanel always talks to
+# whichever panel is currently hub-exposed, and every dual-panel sequence
+# (_run_on_both_panels, and Calibration/ROI Select's per-stream blocks,
+# stream_a then stream_b) ends with stream_b's (color) panel exposed - and
+# the hub keeps that state across app restarts. So a single-panel IR-vs-IR
+# test used to drive the COLOR panel: the IR panel never lit or stepped
+# (confirmed on the D585 rig). MainWindow sets a target per camera flow /
+# run (set_single_panel_target); every single-panel command path then
+# exposes that panel first via the same enter/exit hub switch
+# switched_to_stream_panel uses (so it also works over the remote panel
+# server). "exposed" skips repeat switches until any dual-panel activity
+# (_mark_hub_changed) may have moved the hub again. A failed switch - e.g.
+# a rig with no Acroname hub at all, which has only one panel anyway - is
+# warned about once and otherwise ignored.
+_single_panel_target = {"config": None, "stream": None, "exposed": False}
+
+
+def single_panel_stream_for_picks(pick_a, pick_b):
+    """Which panel a single-panel test needs on a two-panel rig: both
+    infrared -> "stream_a" (the IR panel, stream_a_panel_port), both color
+    -> "stream_b" (the color panel), anything else -> None (leave the hub
+    alone - an IR-vs-RGB test on one panel has no single right answer)."""
+    import pyrealsense2 as rs
+    types = {pick_a["stream_type"], pick_b["stream_type"]}
+    if types == {rs.stream.infrared}:
+        return "stream_a"
+    if types == {rs.stream.color}:
+        return "stream_b"
+    return None
+
+
+def set_single_panel_target(hub_config, stream_name):
+    """hub_config: settings.yaml's dual_panel section (hub ports, settle
+    time) or None; stream_name: "stream_a"/"stream_b" or None. Either None
+    means single-panel commands never touch the hub (today's behavior)."""
+    _single_panel_target["config"] = hub_config
+    _single_panel_target["stream"] = stream_name
+    _single_panel_target["exposed"] = False
+
+
+def _mark_hub_changed():
+    _single_panel_target["exposed"] = False
+
+
+def _expose_single_panel_target():
+    config, stream = _single_panel_target["config"], _single_panel_target["stream"]
+    if config is None or stream is None or _single_panel_target["exposed"]:
+        return
+    try:
+        with switched_to_stream_panel(config, stream):
+            pass
+    except Exception as exc:
+        print("WARNING: could not switch the LED-panel hub to the {} panel for a single-panel "
+              "test - commands go to whichever panel is currently connected: {}".format(
+                  "IR" if stream == "stream_a" else "color", exc), file=sys.stderr)
+    # Set after the switch - switched_to_stream_panel's own dual branch
+    # calls _mark_hub_changed(). Also set on failure, so a hub-less rig
+    # isn't retried (and warned about) on every single command.
+    _single_panel_target["exposed"] = True
+
+
 def turn_all_leds_on(dual_panel_config):
     if dual_panel_config is None:
+        _expose_single_panel_target()
         LEDPanel.stop()
         LEDPanel.all_leds_on()
     elif PANEL_CONNECTION["mode"] == "remote":
         from engine import panel_rpc_client
+        _mark_hub_changed()
         panel_rpc_client.dual_panel_turn_all_leds_on(dual_panel_config)
     else:
+        _mark_hub_changed()
         _run_on_both_panels(dual_panel_config, lambda: (LEDPanel.stop(), LEDPanel.all_leds_on()))
 
 
 def turn_all_leds_off(dual_panel_config):
     if dual_panel_config is None:
+        _expose_single_panel_target()
         LEDPanel.all_leds_off()
     elif PANEL_CONNECTION["mode"] == "remote":
         from engine import panel_rpc_client
+        _mark_hub_changed()
         panel_rpc_client.dual_panel_turn_all_leds_off(dual_panel_config)
     else:
+        _mark_hub_changed()
         _run_on_both_panels(dual_panel_config, LEDPanel.all_leds_off)
 
 
@@ -116,6 +184,7 @@ def start_scanning(switch_time_ms, scan_direction, dual_panel_config):
     live the way the single-panel case can (see
     gui/pages/threshold_tuning_page.py's _on_confirm_switch_time_clicked)."""
     if dual_panel_config is None:
+        _expose_single_panel_target()
         LEDPanel.stop()
         LEDPanel.response_time_measurement_mode()
         LEDPanel.set_direction_single(scan_direction if scan_direction is not None else 1)
@@ -123,6 +192,7 @@ def start_scanning(switch_time_ms, scan_direction, dual_panel_config):
         LEDPanel.start()
         return
 
+    _mark_hub_changed()
     if PANEL_CONNECTION["mode"] == "remote":
         from engine import panel_rpc_client
         panel_rpc_client.dual_panel_start_scanning(switch_time_ms, scan_direction, dual_panel_config)
@@ -238,9 +308,11 @@ def start_scanning(switch_time_ms, scan_direction, dual_panel_config):
 
 def stop_scanning(dual_panel_config):
     if dual_panel_config is None:
+        _expose_single_panel_target()
         LEDPanel.stop()
         return
 
+    _mark_hub_changed()
     if PANEL_CONNECTION["mode"] == "remote":
         from engine import panel_rpc_client
         panel_rpc_client.dual_panel_stop_scanning(dual_panel_config)
@@ -427,9 +499,11 @@ def switched_to_stream_panel(dual_panel_config, stream_name):
     inside the block reach the one and only panel directly, same as
     always."""
     if dual_panel_config is None:
+        _expose_single_panel_target()
         yield
         return
 
+    _mark_hub_changed()
     if PANEL_CONNECTION["mode"] == "remote":
         from engine import panel_rpc_client
         panel_rpc_client.dual_panel_enter_stream_panel(dual_panel_config, stream_name)

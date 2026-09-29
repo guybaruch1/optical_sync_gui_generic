@@ -1509,3 +1509,57 @@ def test_start_with_gmsl_ticked_passes_no_free_run_cleanup(qapp, monkeypatch, tm
     window._on_start_multi_camera_session_requested()
 
     assert captured["gmsl_free_run_cleanup"] is None
+
+
+# --- Single-panel target on a two-panel hub rig: an IR-vs-IR test with
+# "Use dual LED panel" unticked must drive the IR panel, not whichever panel
+# the hub last left exposed (the color one, after any dual-panel activity). ---
+
+IR2 = dict(IR1, stream_index=2)
+
+
+def _config_chosen_with(qapp, monkeypatch, tmp_path, pick_a, pick_b, dual_panel=False):
+    targets = []
+    monkeypatch.setattr(main_window_module, "set_single_panel_target",
+                        lambda config, stream: targets.append((config, stream)))
+    settings = _full_settings({"Intel RealSense D455": [_ir_vs_rgb_test()]})
+    window = _make_window(qapp, settings)
+    monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [IR1, COLOR0])
+    monkeypatch.setattr(main_window_module, "save_gui_state", lambda state: None)
+    monkeypatch.setattr(window.roi_page, "set_context", lambda *a, **k: None)
+    window._on_device_chosen("SN123", "Intel RealSense D455")
+    window.stream_config_page.dual_panel_checkbox.setChecked(dual_panel)
+    window._on_config_chosen((pick_a, pick_b, {
+        "emitter_enabled": False, "auto_exposure": True, "exposure_a": None, "exposure_b": None,
+    }))
+    return window, targets
+
+
+def test_ir_vs_ir_single_panel_targets_the_ir_panel(qapp, monkeypatch, tmp_path):
+    window, targets = _config_chosen_with(qapp, monkeypatch, tmp_path, IR1, IR2)
+    assert targets[-1] == (window.settings["dual_panel"], "stream_a")
+
+
+def test_dual_panel_ticked_clears_the_single_panel_target(qapp, monkeypatch, tmp_path):
+    _, targets = _config_chosen_with(qapp, monkeypatch, tmp_path, IR1, IR2, dual_panel=True)
+    assert targets[-1][1] is None
+
+
+def test_ir_vs_rgb_single_panel_leaves_the_hub_alone(qapp, monkeypatch, tmp_path):
+    _, targets = _config_chosen_with(qapp, monkeypatch, tmp_path, IR1, COLOR0)
+    assert targets[-1][1] is None
+
+
+def test_start_with_one_ir_vs_ir_camera_re_applies_the_target(qapp, monkeypatch, tmp_path):
+    targets = []
+    monkeypatch.setattr(main_window_module, "set_single_panel_target",
+                        lambda config, stream: targets.append((config, stream)))
+    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+    _configure_one_camera(window, "SN999", ir_pick=IR1, color_pick=IR2)
+    targets.clear()
+    monkeypatch.setattr(window.live_session_page, "set_context", lambda **kwargs: None)
+    monkeypatch.setattr(main_window_module, "find_device_by_serial", MagicMock())
+
+    window._on_start_multi_camera_session_requested()
+
+    assert targets == [(window.settings["dual_panel"], "stream_a")]

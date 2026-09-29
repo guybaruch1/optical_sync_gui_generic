@@ -660,6 +660,29 @@ every thread has finished (a stop failure goes to `camera_error` as
 still rejected at Start. Not handled: mixing one dual-panel camera with a
 single-panel camera - both would still drive panels independently.
 
+### Single-panel mode on a two-panel hub rig
+
+`LED-Panel.exe` talks to whichever panel is currently hub-exposed, and
+single-panel mode (`dual_panel_config is None`) historically never touched
+the hub. Every dual-panel sequence ends with stream_b's (color) panel
+exposed - `_run_on_both_panels` switches A then B, Calibration/ROI Select do
+stream_a then stream_b - and the Acroname hub keeps that port state across
+app restarts. Confirmed on the D585 rig: a single-panel IR-vs-IR test then
+drove the COLOR panel, so the IR panel never lit (ROI Select, Calibration)
+or stepped (Threshold Tuning). `engine/dual_panel_control.py` now keeps a
+single-panel target (`set_single_panel_target`, set by
+`MainWindow._apply_single_panel_target` on every Stream Config commit and
+again at Start): both picks infrared -> the IR panel (`stream_a`), both
+color -> the color panel (`stream_b`), anything else, or any dual-panel
+camera in the run, or cameras needing different panels -> no target
+(hub left alone). Every single-panel command path first exposes the target
+through the same `switched_to_stream_panel` enter/exit hub switch (so it
+works over the remote panel server too), skipping repeat switches until any
+dual-panel activity (`_mark_hub_changed`) may have moved the hub. A failed
+switch - e.g. a rig with no Acroname hub, which has only one panel - prints
+one warning to stderr and the commands still go out. `tests/conftest.py`
+resets the target around every test.
+
 ### `gui/widgets/live_plot.py` gotcha
 
 `LivePlot` subclasses `pg.PlotWidget`. Its own `clear()`-style method must be called `clear_data()`, not `clear()` - `pg.PlotWidget.__init__` copies several of its own methods (including `clear`) onto the *instance* itself, which in Python takes priority over a same-named method defined on the subclass, silently shadowing it. `add_series(name, color, display_name=None)` keeps `name` as the lookup key used everywhere (`add_point`, `get_series_data`, `set_series_visible`) and `display_name` as an independent, optional legend label.

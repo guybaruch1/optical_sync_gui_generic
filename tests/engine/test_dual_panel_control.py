@@ -834,3 +834,99 @@ def test_enter_stream_panel_disconnects_hub_if_switch_body_raises():
             enter_stream_panel(DUAL_PANEL_CONFIG, "stream_a")
 
     assert fake_hub.calls[-1] == "disconnect"
+
+
+# --- Single-panel target: on a two-panel hub rig, single-panel mode must
+# expose the RIGHT panel first. Real-hardware bug: every dual-panel sequence
+# ends with stream_b's (color) panel hub-exposed, so a later single-panel
+# IR-vs-IR test drove the color panel and the IR panel never lit/stepped. ---
+
+import pyrealsense2 as rs
+
+
+def _pick(stream_type):
+    return {"stream_type": stream_type, "stream_index": 1}
+
+
+@pytest.fixture(autouse=True)
+def _reset_single_panel_target():
+    dual_panel_control.set_single_panel_target(None, None)
+    yield
+    dual_panel_control.set_single_panel_target(None, None)
+
+
+def test_single_panel_stream_for_picks():
+    ir, color = rs.stream.infrared, rs.stream.color
+    assert dual_panel_control.single_panel_stream_for_picks(_pick(ir), _pick(ir)) == "stream_a"
+    assert dual_panel_control.single_panel_stream_for_picks(_pick(color), _pick(color)) == "stream_b"
+    assert dual_panel_control.single_panel_stream_for_picks(_pick(ir), _pick(color)) is None
+
+
+def test_single_panel_commands_switch_hub_to_target_panel_first():
+    dual_panel_control.set_single_panel_target(DUAL_PANEL_CONFIG, "stream_a")
+    order = []
+    with patch("engine.dual_panel_control.LEDPanel") as mock_led_panel, \
+         patch.object(dual_panel_control, "enter_stream_panel",
+                      side_effect=lambda cfg, s: order.append(("enter", s))), \
+         patch.object(dual_panel_control, "exit_stream_panel",
+                      side_effect=lambda cfg, s: order.append(("exit", s))):
+        mock_led_panel.stop.side_effect = lambda: order.append("stop")
+        mock_led_panel.all_leds_on.side_effect = lambda: order.append("all_on")
+        turn_all_leds_on(None)
+
+    assert order == [("enter", "stream_a"), ("exit", "stream_a"), "stop", "all_on"]
+
+
+def test_single_panel_switch_happens_once_until_dual_panel_activity():
+    dual_panel_control.set_single_panel_target(DUAL_PANEL_CONFIG, "stream_a")
+    with patch("engine.dual_panel_control.LEDPanel"), \
+         patch.object(dual_panel_control, "_run_on_both_panels"), \
+         patch.object(dual_panel_control, "enter_stream_panel") as enter, \
+         patch.object(dual_panel_control, "exit_stream_panel"):
+        turn_all_leds_on(None)
+        turn_all_leds_off(None)
+        start_scanning(5, 1, None)
+        stop_scanning(None)
+        assert enter.call_count == 1
+
+        turn_all_leds_on(DUAL_PANEL_CONFIG)  # dual activity leaves stream_b exposed
+        turn_all_leds_on(None)
+        assert enter.call_count == 2
+
+
+def test_no_single_panel_target_never_touches_the_hub():
+    with patch("engine.dual_panel_control.LEDPanel") as mock_led_panel, \
+         patch.object(dual_panel_control, "enter_stream_panel") as enter:
+        turn_all_leds_on(None)
+        start_scanning(5, 1, None)
+
+    enter.assert_not_called()
+    mock_led_panel.all_leds_on.assert_called_once()
+
+
+def test_single_panel_switch_failure_warns_once_and_still_sends_commands(capsys):
+    # A rig with no Acroname hub at all has only one panel - nothing to
+    # choose between, so a failed hub connection must not block it.
+    dual_panel_control.set_single_panel_target(DUAL_PANEL_CONFIG, "stream_a")
+    with patch("engine.dual_panel_control.LEDPanel") as mock_led_panel, \
+         patch.object(dual_panel_control, "enter_stream_panel",
+                      side_effect=RuntimeError("Failed to connect to a hub")) as enter:
+        turn_all_leds_on(None)
+        turn_all_leds_off(None)
+
+    assert enter.call_count == 1
+    mock_led_panel.all_leds_on.assert_called_once()
+    mock_led_panel.all_leds_off.assert_called_once()
+    assert "Failed to connect to a hub" in capsys.readouterr().err
+
+
+def test_single_panel_switch_in_remote_mode_goes_through_panel_rpc_client():
+    dual_panel_control.PANEL_CONNECTION["mode"] = "remote"
+    dual_panel_control.set_single_panel_target(DUAL_PANEL_CONFIG, "stream_a")
+    with patch("engine.dual_panel_control.LEDPanel"), \
+         patch("engine.panel_rpc_client.dual_panel_enter_stream_panel") as rpc_enter, \
+         patch("engine.panel_rpc_client.dual_panel_exit_stream_panel") as rpc_exit:
+        turn_all_leds_on(None)
+
+    rpc_enter.assert_called_once_with(DUAL_PANEL_CONFIG, "stream_a")
+    rpc_exit.assert_called_once_with(DUAL_PANEL_CONFIG, "stream_a")
