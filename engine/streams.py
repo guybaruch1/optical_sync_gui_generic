@@ -121,7 +121,10 @@ def parse_camera_tests_config(raw_tests):
     "stream_b_identity": {...}, "sensor_options": [{"stream_a": {width,
     height, fps, format}, "stream_b": {...}}, ...]}, ...] - still missing
     sensor_index, which only a live device query can resolve (see
-    resolve_camera_tests)."""
+    resolve_camera_tests). A test with no stream_b_identity is a single-stream
+    test: stream_b_identity is None and every sensor_options entry must have
+    only a stream_a side (its "stream_b" is None) - used by multi-camera runs
+    that compare one stream per camera across cameras."""
     def parse_identity(raw_identity):
         return {
             "stream_type": _parse_stream_type(raw_identity["stream_type"]),
@@ -138,14 +141,30 @@ def parse_camera_tests_config(raw_tests):
 
     parsed = []
     for test in raw_tests:
+        single_stream = test.get("stream_b_identity") is None
+        sensor_options = []
+        for entry in test["sensor_options"]:
+            has_b = entry.get("stream_b") is not None
+            if single_stream and has_b:
+                raise ValueError(
+                    "settings.yaml camera.stream_options: test {!r} has no stream_b_identity "
+                    "(a single-stream test) but one of its sensor_options entries has a "
+                    "stream_b side.".format(test["test_name"])
+                )
+            if not single_stream and not has_b:
+                raise ValueError(
+                    "settings.yaml camera.stream_options: test {!r} has a stream_b_identity but "
+                    "one of its sensor_options entries has no stream_b side.".format(test["test_name"])
+                )
+            sensor_options.append({
+                "stream_a": parse_side(entry["stream_a"]),
+                "stream_b": parse_side(entry["stream_b"]) if has_b else None,
+            })
         parsed.append({
             "test_name": test["test_name"],
             "stream_a_identity": parse_identity(test["stream_a_identity"]),
-            "stream_b_identity": parse_identity(test["stream_b_identity"]),
-            "sensor_options": [
-                {"stream_a": parse_side(entry["stream_a"]), "stream_b": parse_side(entry["stream_b"])}
-                for entry in test["sensor_options"]
-            ],
+            "stream_b_identity": None if single_stream else parse_identity(test["stream_b_identity"]),
+            "sensor_options": sensor_options,
         })
     return parsed
 
@@ -182,12 +201,18 @@ def resolve_camera_tests(device_options, parsed_tests):
     included, even with an empty "options" list, so the caller can tell
     "test exists but nothing on this rig matches it" apart from "test
     doesn't exist at all" and decide how to handle that (this project's
-    convention: omit it from the picker rather than show it disabled)."""
+    convention: omit it from the picker rather than show it disabled).
+    "pick_b" is None for a single-stream test (see parse_camera_tests_config)."""
     resolved_tests = []
     for test in parsed_tests:
         resolved_options = []
         for entry in test["sensor_options"]:
             pick_a = _find_matching_option(device_options, {**test["stream_a_identity"], **entry["stream_a"]})
+            if test.get("stream_b_identity") is None:
+                # Single-stream test - only stream A has to exist on this device.
+                if pick_a is not None:
+                    resolved_options.append({"pick_a": pick_a, "pick_b": None})
+                continue
             pick_b = _find_matching_option(device_options, {**test["stream_b_identity"], **entry["stream_b"]})
             if pick_a is not None and pick_b is not None:
                 resolved_options.append({"pick_a": pick_a, "pick_b": pick_b})

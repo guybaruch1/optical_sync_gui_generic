@@ -1152,3 +1152,60 @@ def test_continuous_capture_capture_global_ts_defaults_to_false():
 def test_continuous_capture_capture_global_ts_can_be_enabled():
     capture = ContinuousCapture("SN1", _ir_pick(), _color_pick(), capture_global_ts=True)
     assert capture.capture_global_ts is True
+
+
+def test_parse_camera_tests_config_accepts_a_single_stream_test():
+    raw = [{
+        "test_name": "IR1 only",
+        "stream_a_identity": {"stream_type": "infrared", "stream_index": 1},
+        "sensor_options": [{"stream_a": {"width": 1280, "height": 720, "fps": 30, "format": "y8"}}],
+    }]
+
+    parsed = parse_camera_tests_config(raw)
+
+    assert parsed == [{
+        "test_name": "IR1 only",
+        "stream_a_identity": {"stream_type": rs.stream.infrared, "stream_index": 1},
+        "stream_b_identity": None,
+        "sensor_options": [{
+            "stream_a": {"width": 1280, "height": 720, "fps": 30, "format": rs.format.y8},
+            "stream_b": None,
+        }],
+    }]
+
+
+def test_parse_camera_tests_config_rejects_stream_b_side_in_a_single_stream_test():
+    raw = [{
+        "test_name": "IR1 only",
+        "stream_a_identity": {"stream_type": "infrared", "stream_index": 1},
+        "sensor_options": [{"stream_a": {"width": 1280, "height": 720, "fps": 30, "format": "y8"},
+                            "stream_b": {"width": 1280, "height": 720, "fps": 30, "format": "y8"}}],
+    }]
+    with pytest.raises(ValueError, match="IR1 only"):
+        parse_camera_tests_config(raw)
+
+
+def test_parse_camera_tests_config_rejects_missing_stream_b_side_in_a_two_stream_test():
+    raw = [_raw_test(
+        "IR vs RGB", {"stream_type": "infrared", "stream_index": 1}, {"stream_type": "color", "stream_index": 0},
+        [{"stream_a": {"width": 1280, "height": 720, "fps": 30, "format": "y8"}}],
+    )]
+    with pytest.raises(ValueError, match="IR vs RGB"):
+        parse_camera_tests_config(raw)
+
+
+def test_resolve_camera_tests_single_stream_test_yields_pick_b_none():
+    device_options = [_device_option(rs.stream.infrared, 1, 1280, 720, 30, rs.format.y8)]
+    parsed_tests = [{
+        "test_name": "IR1 only",
+        "stream_a_identity": {"stream_type": rs.stream.infrared, "stream_index": 1},
+        "stream_b_identity": None,
+        "sensor_options": [
+            {"stream_a": {"width": 1280, "height": 720, "fps": 30, "format": rs.format.y8}, "stream_b": None},
+            {"stream_a": {"width": 640, "height": 480, "fps": 30, "format": rs.format.y8}, "stream_b": None},
+        ],
+    }]
+
+    resolved = resolve_camera_tests(device_options, parsed_tests)
+
+    assert resolved == [{"test_name": "IR1 only", "options": [{"pick_a": device_options[0], "pick_b": None}]}]
