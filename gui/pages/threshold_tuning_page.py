@@ -166,7 +166,11 @@ class ThresholdTuningPage(QWidget):
         stream_b_column.addLayout(stream_b_fraction_row)
 
         video_row.addLayout(stream_a_column)
-        video_row.addLayout(stream_b_column)
+        # A QWidget (not a bare layout) so a single-stream camera's context
+        # can hide the whole Stream B column at once - see set_context.
+        self.stream_b_column_widget = QWidget()
+        self.stream_b_column_widget.setLayout(stream_b_column)
+        video_row.addWidget(self.stream_b_column_widget)
         video_row.addStretch(1)
         layout.addLayout(video_row)
 
@@ -333,6 +337,8 @@ class ThresholdTuningPage(QWidget):
         ctx = self._context
         if ctx is None:
             return
+        if ctx["{}_cropped_on".format(stream_name)] is None:
+            return  # single-stream camera - no Stream B to detect
         cropped = ctx["{}_cropped_on".format(stream_name)]
         centroids, _ = detect_led_centroids(cropped, value, ctx["min_blob_area"])
         centroids = merge_close_centroids(centroids)
@@ -375,6 +381,8 @@ class ThresholdTuningPage(QWidget):
         ctx = self._context
         if ctx is None:
             return
+        if ctx["{}_cropped_on".format(stream_name)] is None:
+            return  # single-stream camera - no Stream B to commit
         centroids = getattr(self, "_{}_pending_centroids".format(stream_name))
         if not centroids:
             return  # nothing detected - leave the last-good context untouched
@@ -416,7 +424,11 @@ class ThresholdTuningPage(QWidget):
                      min_blob_area, row_gap_px, calibration_neighborhood_size,
                      stream_a_positions, stream_b_positions,
                      dual_panel_config=None, enable_depth_for_ir_sync=True):
-        self._context = dict(
+        # A single-stream camera (pick_b None) has no Stream B to preview,
+        # tune or persist.
+        single_stream = pick_b is None
+        self._context = dict(single_stream=single_stream,
+
             ctx=ctx, device_serial=device_serial, pick_a=pick_a, pick_b=pick_b, camera_controls=camera_controls,
             stream_a_xy=stream_a_xy, stream_b_xy=stream_b_xy,
             stream_a_on=stream_a_on, stream_a_off=stream_a_off,
@@ -444,10 +456,11 @@ class ThresholdTuningPage(QWidget):
             # detect_led_centroids/draw_detected_centroids both operate on
             # this same cropped "on" frame throughout the page's lifetime.
             stream_a_cropped_on=crop_to_roi(image_a_on, stream_a_roi),
-            stream_b_cropped_on=crop_to_roi(image_b_on, stream_b_roi),
+            stream_b_cropped_on=crop_to_roi(image_b_on, stream_b_roi) if not single_stream else None,
         )
         self.stream_a_threshold_fraction_spinbox.setValue(stream_a_threshold_fraction_default)
         self.stream_b_threshold_fraction_spinbox.setValue(stream_b_threshold_fraction_default)
+        self.stream_b_column_widget.setHidden(single_stream)
         # float(), not int(round(...)) - settings.yaml's switch_time_ms can
         # already be fractional, and truncating it here would silently
         # throw that precision away before the operator even sees it.
@@ -464,7 +477,8 @@ class ThresholdTuningPage(QWidget):
         self._update_confirm_switch_time_button_state()
         display_name = _camera_display_name(camera_name, device_serial)
         self.stream_a_title_label.setText("{} - {}".format(display_name, stream_a_label))
-        self.stream_b_title_label.setText("{} - {}".format(display_name, stream_b_label))
+        if not single_stream:
+            self.stream_b_title_label.setText("{} - {}".format(display_name, stream_b_label))
         self.status_label.setText("")
 
         self._stream_a_last_detected_count = None
@@ -476,9 +490,10 @@ class ThresholdTuningPage(QWidget):
         # recompute for both streams regardless of whether the slider value
         # actually changes.
         self.stream_a_detection_slider.setValue(stream_a_otsu_threshold)
-        self.stream_b_detection_slider.setValue(stream_b_otsu_threshold)
         self._on_detection_threshold_changed("stream_a", self.stream_a_detection_slider.value())
-        self._on_detection_threshold_changed("stream_b", self.stream_b_detection_slider.value())
+        if not single_stream:
+            self.stream_b_detection_slider.setValue(stream_b_otsu_threshold)
+            self._on_detection_threshold_changed("stream_b", self.stream_b_detection_slider.value())
 
         # Defensive - a stale preview from a previous context (if
         # set_context is ever called again) must not keep running against
@@ -693,6 +708,8 @@ class ThresholdTuningPage(QWidget):
 
     @property
     def stream_b_threshold(self):
+        if self._context["stream_b_on"] is None:
+            return None  # single-stream camera
         return compute_threshold(
             self._context["stream_b_on"], self._context["stream_b_off"],
             self.stream_b_threshold_fraction_spinbox.value(),
@@ -726,30 +743,42 @@ class ThresholdTuningPage(QWidget):
 
     def _on_continue_clicked(self):
         ctx = self._context
-        slug_a, slug_b = stream_slug(ctx["pick_a"]), stream_slug(ctx["pick_b"])
+        slug_a = stream_slug(ctx["pick_a"])
         res_a = (ctx["pick_a"]["width"], ctx["pick_a"]["height"])
-        res_b = (ctx["pick_b"]["width"], ctx["pick_b"]["height"])
         stream_a_ids = list(ctx["stream_a_positions"].keys())
-        stream_b_ids = list(ctx["stream_b_positions"].keys())
-        if len(stream_a_ids) != len(stream_b_ids) or len(stream_a_ids) != ctx["num_leds"]:
-            QMessageBox.warning(
-                self,
-                "LED count mismatch",
-                "Detection tuning found {} LED(s) for one stream and {} for the other, but "
-                "settings.yaml's test.num_leds is {}. The live session's position-gap math "
-                "assumes all three match - proceeding anyway, but treat position-gap results "
-                "with caution until this is resolved (retune detection, or fix "
-                "test.num_leds).".format(len(stream_a_ids), len(stream_b_ids), ctx["num_leds"]),
+        if ctx["single_stream"]:
+            if len(stream_a_ids) != ctx["num_leds"]:
+                QMessageBox.warning(
+                    self, "LED count mismatch",
+                    "Detection tuning found {} LED(s), but settings.yaml's test.num_leds is {}. The "
+                    "cross-camera Optical Sync math assumes they match - proceeding anyway, but treat "
+                    "its results with caution until this is resolved (retune detection, or fix "
+                    "test.num_leds).".format(len(stream_a_ids), ctx["num_leds"]),
+                )
+            update_config_leds(ctx["config_path"], ctx["camera_name"], slug_a, ctx["stream_a_positions"], res_a)
+        else:
+            slug_b = stream_slug(ctx["pick_b"])
+            res_b = (ctx["pick_b"]["width"], ctx["pick_b"]["height"])
+            stream_b_ids = list(ctx["stream_b_positions"].keys())
+            if len(stream_a_ids) != len(stream_b_ids) or len(stream_a_ids) != ctx["num_leds"]:
+                QMessageBox.warning(
+                    self,
+                    "LED count mismatch",
+                    "Detection tuning found {} LED(s) for one stream and {} for the other, but "
+                    "settings.yaml's test.num_leds is {}. The live session's position-gap math "
+                    "assumes all three match - proceeding anyway, but treat position-gap results "
+                    "with caution until this is resolved (retune detection, or fix "
+                    "test.num_leds).".format(len(stream_a_ids), len(stream_b_ids), ctx["num_leds"]),
+                )
+            # Persists whatever the CURRENT positions are - the original
+            # Calibration-computed ones if the operator never touched the
+            # detection-threshold sliders (a safe no-op rewrite), or the
+            # retuned ones if they did. Same helper CalibrationPage's own
+            # _run_calibration already uses to write its first-ever result.
+            update_config_leds(
+                ctx["config_path"], ctx["camera_name"],
+                slug_a, ctx["stream_a_positions"], res_a,
+                slug_b, ctx["stream_b_positions"], res_b,
             )
-        # Persists whatever the CURRENT positions are - the original
-        # Calibration-computed ones if the operator never touched the
-        # detection-threshold sliders (a safe no-op rewrite), or the
-        # retuned ones if they did. Same helper CalibrationPage's own
-        # _run_calibration already uses to write its first-ever result.
-        update_config_leds(
-            ctx["config_path"], ctx["camera_name"],
-            slug_a, ctx["stream_a_positions"], res_a,
-            slug_b, ctx["stream_b_positions"], res_b,
-        )
         self._stop_preview_blocking()
         self.tuning_done.emit()

@@ -591,3 +591,64 @@ def test_back_button_stops_a_running_preview_first(qapp):
 
     assert page.preview_thread is None
     assert emitted == [True]  # still navigates away, same as Continue does
+
+
+def _single_stream_context(**overrides):
+    ctx = _minimal_context(
+        pick_b=None, stream_b_xy=None, stream_b_on=None, stream_b_off=None, stream_b_roi=None,
+        stream_b_label=None, image_b_on=None, image_b_off=None, stream_b_otsu_threshold=None,
+        stream_b_positions=None,
+    )
+    ctx.update(overrides)
+    return ctx
+
+
+def _single_stream_page():
+    page = ThresholdTuningPage()
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        page.set_context(**_single_stream_context())
+    return page
+
+
+def test_single_stream_set_context_hides_stream_b_column(qapp):
+    page = _single_stream_page()
+    assert page.stream_b_column_widget.isHidden()
+    assert page.stream_b_threshold is None
+    assert page.stream_b_xy is None
+    assert page.stream_a_threshold is not None
+
+
+def test_two_stream_set_context_shows_stream_b_column_again(qapp):
+    page = _single_stream_page()
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        page.set_context(**_minimal_context())
+    assert not page.stream_b_column_widget.isHidden()
+
+
+def test_single_stream_start_passes_none_for_stream_b(qapp):
+    page = _single_stream_page()
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        page._on_start_clicked()
+    assert _FakePreviewThread.last_args[3] is None  # pick_b
+    assert _FakePreviewThread.last_kwargs["stream_b_xy"] is None
+
+
+def test_single_stream_continue_persists_only_stream_a(qapp):
+    page = _single_stream_page()
+    with patch("gui.pages.threshold_tuning_page.update_config_leds") as mock_update, \
+         patch("gui.pages.threshold_tuning_page.stream_slug", return_value="infrared1"), \
+         patch("gui.pages.threshold_tuning_page.QMessageBox.warning") as mock_warning:
+        page._on_continue_clicked()
+    args = mock_update.call_args[0]
+    assert len(args) == 5  # config_path, camera_name, slug_a, positions_a, res_a
+    mock_warning.assert_not_called()  # 2 LEDs detected == num_leds 2
+
+
+def test_single_stream_continue_warns_when_stream_a_count_differs_from_num_leds(qapp):
+    page = _single_stream_page()
+    page._context["num_leds"] = 5
+    with patch("gui.pages.threshold_tuning_page.update_config_leds"), \
+         patch("gui.pages.threshold_tuning_page.stream_slug", return_value="infrared1"), \
+         patch("gui.pages.threshold_tuning_page.QMessageBox.warning") as mock_warning:
+        page._on_continue_clicked()
+    mock_warning.assert_called_once()

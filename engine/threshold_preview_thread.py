@@ -46,7 +46,9 @@ class ThresholdPreviewThread(QThread):
         # See SessionEngineThread's identical comment - capped once here at
         # what's actually safe for THIS run's real measured LED spacing.
         self._stream_a_safe_size = safe_neighborhood_size(stream_a_xy, neighborhood_size)
-        self._stream_b_safe_size = safe_neighborhood_size(stream_b_xy, neighborhood_size)
+        self._stream_b_safe_size = (
+            safe_neighborhood_size(stream_b_xy, neighborhood_size) if stream_b_xy is not None else neighborhood_size
+        )
         self.scan_direction = scan_direction
         self.switch_time_ms = switch_time_ms
         # How many frame-pairs between video-panel updates - every pair is
@@ -117,11 +119,13 @@ class ThresholdPreviewThread(QThread):
                     stream_a_bright = sample_all_neighborhood_brightness(
                         stream_a_image, self.stream_a_xy, self._stream_a_safe_size
                     )
-                    stream_b_bright = sample_all_neighborhood_brightness(
-                        stream_b_image, self.stream_b_xy, self._stream_b_safe_size
-                    )
                     self.frame_ready.emit("stream_a", stream_a_image, frame_index, stream_a_bright)
-                    self.frame_ready.emit("stream_b", stream_b_image, frame_index, stream_b_bright)
+                    # A single-stream camera (pick_b None) has no stream B.
+                    if self.pick_b is not None:
+                        stream_b_bright = sample_all_neighborhood_brightness(
+                            stream_b_image, self.stream_b_xy, self._stream_b_safe_size
+                        )
+                        self.frame_ready.emit("stream_b", stream_b_image, frame_index, stream_b_bright)
                 frame_index += 1
         except Exception as exc:  # surfaced to the UI rather than crashing the worker thread silently
             self.error.emit(str(exc))
