@@ -660,6 +660,30 @@ every thread has finished (a stop failure goes to `camera_error` as
 still rejected at Start. Not handled: mixing one dual-panel camera with a
 single-panel camera - both would still drive panels independently.
 
+### Single-stream cameras (one stream per camera, cross-camera only)
+
+A settings.yaml test with no `stream_b_identity` (and only a `stream_a` side
+per `sensor_options` entry, e.g. "IR1 only") makes that camera
+SINGLE-STREAM: `pick_b is None` everywhere downstream - the one signal every
+layer checks, no separate flag. `resolve_and_group`/`ContinuousCapture` open
+only stream A (depth still co-enabled for an IR pick per
+`camera_sync.enable_depth_for_ir_sync`); ROI Select/Calibration/Threshold
+Tuning handle only stream A and `update_config_leds` writes only its slug.
+In a multi-camera run such a camera runs `engine/metrics.py`'s
+`LedDetectionMetric` instead of `PairingGapMetric`+`PositionGapMetric`: it
+emits the same `stream_a_last_led` key the cross-camera reconciler reads,
+and its `led_detection_excluded`/`_exclude_reason` replace the intra-camera
+`position_gap_ms_*` exclusion the reconciler otherwise reuses
+(`_own_led_exclusion`). Its per-camera tab (`CameraLiveSessionPanel(single_stream=True)`)
+is slim - one video panel, frame drops, detected LED, single-image
+snapshots; the Cross-Camera Sync tab is the result. Mixing single- and
+two-stream cameras is allowed (pairs match on shared slugs as always).
+Single-stream cameras never use dual-panel mode (Stream Config disables the
+checkbox); the single-panel hub target picks the IR panel for an IR pick,
+the color panel for a color pick. A run of one single-stream camera can't
+start (Camera Hub disables Start, and `_on_start_multi_camera_session_requested`
+refuses defensively) - `LiveSessionPage` never sees `pick_b=None`.
+
 ### Single-panel mode on a two-panel hub rig
 
 `LED-Panel.exe` talks to whichever panel is currently hub-exposed, and
