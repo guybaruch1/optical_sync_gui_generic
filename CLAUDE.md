@@ -614,9 +614,33 @@ a recovery file: an UNTICKED Start on the detected rig runs
 any thread) - any node not at the driver's `default=` is reset and
 read back, and the TSC is always stopped; failure blocks Start, since a
 "free-running" baseline that is secretly still synced is worse than no
-run. A TICKED Start that finds a node already in the sync value restores
-it to the driver default at the end rather than "as found" (which would
-keep it stuck at 2 forever).
+run. A TICKED Start that finds a node already in the sync value (or whose
+as-found value can't be read) restores it to the driver default at the end
+rather than "as found" (which would keep it stuck at 2 forever). The
+free-run cleanup covers EVERY node carrying the control, not just two
+(`resolve_sync_nodes(..., expected=None)`), and also runs before a
+SINGLE-camera run of a GMSL D585 (`detect_gmsl_camera` +
+`MainWindow._reset_leftover_gmsl_sync_for_solo_camera`) - the SDK
+`inter_cam_sync_mode` reset on that path never touches the kernel mode.
+`restore_sync_mode`/`disengage()` still never raise, but now read back and
+return what could not be undone; the controller reports it via
+`camera_error("GMSL sync", ...)`. `MainWindow.closeEvent` waits for every
+camera thread before `main.py`'s exit disengage, so the mode is never
+rewritten under an open stream.
+
+**Post-Start sync check (ticked runs only).** `engage()`'s readback happens
+before any stream opens, so it can't catch a stream start knocking the mode
+back. `MultiCameraSessionController._begin_gmsl_verification` waits for
+every camera's FIRST row (under external sync a camera only delivers frames
+on trigger pulses, so this is the hardware evidence the TSC reaches it),
+then calls `GmslTscSync.verify()`, which re-reads `camera_sync_mode` on
+every engaged node. A wrong/unreadable mode, a camera thread ending before
+its first frame, or no frames within `gmsl_verify_timeout_s` (20 s) ->
+`gmsl_sync_failed` (the page shows a `QMessageBox.critical`) and every
+camera is stopped; success -> `gmsl_sync_verified` (status line). An
+operator Stop before streaming cancels the check silently. The TSC has no
+GET ioctl, so "trigger running" is what this process started, not a
+readback. Frame RATE is not checked against the trigger rate.
 
 `tools/tsc_trigger/ext_sync_gen.py` is the user's script vendored
 unchanged; `engine/gmsl_sync.KernelTscIO` imports its ioctl helpers

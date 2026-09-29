@@ -1019,6 +1019,81 @@ def test_start_multi_camera_session_requested_survives_genlock_reset_failure_for
     assert window.stack.currentWidget() is window.live_session_page
 
 
+# --- Solo GMSL D585: a killed synced run leaves the kernel camera_sync_mode
+# at External Sync, which the SDK reset above never touches. ---
+
+def _solo_window(qapp, monkeypatch, tmp_path):
+    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window._on_tuning_done()
+    return window
+
+
+def test_solo_gmsl_camera_clears_leftover_sync_before_routing(qapp, monkeypatch, tmp_path):
+    window = _solo_window(qapp, monkeypatch, tmp_path)
+    monkeypatch.setattr(main_window_module, "detect_gmsl_camera", lambda panel, serial, lookup: serial == "SN123")
+    resets = []
+    monkeypatch.setattr(main_window_module, "reset_leftover_sync", lambda control: resets.append(control) or [])
+
+    window._on_start_multi_camera_session_requested()
+
+    assert resets == ["camera_sync_mode"]
+    assert window.stack.currentWidget() is window.live_session_page
+
+
+def test_solo_gmsl_camera_blocks_start_when_leftover_sync_cannot_be_cleared(qapp, monkeypatch, tmp_path):
+    window = _solo_window(qapp, monkeypatch, tmp_path)
+    start_page = window.stack.currentWidget()
+    monkeypatch.setattr(main_window_module, "detect_gmsl_camera", lambda *a: True)
+
+    def failing_reset(control):
+        raise RuntimeError("camera_sync_mode on /dev/video2 could not be reset")
+    monkeypatch.setattr(main_window_module, "reset_leftover_sync", failing_reset)
+    critical = _capture_critical(monkeypatch)
+
+    window._on_start_multi_camera_session_requested()
+
+    assert len(critical) == 1
+    assert window.stack.currentWidget() is start_page
+
+
+def test_solo_non_gmsl_camera_never_touches_v4l2(qapp, monkeypatch, tmp_path):
+    window = _solo_window(qapp, monkeypatch, tmp_path)
+    monkeypatch.setattr(main_window_module, "detect_gmsl_camera", lambda *a: False)
+    monkeypatch.setattr(main_window_module, "reset_leftover_sync",
+                        lambda control: pytest.fail("must not reset V4L2 on a non-GMSL camera"))
+
+    window._on_start_multi_camera_session_requested()
+
+    assert window.stack.currentWidget() is window.live_session_page
+
+
+def test_close_event_waits_for_every_session_thread_before_closing(qapp, monkeypatch, tmp_path):
+    window = _solo_window(qapp, monkeypatch, tmp_path)
+    events = []
+
+    class _Thread:
+        def __init__(self, name):
+            self.name = name
+
+        def wait(self):
+            events.append(("wait", self.name))
+
+    window.live_session_page.engine_thread = _Thread("solo")
+    monkeypatch.setattr(window.live_session_page, "stop_session", lambda: events.append("stop solo"))
+    monkeypatch.setattr(window.multi_camera_live_session_page, "stop_all_sessions",
+                        lambda: events.append("stop multi"))
+    monkeypatch.setattr(window.multi_camera_live_session_page, "session_threads",
+                        lambda: [_Thread("cam1"), _Thread("cam2")])
+
+    window.close()
+
+    assert events[:2] == ["stop solo", "stop multi"]
+    assert sorted(events[2:]) == [("wait", "cam1"), ("wait", "cam2"), ("wait", "solo")]
+    window.live_session_page.engine_thread = None
+
+
 # --- Genlock (inter_cam_sync_mode) role resolution: MainWindow embeds the
 # raw per-camera-model value fresh at Start-time (using whichever camera is
 # CURRENTLY master), via engine.streams.resolve_inter_cam_sync_value against

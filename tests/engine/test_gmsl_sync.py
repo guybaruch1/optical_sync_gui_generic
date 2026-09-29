@@ -495,3 +495,121 @@ def test_free_run_guard_engage_resets_and_disengage_is_a_noop():
     assert guard.reset_nodes == NODES
     assert kernel.writes == writes_after_engage  # nothing written back
     tsc.stop.assert_called_once()
+
+
+# --- Review fixes: restore reporting, unreadable as-found, any-count free-run
+# cleanup, single-camera detection. ---
+
+def test_restore_reports_write_failure_and_readback_mismatch():
+    kernel = _FakeKernel({"/dev/video2": 2, "/dev/video10": 2},
+                         fail_write_on={"/dev/video2"}, ignore_write_on={"/dev/video10"})
+
+    problems = gmsl_sync.restore_sync_mode({"/dev/video2": 0, "/dev/video10": 0}, "camera_sync_mode",
+                                           run_v4l2=kernel)
+
+    assert len(problems) == 2
+    assert "/dev/video2" in problems[0] and "failed" in problems[0]
+    assert "/dev/video10" in problems[1] and "reads back 2" in problems[1]
+
+
+def test_restore_returns_no_problems_on_success():
+    kernel = _FakeKernel({"/dev/video2": 2, "/dev/video10": 2})
+
+    assert gmsl_sync.restore_sync_mode({"/dev/video2": 0, "/dev/video10": 1}, "camera_sync_mode",
+                                       run_v4l2=kernel) == []
+
+
+def test_apply_sync_mode_restores_unreadable_node_to_driver_default():
+    # An as-found value that could not be read must not mean "restore
+    # nothing" - the node would stay in external sync after the run.
+    kernel = _FakeKernel({"/dev/video2": 1, "/dev/video10": 0})
+    failed_reads = []
+
+    def run(node, *args, timeout=15):
+        # Only the first -C on /dev/video2 (the as-found read) fails.
+        if args == ("-C", "camera_sync_mode") and node == "/dev/video2" and not failed_reads:
+            failed_reads.append(node)
+            return 1, "", "read failed"
+        return kernel(node, *args, timeout=timeout)
+
+    assert gmsl_sync.apply_sync_mode(NODES, "camera_sync_mode", 2, run_v4l2=run) == {
+        "/dev/video2": 0, "/dev/video10": 0}
+
+
+def test_disengage_reports_what_could_not_be_undone():
+    order = []
+    sync, kernel, tsc = _gmsl_sync(order)
+    sync.engage()
+    tsc.stop.side_effect = RuntimeError("TSC ioctl failed: x")
+    kernel.fail_write_on = {"/dev/video10"}
+
+    problems = sync.disengage()
+
+    assert problems[0].startswith("TSC trigger could not be stopped")
+    assert any("/dev/video10" in problem for problem in problems[1:])
+    assert sync.disengage() == []  # idempotent
+
+
+def test_resolve_sync_nodes_any_count_accepts_one_or_three():
+    for nodes in (["/dev/video-rs-depth-0"],
+                  ["/dev/video-rs-depth-0", "/dev/video-rs-depth-1", "/dev/video-rs-depth-2"]):
+        run = _fake_v4l2({node: L_WITH_SYNC for node in nodes})
+        found = gmsl_sync.resolve_sync_nodes("camera_sync_mode", run_v4l2=run,
+                                             glob_fn=_fake_glob({"/dev/video-rs-*": nodes}), expected=None)
+        assert found == nodes
+
+
+def test_resolve_sync_nodes_any_count_still_raises_on_none():
+    with pytest.raises(RuntimeError, match="at least 1"):
+        gmsl_sync.resolve_sync_nodes("camera_sync_mode", run_v4l2=_fake_v4l2({}),
+                                     glob_fn=_fake_glob({}), expected=None)
+
+
+def test_reset_leftover_sync_covers_a_single_attached_camera():
+    kernel = _FakeKernel({"/dev/video2": 2})
+
+    reset_nodes = gmsl_sync.reset_leftover_sync(
+        "camera_sync_mode", run_v4l2=kernel, tsc_io=MagicMock(),
+        glob_fn=_fake_glob({"/dev/video-rs-*": ["/dev/video2"]}))
+
+    assert reset_nodes == ["/dev/video2"]
+    assert kernel.values == {"/dev/video2": 0}
+
+
+def test_detect_gmsl_camera():
+    detect = gmsl_sync.detect_gmsl_camera
+    lookup = {"s1": _device(), "usb": _device(usb=True), "d455": _device(name="Intel RealSense D455")}.__getitem__
+
+    assert detect(REMOTE, "s1", lookup, path_exists=lambda p: True) is True
+    assert detect({"mode": "local"}, "s1", lookup, path_exists=lambda p: True) is False
+    assert detect(REMOTE, "s1", lookup, path_exists=lambda p: False) is False
+    assert detect(REMOTE, "usb", lookup, path_exists=lambda p: True) is False
+    assert detect(REMOTE, "d455", lookup, path_exists=lambda p: True) is False
+    assert detect(REMOTE, "missing", lookup, path_exists=lambda p: True) is False
+
+
+def test_verify_passes_while_nodes_stay_in_sync_mode():
+    sync, kernel, _ = _gmsl_sync([])
+    sync.engage()
+
+    assert sync.verify() == []
+    assert sync.nodes == NODES
+
+
+def test_verify_reports_a_node_knocked_out_of_sync_mode_after_streams_opened():
+    sync, kernel, _ = _gmsl_sync([])
+    sync.engage()
+    kernel.values["/dev/video10"] = 0  # e.g. stream start reset it
+
+    problems = sync.verify()
+
+    assert problems == ["camera_sync_mode on /dev/video10 reads 0 after the streams opened, expected 2"]
+
+
+def test_verify_reports_unreadable_node_and_never_engaged():
+    sync, kernel, _ = _gmsl_sync([])
+    assert "never engaged" in " ".join(sync.verify())
+
+    sync.engage()
+    kernel.unreadable = {"/dev/video2"}
+    assert sync.verify() == ["camera_sync_mode on /dev/video2 reads nothing after the streams opened, expected 2"]

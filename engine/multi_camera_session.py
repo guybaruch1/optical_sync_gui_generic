@@ -25,7 +25,7 @@ relaying logic against a fake thread_factory.
 import time
 from dataclasses import dataclass, field
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QTimer, Signal
 
 from engine.cross_camera_reconciler import CrossCameraReconciler, build_cross_camera_pair_specs
 from engine.dual_panel_control import start_scanning, stop_scanning
@@ -95,11 +95,16 @@ class MultiCameraSessionController(QObject):
     # cleanup to actually complete" reasoning LiveSessionPage already uses
     # for a single camera, generalized to N).
     all_sessions_finished = Signal(dict)
+    # GMSL TSC sync post-Start check (see _begin_gmsl_verification): the
+    # engaged V4L2 nodes once every camera streams and the mode still reads
+    # back, or an operator-facing message (the run is stopped) when not.
+    gmsl_sync_verified = Signal(object)
+    gmsl_sync_failed = Signal(str)
 
     def __init__(self, camera_specs, pairing_gap_outlier_threshold_us=100_000,
                  thread_factory=None, device_lookup=None, sync_setter=None,
                  camera_start_stagger_s=2.0, gmsl_sync=None, panel_start=None, panel_stop=None,
-                 parent=None):
+                 gmsl_verify_timeout_s=20.0, parent=None):
         super().__init__(parent)
         self._camera_specs = camera_specs
         self._thread_factory = thread_factory or SessionEngineThread
@@ -110,6 +115,14 @@ class MultiCameraSessionController(QObject):
         # engaged after the genlock step and before any thread, disengaged
         # only once every thread has finished. None = today's behavior.
         self._gmsl_sync = gmsl_sync
+        # Post-Start sync check state - see _begin_gmsl_verification.
+        self._gmsl_verify_timeout_s = gmsl_verify_timeout_s
+        self._awaiting_first_row = set()
+        self._gmsl_verify_done = True
+        self._gmsl_verify_timer = QTimer(self)
+        self._gmsl_verify_timer.setSingleShot(True)
+        self._gmsl_verify_timer.timeout.connect(self._on_gmsl_verify_timeout)
+        self._last_error_by_camera = {}
         # Used only when 2+ cameras share the same dual LED panels (see
         # start_all): the controller then arms/stops those panels ONCE for
         # the whole run instead of letting each camera thread do it.
@@ -273,6 +286,7 @@ class MultiCameraSessionController(QObject):
                 self._wire_thread(spec.camera_id, thread)
                 self._threads[spec.camera_id] = thread
                 thread.start()
+            self._begin_gmsl_verification()
         except Exception:
             # The trigger must not keep running for a run that never got
             # its threads up. If some threads already started, stop them and
@@ -288,8 +302,60 @@ class MultiCameraSessionController(QObject):
             raise
 
     def stop_all(self):
+        # An operator Stop before every camera streamed is not a sync
+        # failure - cancel the pending check silently.
+        self._cancel_gmsl_verification()
         for thread in self._threads.values():
             thread.request_stop()
+
+    def _begin_gmsl_verification(self):
+        """GmslTscSync.engage() confirms the mode BEFORE any stream opens.
+        This confirms it once every camera actually streams: wait for each
+        camera's first row (under external sync a camera only delivers
+        frames on trigger pulses, so a first frame is the hardware evidence
+        the TSC reaches it), then gmsl_sync.verify() re-reads the V4L2 mode.
+        No frames within gmsl_verify_timeout_s, a camera thread ending
+        before its first frame, or any verify() problem -> gmsl_sync_failed
+        and every camera is stopped. Only for a collaborator that has
+        verify() (GmslTscSync) - never the free-run guard."""
+        if not callable(getattr(self._gmsl_sync, "verify", None)):
+            return
+        self._awaiting_first_row = set(self._threads)
+        self._last_error_by_camera = {}
+        self._gmsl_verify_done = False
+        self._gmsl_verify_timer.start(int(self._gmsl_verify_timeout_s * 1000))
+
+    def _cancel_gmsl_verification(self):
+        self._gmsl_verify_done = True
+        self._awaiting_first_row = set()
+        self._gmsl_verify_timer.stop()
+
+    def _fail_gmsl_verification(self, message):
+        self._cancel_gmsl_verification()
+        self.gmsl_sync_failed.emit(message)
+        self.stop_all()
+
+    def _finish_gmsl_verification(self):
+        self._cancel_gmsl_verification()
+        try:
+            problems = list(self._gmsl_sync.verify() or [])
+        except Exception as exc:
+            problems = ["the sync check itself failed: {}".format(exc)]
+        if problems:
+            self._fail_gmsl_verification(
+                "The cameras are NOT confirmed in GMSL sync, so the run was stopped:\n\n- "
+                + "\n- ".join(problems))
+            return
+        self.gmsl_sync_verified.emit(list(getattr(self._gmsl_sync, "nodes", []) or []))
+
+    def _on_gmsl_verify_timeout(self):
+        if self._gmsl_verify_done or not self._awaiting_first_row:
+            return
+        self._fail_gmsl_verification(
+            "No frames from camera(s) {} within {:g} s of Start, so the run was stopped. Under GMSL "
+            "external sync a camera only delivers frames on TSC trigger pulses - the trigger is not "
+            "reaching it, or the camera did not start.".format(
+                ", ".join(sorted(self._awaiting_first_row)), self._gmsl_verify_timeout_s))
 
     def _wire_thread(self, camera_id, thread):
         thread.frame_ready.connect(
@@ -301,10 +367,18 @@ class MultiCameraSessionController(QObject):
         thread.session_finished.connect(
             lambda rows, cid=camera_id: self._on_session_finished_rows(cid, rows)
         )
-        thread.error.connect(lambda message, cid=camera_id: self.camera_error.emit(cid, message))
+        thread.error.connect(lambda message, cid=camera_id: self._on_thread_error(cid, message))
         thread.finished.connect(lambda cid=camera_id: self._on_thread_finished(cid))
 
+    def _on_thread_error(self, camera_id, message):
+        self._last_error_by_camera[camera_id] = message
+        self.camera_error.emit(camera_id, message)
+
     def _on_row_ready(self, camera_id, row):
+        if not self._gmsl_verify_done and camera_id in self._awaiting_first_row:
+            self._awaiting_first_row.discard(camera_id)
+            if not self._awaiting_first_row:
+                self._finish_gmsl_verification()
         self.camera_row_ready.emit(camera_id, row)
         if self._reconciler is None:
             return
@@ -323,6 +397,12 @@ class MultiCameraSessionController(QObject):
         # errored before ever reaching AcquisitionLoop - default to an empty
         # row list rather than KeyError-ing on a camera that never produced any.
         self._finished_rows_by_camera.setdefault(camera_id, [])
+        if not self._gmsl_verify_done and camera_id in self._awaiting_first_row:
+            self._fail_gmsl_verification(
+                "Camera {} stopped before delivering any frame, so the run was stopped{}. Under GMSL "
+                "external sync this usually means the TSC trigger is not reaching it.".format(
+                    camera_id, ": {}".format(self._last_error_by_camera[camera_id])
+                    if camera_id in self._last_error_by_camera else ""))
         if set(self._finished_rows_by_camera) == set(self._threads):
             # Only NOW, once every camera thread's own hardware cleanup has
             # genuinely finished (not merely stop_all() having been called -
@@ -331,7 +411,12 @@ class MultiCameraSessionController(QObject):
             self._reset_genlock_roles()
             self._stop_shared_dual_panels()
             if self._gmsl_sync is not None:
-                self._gmsl_sync.disengage()
+                # disengage never raises; a restore that did not stick means
+                # the next run may start still externally synced - say so.
+                problems = list(self._gmsl_sync.disengage() or [])
+                if problems:
+                    self.camera_error.emit("GMSL sync", "Could not fully undo GMSL sync: {}".format(
+                        "; ".join(problems)))
             self.all_sessions_finished.emit(dict(self._finished_rows_by_camera))
 
     def _stop_shared_dual_panels(self):

@@ -65,7 +65,10 @@ from engine.streams import (
 )
 from engine.rgb_mode import ensure_mode
 from engine.dual_panel_control import set_single_panel_target, single_panel_stream_for_picks
-from engine.gmsl_sync import detect_gmsl_tsc_rig, DEFAULT_GMSL_TSC_SYNC, unknown_gmsl_tsc_settings_keys
+from engine.gmsl_sync import (
+    detect_gmsl_tsc_rig, detect_gmsl_camera, reset_leftover_sync, DEFAULT_GMSL_TSC_SYNC,
+    unknown_gmsl_tsc_settings_keys,
+)
 from domain.calibration import load_led_positions
 from settings import ensure_output_dir
 
@@ -764,6 +767,8 @@ class MainWindow(QMainWindow):
                 set_inter_cam_sync_mode(device, INTER_CAM_SYNC_DEFAULT)
             except Exception:
                 pass
+            if not self._reset_leftover_gmsl_sync_for_solo_camera(only_camera["config"]["device_serial"]):
+                return
             self.live_session_page.set_context(ctx=self.ctx, **only_camera["config"])
             self.stack.setCurrentWidget(self.live_session_page)
             return
@@ -886,6 +891,42 @@ class MainWindow(QMainWindow):
         self.multi_camera_live_session_page.set_cameras(
             self.ctx, cameras, gmsl_tsc_sync=gmsl_tsc_sync, gmsl_free_run_cleanup=gmsl_free_run_cleanup)
         self.stack.setCurrentWidget(self.multi_camera_live_session_page)
+
+    def _reset_leftover_gmsl_sync_for_solo_camera(self, device_serial):
+        """A solo run never goes through the multi-camera page's
+        GmslFreeRunGuard, and the SDK inter_cam_sync_mode reset above does
+        nothing to the kernel camera_sync_mode on this D585 firmware - so a
+        killed earlier GMSL-synced run would leave this camera in external
+        sync with no trigger, delivering no frames. On the Orin, for a GMSL
+        D585, clear that (and stop the TSC) first. Returns False - Start
+        blocked, operator told - if the cleanup fails."""
+        if not detect_gmsl_camera(self.settings.get("panel_connection"), device_serial,
+                                  lambda serial: find_device_by_serial(self.ctx, serial)):
+            return True
+        gmsl_settings = {**DEFAULT_GMSL_TSC_SYNC,
+                         **((self.settings.get("camera_sync") or {}).get("gmsl_tsc_sync") or {})}
+        try:
+            reset_leftover_sync(gmsl_settings["control"])
+        except Exception as exc:
+            QMessageBox.critical(self, "Could not clear leftover GMSL sync", str(exc))
+            return False
+        return True
+
+    def closeEvent(self, event):
+        # Closing the window mid-run must wait for every camera thread's own
+        # hardware cleanup BEFORE main.py's disengage_all_engaged() stops the
+        # TSC and rewrites camera_sync_mode - doing that under a still-open
+        # pipeline is exactly what MultiCameraSessionController defers to
+        # _on_thread_finished for. Also avoids "QThread: Destroyed while
+        # thread is still running" on exit.
+        self.live_session_page.stop_session()
+        self.multi_camera_live_session_page.stop_all_sessions()
+        threads = list(self.multi_camera_live_session_page.session_threads())
+        if self.live_session_page.engine_thread is not None:
+            threads.append(self.live_session_page.engine_thread)
+        for thread in threads:
+            thread.wait()
+        super().closeEvent(event)
 
     def _apply_single_panel_target(self, camera_configs):
         """On a two-panel hub rig, single-panel mode must drive the panel the

@@ -715,6 +715,23 @@ def test_gmsl_disengaged_only_after_every_thread_finished():
     gmsl.disengage.assert_called_once()
 
 
+def test_gmsl_restore_failure_is_reported_and_run_still_finishes():
+    gmsl = MagicMock()
+    gmsl.disengage.return_value = ["/dev/video2: camera_sync_mode reads back 2, not 0"]
+    controller, fake_threads = _controller(_gmsl_specs(), gmsl_sync=gmsl)
+    errors, finished = [], []
+    controller.camera_error.connect(lambda cid, message: errors.append((cid, message)))
+    controller.all_sessions_finished.connect(finished.append)
+    controller.start_all(ctx=object())
+
+    fake_threads["s1"].finished.emit()
+    fake_threads["s2"].finished.emit()
+
+    assert errors == [("GMSL sync", "Could not fully undo GMSL sync: "
+                                    "/dev/video2: camera_sync_mode reads back 2, not 0")]
+    assert len(finished) == 1
+
+
 def test_stop_all_never_disengages_gmsl_by_itself():
     gmsl = MagicMock()
     controller, _ = _controller(_gmsl_specs(), gmsl_sync=gmsl)
@@ -762,3 +779,97 @@ def test_shared_panel_stop_failure_is_reported_and_never_blocks_finishing():
 
     assert len(finished) == 1
     assert errors == [("LED panels", "Failed to stop the shared LED panels: relay COM port gone")]
+
+
+# --- Post-Start GMSL sync check: once every camera streams, re-read the
+# V4L2 mode; no frames / early stop / wrong mode -> gmsl_sync_failed + stop. ---
+
+def _verifying_controller(verify_result=None):
+    gmsl = MagicMock()
+    gmsl.verify.return_value = verify_result or []
+    gmsl.nodes = ["/dev/video2", "/dev/video10"]
+    controller, fake_threads = _controller(_gmsl_specs(), gmsl_sync=gmsl)
+    verified, failed = [], []
+    controller.gmsl_sync_verified.connect(verified.append)
+    controller.gmsl_sync_failed.connect(failed.append)
+    controller.start_all(ctx=object())
+    return controller, fake_threads, gmsl, verified, failed
+
+
+def test_gmsl_sync_verified_only_once_every_camera_streams():
+    controller, fake_threads, gmsl, verified, failed = _verifying_controller()
+
+    fake_threads["s1"].row_ready.emit({"pair_index": 0})
+    gmsl.verify.assert_not_called()
+    fake_threads["s2"].row_ready.emit({"pair_index": 0})
+    fake_threads["s2"].row_ready.emit({"pair_index": 1})
+
+    gmsl.verify.assert_called_once()
+    assert verified == [["/dev/video2", "/dev/video10"]]
+    assert failed == []
+    assert not any(thread.stop_requested for thread in fake_threads.values())
+
+
+def test_gmsl_sync_mode_wrong_after_streams_open_fails_and_stops_run():
+    controller, fake_threads, gmsl, verified, failed = _verifying_controller(
+        verify_result=["camera_sync_mode on /dev/video2 reads 0 after the streams opened, expected 2"])
+
+    fake_threads["s1"].row_ready.emit({"pair_index": 0})
+    fake_threads["s2"].row_ready.emit({"pair_index": 0})
+
+    assert verified == []
+    assert len(failed) == 1 and "/dev/video2 reads 0" in failed[0]
+    assert all(thread.stop_requested for thread in fake_threads.values())
+
+
+def test_gmsl_camera_stopping_before_first_frame_fails_with_its_error():
+    controller, fake_threads, gmsl, verified, failed = _verifying_controller()
+    fake_threads["s1"].row_ready.emit({"pair_index": 0})
+
+    fake_threads["s2"].error.emit("Frame didn't arrive within 5000")
+    fake_threads["s2"].finished.emit()
+
+    assert len(failed) == 1
+    assert "cam2" in failed[0] and "Frame didn't arrive within 5000" in failed[0]
+    assert fake_threads["s1"].stop_requested
+    gmsl.verify.assert_not_called()
+
+
+def test_gmsl_no_frames_within_timeout_fails():
+    controller, fake_threads, gmsl, verified, failed = _verifying_controller()
+    fake_threads["s1"].row_ready.emit({"pair_index": 0})
+
+    controller._on_gmsl_verify_timeout()
+
+    assert len(failed) == 1 and "cam2" in failed[0] and "cam1" not in failed[0]
+    assert all(thread.stop_requested for thread in fake_threads.values())
+
+
+def test_operator_stop_before_streaming_is_not_a_sync_failure():
+    controller, fake_threads, gmsl, verified, failed = _verifying_controller()
+
+    controller.stop_all()
+    controller._on_gmsl_verify_timeout()
+    for thread in fake_threads.values():
+        thread.finished.emit()
+
+    assert failed == [] and verified == []
+
+
+def test_free_run_guard_run_has_no_sync_check():
+    class _Guard:
+        def engage(self):
+            pass
+
+        def disengage(self):
+            return []
+
+    controller, fake_threads = _controller(_gmsl_specs(), gmsl_sync=_Guard())
+    failed = []
+    controller.gmsl_sync_failed.connect(failed.append)
+    controller.start_all(ctx=object())
+
+    for thread in fake_threads.values():
+        thread.finished.emit()
+
+    assert failed == []

@@ -46,11 +46,15 @@ def main():
 
     exit_code = app.exec()
     if settings["panel_connection"]["mode"] == "remote":
-        panel_rpc_client.close()
         # Closing the window mid-run must not leave the Orin's TSC
         # generator running or the cameras stuck in external-sync mode.
-        # Only undoes what this process engaged.
-        disengage_all_engaged()
+        # Only undoes what this process engaged. MainWindow.closeEvent has
+        # already waited for every camera thread, so no stream is open.
+        # First, so a panel-connection close failure can't skip it.
+        try:
+            disengage_all_engaged()
+        finally:
+            panel_rpc_client.close()
     sys.exit(exit_code)
 
 

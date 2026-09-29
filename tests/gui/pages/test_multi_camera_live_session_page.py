@@ -1356,3 +1356,21 @@ def test_mixed_run_keeps_intra_camera_metrics_for_the_two_stream_camera(qapp, tm
     assert [m.name for m in fake_threads["SN2"].kwargs["test_session"].config.metrics] == [
         "pairing_gap_us", "position_gap_ms"]
     assert page._panels["cam2"].stream_b_panel is not None
+
+
+def test_gmsl_sync_check_failure_pops_up_and_success_shows_status(qapp, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    shown = []
+    monkeypatch.setattr(QMessageBox, "critical", staticmethod(lambda *a, **k: shown.append(a) or QMessageBox.Ok))
+    page, _, _ = _page_with_fake_gmsl()
+    page.set_cameras(object(), _two_cameras(tmp_path), gmsl_tsc_sync=GMSL_CONFIG)
+    page.start_all_sessions()
+    assert "confirming" in page.status_label.text()
+
+    page._controller.gmsl_sync_verified.emit(["/dev/video2", "/dev/video10"])
+    assert "verified" in page.status_label.text() and "/dev/video10" in page.status_label.text()
+    assert "30 Hz" in page.status_label.text()
+
+    page._controller.gmsl_sync_failed.emit("camera_sync_mode on /dev/video2 reads 0")
+    assert len(shown) == 1 and "reads 0" in shown[0][2]
+    assert "failed" in page.status_label.text()

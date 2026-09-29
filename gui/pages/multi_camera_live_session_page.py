@@ -634,6 +634,8 @@ class MultiCameraLiveSessionPage(QWidget):
         self._controller.cross_pair_ready.connect(self._on_cross_pair_ready)
         self._controller.cross_stats_ready.connect(self._on_cross_stats_ready)
         self._controller.all_sessions_finished.connect(self._on_all_sessions_finished)
+        self._controller.gmsl_sync_verified.connect(self._on_gmsl_sync_verified)
+        self._controller.gmsl_sync_failed.connect(self._on_gmsl_sync_failed)
 
         self.status_label.setText("")
         self._session_running = True
@@ -665,6 +667,9 @@ class MultiCameraLiveSessionPage(QWidget):
             self.status_label.setText("Failed to start: {}".format(exc))
             QMessageBox.critical(self, "Could not start the multi-camera session", str(exc))
             return
+        if self._gmsl_tsc_sync is not None:
+            self.status_label.setText(
+                "GMSL sync engaged - confirming camera sync mode once every camera is streaming...")
         guard_reset_nodes = getattr(controller_kwargs.get("gmsl_sync"), "reset_nodes", None)
         if self._gmsl_free_run_cleanup is not None and guard_reset_nodes:
             self.status_label.setText(
@@ -674,6 +679,24 @@ class MultiCameraLiveSessionPage(QWidget):
     def stop_all_sessions(self):
         if self._controller is not None:
             self._controller.stop_all()
+
+    def _on_gmsl_sync_verified(self, nodes):
+        config = self._gmsl_tsc_sync or {}
+        self.status_label.setText(
+            "GMSL sync verified: {}={} on {} with every camera streaming, TSC trigger at {} Hz.".format(
+                config.get("control", "camera_sync_mode"), config.get("sync_mode_value", "?"),
+                ", ".join(nodes) or "the camera nodes", config.get("fps", "?")))
+
+    def _on_gmsl_sync_failed(self, message):
+        # The controller has already stopped every camera; the toolbar
+        # unlocks on all_sessions_finished as for any other stop.
+        self.status_label.setText("GMSL sync check failed - run stopped.")
+        QMessageBox.critical(self, "Cameras are not in GMSL sync", message)
+
+    def session_threads(self):
+        """The current run's camera threads (empty when nothing ran yet) -
+        for MainWindow.closeEvent's wait-before-exit."""
+        return list(self._controller.threads.values()) if self._controller is not None else []
 
     def _on_back_clicked(self):
         # Same confirm-before-interrupting reasoning as LiveSessionPage's own

@@ -107,22 +107,29 @@ def _nodes_with_control(candidates, control, run_v4l2, errors):
     return found
 
 
-def resolve_sync_nodes(control, run_v4l2=run_v4l2, glob_fn=glob.glob):
-    """The two /dev nodes carrying `control`: librealsense udev symlinks
-    first (metadata nodes excluded), then every /dev/videoN. Exactly 2 or
-    RuntimeError. Assigned in /dev order - which node is which camera does
-    not matter, since both cameras get the SAME value on D500."""
+def resolve_sync_nodes(control, run_v4l2=run_v4l2, glob_fn=glob.glob, expected=2):
+    """The /dev nodes carrying `control`: librealsense udev symlinks first
+    (metadata nodes excluded), then every /dev/videoN. With expected=2 (a
+    synced run) exactly 2 or RuntimeError - assigned in /dev order, which
+    node is which camera does not matter since both cameras get the SAME
+    value on D500. With expected=None (the free-run cleanup) every node
+    that carries it, at least 1 - a leftover mode must be cleared on EVERY
+    GMSL camera, however many are attached."""
+    def enough(found):
+        return len(found) == expected if expected is not None else len(found) >= 1
+
     errors = []
     symlinks = sorted((n for n in glob_fn("/dev/video-rs-*") if _METADATA_MARKER not in n),
                       key=_trailing_index)
     found = _nodes_with_control(symlinks, control, run_v4l2, errors)
-    if len(found) != 2:
+    if not enough(found):
         scanned = sorted(glob_fn("/dev/video[0-9]*"), key=_trailing_index)
         found = _nodes_with_control(scanned, control, run_v4l2, errors)
-    if len(found) != 2:
+    if not enough(found):
         raise RuntimeError(
-            "Cannot place V4L2 control {!r}: {} node(s) expose it ({}), expected 2.{}".format(
+            "Cannot place V4L2 control {!r}: {} node(s) expose it ({}), expected {}.{}".format(
                 control, len(found), ", ".join(found) or "none",
+                expected if expected is not None else "at least 1",
                 ("\n" + "\n".join(errors)) if errors else "",
             )
         )
@@ -137,17 +144,28 @@ def _read_value(node, control, run_v4l2):
 
 
 def restore_sync_mode(as_found, control, run_v4l2=run_v4l2):
-    """Best-effort: writes each node's as-found value back. A node whose
-    as-found value was unreadable (None) is skipped - there is nothing
+    """Best-effort: writes each node's as-found value back and reads it
+    back. A node whose as-found value is None is skipped - there is nothing
     known to restore it to. Never raises (same convention as
-    MultiCameraSessionController._reset_genlock_roles)."""
+    MultiCameraSessionController._reset_genlock_roles); returns one message
+    per node that could not be restored, so the caller can tell the
+    operator the next run may start still externally synced."""
+    problems = []
     for node, value in as_found.items():
         if value is None:
             continue
         try:
-            run_v4l2(node, "-c", "{}={}".format(control, value))
-        except Exception:
+            code, out, err = run_v4l2(node, "-c", "{}={}".format(control, value))
+            readback = _read_value(node, control, run_v4l2) if code == 0 else None
+        except Exception as exc:
+            problems.append("{}: {}".format(node, exc))
             continue
+        if code != 0:
+            problems.append("{}: writing {}={} failed: {}".format(
+                node, control, value, err or out or "exit {}".format(code)))
+        elif readback != value:
+            problems.append("{}: {} reads back {}, not {}".format(node, control, readback, value))
+    return problems
 
 
 def apply_sync_mode(nodes, control, value, run_v4l2=run_v4l2):
@@ -156,9 +174,11 @@ def apply_sync_mode(nodes, control, value, run_v4l2=run_v4l2):
     back each node. Any write failure or readback mismatch restores every
     node already written and raises RuntimeError. Returns
     {node: value_to_restore_or_None} - normally the as-found value, but the
-    driver's own default (0 if unknown) when a node was ALREADY in `value`:
-    that is almost always a killed earlier run's leftover, and restoring it
-    as-found would leave the camera stuck in external sync forever."""
+    driver's own default (0 if unknown) when a node was ALREADY in `value`
+    (almost always a killed earlier run's leftover - restoring it as-found
+    would leave the camera stuck in external sync forever) or when its
+    value could not be read at all (restoring nothing would leave it at
+    `value` after the run)."""
     as_found = {}
     for node in nodes:
         code, listing, err = run_v4l2(node, "-L")
@@ -167,7 +187,7 @@ def apply_sync_mode(nodes, control, value, run_v4l2=run_v4l2):
             raise RuntimeError("{} on {} accepts {}..{}, so {} cannot be written".format(
                 control, node, limits[0], limits[1], value))
         found = _read_value(node, control, run_v4l2)
-        if found == value:
+        if found is None or found == value:
             default = control_default(listing, control) if code == 0 else None
             found = default if default is not None else 0
         as_found[node] = found
@@ -278,10 +298,16 @@ class GmslTscSync:
         self._glob_fn = glob_fn
         self._as_found = None
         self._tsc_running = False
+        self._nodes = []
+
+    @property
+    def nodes(self):
+        return list(self._nodes)
 
     def engage(self):
         nodes = resolve_sync_nodes(self._control, run_v4l2=self._run_v4l2, glob_fn=self._glob_fn)
         self._as_found = apply_sync_mode(nodes, self._control, self._value, run_v4l2=self._run_v4l2)
+        self._nodes = list(nodes)
         try:
             self._tsc_io.start(self._fps, self._duty)
         except Exception:
@@ -293,18 +319,44 @@ class GmslTscSync:
         if self._settle_s > 0:
             self._sleep(self._settle_s)
 
+    def verify(self):
+        """Called once every camera is actually streaming: engage()'s own
+        readback happens BEFORE any stream opens, so it can't catch a
+        stream start (librealsense opening the device) knocking the mode
+        back. Re-reads every engaged node and returns one message per
+        problem - empty means both cameras are still in the sync mode with
+        the trigger this process started. The TSC has no GET ioctl, so
+        "running" is what this process knows it started, not a hardware
+        readback; frames arriving at all under external sync (the
+        controller's own check) is the hardware evidence for the trigger."""
+        problems = []
+        if not self._nodes:
+            problems.append("GMSL sync was never engaged")
+        if not self._tsc_running:
+            problems.append("the TSC trigger is not running")
+        for node in self._nodes:
+            value = _read_value(node, self._control, self._run_v4l2)
+            if value != self._value:
+                problems.append("{} on {} reads {} after the streams opened, expected {}".format(
+                    self._control, node, "nothing" if value is None else value, self._value))
+        return problems
+
     def disengage(self):
+        """Returns one message per thing that could not be undone (empty
+        when everything was) - never raises."""
+        problems = []
         if self in _ENGAGED:
             _ENGAGED.remove(self)
         if self._tsc_running:
             self._tsc_running = False
             try:
                 self._tsc_io.stop()
-            except Exception:
-                pass
+            except Exception as exc:
+                problems.append("TSC trigger could not be stopped: {}".format(exc))
         if self._as_found is not None:
             as_found, self._as_found = self._as_found, None
-            restore_sync_mode(as_found, self._control, run_v4l2=self._run_v4l2)
+            problems.extend(restore_sync_mode(as_found, self._control, run_v4l2=self._run_v4l2))
+        return problems
 
 
 def reset_leftover_sync(control, run_v4l2=run_v4l2, tsc_io=None, glob_fn=glob.glob):
@@ -313,8 +365,10 @@ def reset_leftover_sync(control, run_v4l2=run_v4l2, tsc_io=None, glob_fn=glob.gl
     confirmed), and the TSC is always stopped - it has no GET ioctl, so a
     trigger still pulsing from a killed ticked run cannot be detected, only
     stopped. Raises RuntimeError if either step fails: a baseline that is
-    secretly still synced is worse than no run. Returns the nodes reset."""
-    nodes = resolve_sync_nodes(control, run_v4l2=run_v4l2, glob_fn=glob_fn)
+    secretly still synced is worse than no run. Covers EVERY node carrying
+    the control (not just two), so it also works for a single-camera run or
+    a rig with a third GMSL camera attached. Returns the nodes reset."""
+    nodes = resolve_sync_nodes(control, run_v4l2=run_v4l2, glob_fn=glob_fn, expected=None)
     reset_nodes = []
     for node in nodes:
         code, listing, err = run_v4l2(node, "-L")
@@ -355,17 +409,37 @@ class GmslFreeRunGuard:
                                                tsc_io=self._tsc_io, glob_fn=self._glob_fn)
 
     def disengage(self):
-        pass
+        return []
 
 
 def disengage_all_engaged():
     """App-exit safety net: disengage (TSC off, as-found mode restored)
     every GmslTscSync this process engaged and never disengaged - e.g. the
-    window closed mid-run. A camera left in external-sync mode with no
+    window closed mid-run (MainWindow.closeEvent first waits for every
+    camera thread, so this never rewrites the mode under a live stream). A camera left in external-sync mode with no
     trigger delivers no frames on the next free-running run. Never raises
     (disengage itself never does)."""
     for sync in list(_ENGAGED):
         sync.disengage()
+
+
+def _is_gmsl_d585(device):
+    return ("D585" in device.get_info(rs.camera_info.name)
+            and not device.supports(rs.camera_info.usb_type_descriptor))
+
+
+def detect_gmsl_camera(panel_connection, serial, device_lookup, path_exists=os.path.exists):
+    """True for one D585 on the Orin's GMSL deserializer: remote panel
+    mode, /dev/cdi_tsc present, D585, no USB descriptor. Used to self-heal
+    a leftover external-sync mode before a SINGLE-camera run, which
+    detect_gmsl_tsc_rig (exactly 2 cameras) never covers. Any lookup
+    failure means False."""
+    if (panel_connection or {}).get("mode") != "remote" or not path_exists(CDI_TSC_DEV):
+        return False
+    try:
+        return _is_gmsl_d585(device_lookup(serial))
+    except Exception:
+        return False
 
 
 def detect_gmsl_tsc_rig(panel_connection, serials, device_lookup, path_exists=os.path.exists):
@@ -378,12 +452,6 @@ def detect_gmsl_tsc_rig(panel_connection, serials, device_lookup, path_exists=os
     if len(serials) != 2 or not path_exists(CDI_TSC_DEV):
         return False
     try:
-        for serial in serials:
-            device = device_lookup(serial)
-            if "D585" not in device.get_info(rs.camera_info.name):
-                return False
-            if device.supports(rs.camera_info.usb_type_descriptor):
-                return False
+        return all(_is_gmsl_d585(device_lookup(serial)) for serial in serials)
     except Exception:
         return False
-    return True
