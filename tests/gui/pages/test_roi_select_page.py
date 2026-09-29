@@ -242,3 +242,29 @@ def test_back_button_disabled_during_capture(qapp, monkeypatch):
 
     assert observed_enabled_during_capture == [False]
     assert page.back_button.isEnabled()  # restored afterward, even on failure
+
+
+def test_single_stream_capture_selects_one_roi_and_emits_none_for_b(qapp, monkeypatch):
+    pick_a = {"stream_type": rs.stream.infrared, "stream_index": 1, "sensor_index": 0,
+              "width": 4, "height": 2, "fps": 30, "format": rs.format.y8}
+    monkeypatch.setattr(roi_select_page_module, "find_device_by_serial", lambda ctx, serial: object())
+    monkeypatch.setattr(roi_select_page_module, "resolve_and_group", lambda device, a, b: [])
+    monkeypatch.setattr(roi_select_page_module, "_apply_camera_controls", lambda *args: [])
+    monkeypatch.setattr(roi_select_page_module, "turn_all_leds_on", lambda config: None)
+    monkeypatch.setattr(roi_select_page_module, "turn_all_leds_off", lambda config: None)
+    monkeypatch.setattr(roi_select_page_module.time, "sleep", lambda s: None)
+    monkeypatch.setattr(
+        roi_select_page_module, "capture_synced_frame_pair",
+        lambda groups, on_both_streaming=None, settle_frames=15: (on_both_streaming(), {(rs.stream.infrared, 1): bytes(8)})[1],
+    )
+    windows = []
+    monkeypatch.setattr(roi_select_page_module, "_select_roi", lambda image, title: windows.append(title) or (0, 0, 4, 2))
+    page = RoiSelectPage()
+    page.set_context(ctx=None, device_serial="123", pick_a=pick_a, pick_b=None, camera_controls={})
+    received = []
+    page.roi_chosen.connect(received.append)
+
+    page._on_capture_clicked()
+
+    assert received == [((0, 0, 4, 2), None)]
+    assert len(windows) == 1
