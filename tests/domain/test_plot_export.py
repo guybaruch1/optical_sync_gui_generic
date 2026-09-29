@@ -230,3 +230,15 @@ def test_frame_drop_axis_splits_by_stream_as_mirrored_spikes():
     stream_a_line, stream_b_line = lines
     assert list(stream_a_line.get_ydata()) == [0, 1, 0, 1]
     assert list(stream_b_line.get_ydata()) == [0, 0, -1, -1]
+
+
+def test_single_stream_figure_has_one_frame_drop_axis():
+    rows = [{"pair_index": i, "stream_a_frame_drop": i == 1, "stream_b_frame_drop": False} for i in range(3)]
+    fig = _build_figure(rows, single_stream=True)
+    try:
+        assert len(fig.axes) == 1
+        assert [line.get_label() for line in fig.axes[0].get_lines()] == ["Stream A frame drop"]
+        assert list(fig.axes[0].get_lines()[0].get_ydata()) == [0, 1, 0]
+    finally:
+        import matplotlib.pyplot as plt
+        plt.close(fig)

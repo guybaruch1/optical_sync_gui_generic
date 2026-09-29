@@ -79,11 +79,24 @@ def _style_axis(ax):
         ax.legend(facecolor=SURFACE, edgecolor=GRIDLINE, labelcolor=MUTED_TEXT)
 
 
-def _build_figure(rows):
+def _build_figure(rows, single_stream=False):
     """Builds (but doesn't save/close) the 3-axis figure - split out from
     export_session_plot so tests can inspect the plotted line data directly
-    without round-tripping through a saved PNG."""
+    without round-tripping through a saved PNG. single_stream (a
+    single-stream camera - one stream, no intra-camera sync) builds ONE axis
+    instead: stream A's frame drops only - its sync numbers live in the
+    cross-camera export."""
     pair_indices = [row["pair_index"] for row in rows]
+    if single_stream:
+        stream_a_only_drop = [1 if row.get("stream_a_frame_drop") else 0 for row in rows]
+        fig, drop_ax = plt.subplots(1, 1, figsize=(_figure_width(len(rows)), _FIGURE_HEIGHT / 3.0))
+        fig.patch.set_facecolor(SURFACE)
+        drop_ax.plot(pair_indices, stream_a_only_drop, label="Stream A frame drop", color=STREAM_A_DROP_COLOR)
+        drop_ax.set_ylabel("Frame drop")
+        drop_ax.set_xlabel("Pair index")
+        _style_axis(drop_ax)
+        fig.tight_layout()
+        return fig
     # Excluded pairs (syncer_outlier / frame_drop / warmup / miss) can carry
     # wild values (e.g. a multi-hundred-thousand-us pairing gap during the
     # initial auto-exposure warmup) - plotting them would force the y-axis
@@ -124,8 +137,8 @@ def _build_figure(rows):
     return fig
 
 
-def export_session_plot(rows, path):
-    fig = _build_figure(rows)
+def export_session_plot(rows, path, single_stream=False):
+    fig = _build_figure(rows, single_stream=single_stream)
     fig.savefig(path, facecolor=SURFACE)
     plt.close(fig)
 

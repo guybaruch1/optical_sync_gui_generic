@@ -515,3 +515,70 @@ def test_back_button_stops_a_running_preview_first(qapp, monkeypatch):
     fake_thread.wait.assert_called_once()
     assert page.preview_thread is None
     assert emitted == [True]  # still navigates away, same as Next does
+
+
+def _single_tests(name="IR1 only", pick=IR1):
+    return [{"test_name": name, "options": [{"pick_a": pick, "pick_b": None}]}]
+
+
+def test_sensor_option_label_single_stream():
+    assert _sensor_option_label({"pick_a": IR1, "pick_b": None}) == "1280x720 @ 30fps (y8)"
+
+
+def test_single_stream_test_hides_exposure_b_and_disables_dual_panel(qapp):
+    page = StreamConfigPage()
+    page.populate(ctx=None, device_serial="123", tests=_single_tests(), preferred_dual_panel=True)
+
+    assert page.is_single_stream is True
+    assert page._camera_controls["exposure_b_spin"].isHidden()
+    assert page._camera_controls["exposure_b_label"].isHidden()
+    assert not page.dual_panel_checkbox.isEnabled()
+    assert not page.dual_panel_checkbox.isChecked()
+
+
+def test_switching_from_single_stream_to_two_stream_test_restores_controls(qapp):
+    page = StreamConfigPage()
+    page.populate(ctx=None, device_serial="123",
+                  tests=_single_tests() + _tests(("IR vs RGB sync", [(IR1, COLOR0)])))
+
+    page.combo_test.setCurrentIndex(1)
+
+    assert page.is_single_stream is False
+    assert not page._camera_controls["exposure_b_spin"].isHidden()
+    assert page.dual_panel_checkbox.isEnabled()
+
+
+def test_next_emits_none_pick_b_for_single_stream_test(qapp):
+    page = StreamConfigPage()
+    page.populate(ctx=None, device_serial="123", tests=_single_tests())
+    page._camera_controls["manual_radio"].setChecked(True)
+    received = []
+    page.config_chosen.connect(received.append)
+
+    page._on_next_clicked()
+
+    pick_a, pick_b, camera_controls = received[0]
+    assert (pick_a, pick_b) == (IR1, None)
+    assert camera_controls["exposure_a"] == 8500
+    assert camera_controls["exposure_b"] is None
+
+
+def test_start_preview_passes_none_pick_b_for_single_stream_test(qapp, monkeypatch):
+    import gui.pages.stream_config_page as stream_config_page_module
+    constructed = []
+
+    class _FakePreview:
+        def __init__(self, ctx, serial, pick_a, pick_b, **kwargs):
+            constructed.append((pick_a, pick_b))
+            self.frame_ready = MagicMock()
+            self.error = MagicMock()
+        def start(self):
+            pass
+
+    monkeypatch.setattr(stream_config_page_module, "StreamPreviewThread", _FakePreview)
+    page = StreamConfigPage()
+    page.populate(ctx=None, device_serial="123", tests=_single_tests())
+
+    page._on_start_preview_clicked()
+
+    assert constructed == [(IR1, None)]

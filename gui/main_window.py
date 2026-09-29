@@ -54,7 +54,7 @@ from gui.pages.roi_select_page import RoiSelectPage, stream_label
 from gui.pages.calibration_page import CalibrationPage
 from gui.pages.threshold_tuning_page import ThresholdTuningPage
 from gui.pages.camera_hub_page import CameraHubPage, CameraSummary
-from gui.pages.multi_camera_live_session_page import MultiCameraLiveSessionPage
+from gui.pages.multi_camera_live_session_page import MultiCameraLiveSessionPage, _stream_identities
 from gui.pages.live_session_page import LiveSessionPage
 from state.gui_state import GuiState, save_gui_state
 from engine.streams import (
@@ -65,7 +65,10 @@ from engine.streams import (
 )
 from engine.rgb_mode import ensure_mode
 from engine.dual_panel_control import set_single_panel_target, single_panel_stream_for_picks
-from engine.gmsl_sync import detect_gmsl_tsc_rig, DEFAULT_GMSL_TSC_SYNC, unknown_gmsl_tsc_settings_keys
+from engine.gmsl_sync import (
+    detect_gmsl_tsc_rig, detect_gmsl_camera, reset_leftover_sync, DEFAULT_GMSL_TSC_SYNC,
+    unknown_gmsl_tsc_settings_keys,
+)
 from domain.calibration import load_led_positions
 from settings import ensure_output_dir
 
@@ -89,7 +92,7 @@ def _slave_genlock_color_resolution_conflicts(cameras, inter_cam_sync_settings):
             continue
         color_pick = next(
             (pick for pick in (camera["config"]["pick_a"], camera["config"]["pick_b"])
-             if pick["stream_type"] == rs.stream.color),
+             if pick is not None and pick["stream_type"] == rs.stream.color),
             None,
         )
         if color_pick is None:
@@ -404,15 +407,17 @@ class MainWindow(QMainWindow):
         self.gui_state.stream_a_auto_exposure = camera_controls["auto_exposure"]
         self.gui_state.stream_a_exposure = camera_controls["exposure_a"]
         self.gui_state.stream_a_gain = None
-        self.gui_state.stream_b_type = pick_b["stream_type"].name
-        self.gui_state.stream_b_index = pick_b["stream_index"]
-        self.gui_state.stream_b_width = pick_b["width"]
-        self.gui_state.stream_b_height = pick_b["height"]
-        self.gui_state.stream_b_fps = pick_b["fps"]
-        self.gui_state.stream_b_emitter_enabled = camera_controls["emitter_enabled"]
-        self.gui_state.stream_b_auto_exposure = camera_controls["auto_exposure"]
-        self.gui_state.stream_b_exposure = camera_controls["exposure_b"]
-        self.gui_state.stream_b_gain = None
+        # a single-stream camera has no stream B - leave the last two-stream prefill values alone
+        if pick_b is not None:
+            self.gui_state.stream_b_type = pick_b["stream_type"].name
+            self.gui_state.stream_b_index = pick_b["stream_index"]
+            self.gui_state.stream_b_width = pick_b["width"]
+            self.gui_state.stream_b_height = pick_b["height"]
+            self.gui_state.stream_b_fps = pick_b["fps"]
+            self.gui_state.stream_b_emitter_enabled = camera_controls["emitter_enabled"]
+            self.gui_state.stream_b_auto_exposure = camera_controls["auto_exposure"]
+            self.gui_state.stream_b_exposure = camera_controls["exposure_b"]
+            self.gui_state.stream_b_gain = None
         save_gui_state(self.gui_state)
 
         self.roi_page.set_context(
@@ -425,7 +430,8 @@ class MainWindow(QMainWindow):
     def _on_roi_chosen(self, rois):
         stream_a_roi, stream_b_roi = rois
         self.gui_state.stream_a_roi = list(stream_a_roi)
-        self.gui_state.stream_b_roi = list(stream_b_roi)
+        if stream_b_roi is not None:
+            self.gui_state.stream_b_roi = list(stream_b_roi)
         save_gui_state(self.gui_state)
 
         calib_settings = self.settings["calibration"]
@@ -449,17 +455,30 @@ class MainWindow(QMainWindow):
         pick_a, pick_b, camera_controls = self._pick_a, self._pick_b, self._camera_controls
         camera_name = self._current_device_name()
         config_path = self.settings["paths"]["config_path"]
-        slug_a, slug_b = stream_slug(pick_a), stream_slug(pick_b)
+        single_stream = pick_b is None
+        slug_a = stream_slug(pick_a)
+        slug_b = None if single_stream else stream_slug(pick_b)
+        res_b = None if single_stream else (pick_b["width"], pick_b["height"])
         stream_a_positions, stream_b_positions = load_led_positions(
-            config_path, camera_name,
-            slug_a, (pick_a["width"], pick_a["height"]),
-            slug_b, (pick_b["width"], pick_b["height"]),
+            config_path, camera_name, slug_a, (pick_a["width"], pick_a["height"]), slug_b, res_b,
         )
 
         stream_a_ids = list(stream_a_positions.keys())
-        stream_b_ids = list(stream_b_positions.keys())
         stream_a_xy = np.array([stream_a_positions[i][:2] for i in stream_a_ids])
-        stream_b_xy = np.array([stream_b_positions[i][:2] for i in stream_b_ids])
+        stream_a_on = np.array([stream_a_positions[i][2] for i in stream_a_ids])
+        stream_a_off = np.array([stream_a_positions[i][3] for i in stream_a_ids])
+        if single_stream:
+            stream_b_xy = stream_b_on = stream_b_off = None
+        else:
+            stream_b_ids = list(stream_b_positions.keys())
+            stream_b_xy = np.array([stream_b_positions[i][:2] for i in stream_b_ids])
+            stream_b_on = np.array([stream_b_positions[i][2] for i in stream_b_ids])
+            stream_b_off = np.array([stream_b_positions[i][3] for i in stream_b_ids])
+        # ROI/label for stream B: None for a single-stream camera - NOT
+        # gui_state.stream_b_roi, which may still hold a previous
+        # two-stream camera's value.
+        stream_b_roi = None if single_stream else self.gui_state.stream_b_roi
+        stream_b_label = None if single_stream else stream_label(pick_b)
 
         num_leds = self.settings["test"]["num_leds"]
         # .get() with defaults rather than a hard lookup - an existing
@@ -473,7 +492,19 @@ class MainWindow(QMainWindow):
             "hardware_reset_before_start": camera_sync.get("hardware_reset_before_start", False),
             "hardware_reset_settle_s": camera_sync.get("hardware_reset_settle_s", 8.0),
         }
-        if len(stream_a_ids) != len(stream_b_ids) or len(stream_a_ids) != num_leds:
+        if single_stream:
+            if len(stream_a_ids) != num_leds:
+                QMessageBox.warning(
+                    self,
+                    "LED count mismatch",
+                    "Calibration detected {} {} LED(s), but settings.yaml's test.num_leds is {}. "
+                    "The cross-camera Optical Sync math assumes these match - proceeding "
+                    "anyway, but treat Optical Sync results with caution until this is resolved "
+                    "(re-run calibration, or fix test.num_leds).".format(
+                        len(stream_a_ids), stream_label(pick_a), num_leds
+                    ),
+                )
+        elif len(stream_a_ids) != len(stream_b_ids) or len(stream_a_ids) != num_leds:
             QMessageBox.warning(
                 self,
                 "LED count mismatch",
@@ -484,11 +515,6 @@ class MainWindow(QMainWindow):
                     len(stream_a_ids), stream_label(pick_a), len(stream_b_ids), stream_label(pick_b), num_leds
                 ),
             )
-
-        stream_a_on = np.array([stream_a_positions[i][2] for i in stream_a_ids])
-        stream_a_off = np.array([stream_a_positions[i][3] for i in stream_a_ids])
-        stream_b_on = np.array([stream_b_positions[i][2] for i in stream_b_ids])
-        stream_b_off = np.array([stream_b_positions[i][3] for i in stream_b_ids])
 
         # Everything Live Session will still need once tuning is done, but
         # that Threshold Tuning itself has no use for - see _on_tuning_done.
@@ -518,9 +544,9 @@ class MainWindow(QMainWindow):
             dropped_csv_filename=self.settings["paths"]["frame_drop_csv_path"],
             snapshot_every_n_pairs=self.settings["test"]["snapshot_every_n_pairs"],
             max_snapshots=self.settings["test"]["max_snapshots"],
-            stream_a_roi=self.gui_state.stream_a_roi, stream_b_roi=self.gui_state.stream_b_roi,
+            stream_a_roi=self.gui_state.stream_a_roi, stream_b_roi=stream_b_roi,
             camera_name=camera_name,
-            stream_a_label=stream_label(pick_a), stream_b_label=stream_label(pick_b),
+            stream_a_label=stream_label(pick_a), stream_b_label=stream_b_label,
             dual_panel_config=self._dual_panel_config,
             # settings.yaml camera_sync: - the two inter-sensor-sync knobs,
             # stashed here so _on_tuning_done can hand them to Live Session.
@@ -544,9 +570,9 @@ class MainWindow(QMainWindow):
             switch_time_ms=self.settings["test"]["switch_time_ms"],
             stream_a_threshold_fraction_default=self.settings["test"]["stream_a_threshold_fraction"],
             stream_b_threshold_fraction_default=self.settings["test"]["stream_b_threshold_fraction"],
-            stream_a_roi=self.gui_state.stream_a_roi, stream_b_roi=self.gui_state.stream_b_roi,
+            stream_a_roi=self.gui_state.stream_a_roi, stream_b_roi=stream_b_roi,
             camera_name=camera_name,
-            stream_a_label=stream_label(pick_a), stream_b_label=stream_label(pick_b),
+            stream_a_label=stream_label(pick_a), stream_b_label=stream_b_label,
             config_path=config_path,
             image_a_on=calib_result["image_a_on"], image_a_off=calib_result["image_a_off"],
             image_b_on=calib_result["image_b_on"], image_b_off=calib_result["image_b_off"],
@@ -637,6 +663,7 @@ class MainWindow(QMainWindow):
                 # actually tells them apart on a real multi-camera rig.
                 label="{} [{}]".format(camera["label"], camera["config"]["device_serial"]),
                 is_master=(camera_id == self._master_camera_id), configured=True,
+                single_stream=camera["config"].get("pick_b") is None,
             )
             for camera_id, camera in self._cameras.items()
         ]
@@ -722,6 +749,11 @@ class MainWindow(QMainWindow):
             # dict's own keys already match set_context()'s parameters
             # exactly - see _on_tuning_done's own comment.
             only_camera = next(iter(self._cameras.values()))
+            if only_camera["config"]["pick_b"] is None:
+                # Defense in depth - the hub already disables Start for this.
+                QMessageBox.critical(self, "Single-stream camera needs a partner",
+                                     CameraHubPage.SOLO_SINGLE_STREAM_MESSAGE)
+                return
             self._apply_single_panel_target([only_camera["config"]])
             # Best-effort self-heal, mirroring engine/multi_camera_session.py's
             # own _reset_genlock_roles: a camera left stuck in
@@ -735,6 +767,8 @@ class MainWindow(QMainWindow):
                 set_inter_cam_sync_mode(device, INTER_CAM_SYNC_DEFAULT)
             except Exception:
                 pass
+            if not self._reset_leftover_gmsl_sync_for_solo_camera(only_camera["config"]["device_serial"]):
+                return
             self.live_session_page.set_context(ctx=self.ctx, **only_camera["config"])
             self.stack.setCurrentWidget(self.live_session_page)
             return
@@ -758,7 +792,8 @@ class MainWindow(QMainWindow):
             gmsl_free_run_cleanup = {"control": gmsl_settings["control"]}
         if gmsl_tsc_on:
             fps_values = sorted({camera["config"][pick]["fps"]
-                                 for camera in self._cameras.values() for pick in ("pick_a", "pick_b")})
+                                 for camera in self._cameras.values() for pick in ("pick_a", "pick_b")
+                                 if camera["config"][pick] is not None})
             if len(fps_values) != 1:
                 QMessageBox.critical(
                     self, "GMSL TSC sync needs one frame rate",
@@ -812,9 +847,86 @@ class MainWindow(QMainWindow):
                 ),
             )
             return
+        # A single-stream camera has no result of its own - it only measures
+        # cross-camera, against streams it shares with the master. If it (or
+        # the master) is single-stream and they share no stream identity,
+        # build_cross_camera_pair_specs yields zero pairs and the run would
+        # start and measure nothing. Two two-stream cameras keep today's
+        # behavior (no new check).
+        master = next((c for c in cameras if c["is_master"]), None)
+        if master is not None:
+            master_identities = set(_stream_identities(master["config"]).values())
+            unmatched = [
+                "{} [{}]".format(c["label"], c["config"]["device_serial"])
+                for c in cameras
+                if c is not master
+                and not master_identities & set(_stream_identities(c["config"]).values())
+                and (master["config"]["pick_b"] is None or c["config"]["pick_b"] is None)
+            ]
+            if unmatched:
+                QMessageBox.critical(
+                    self, "No shared stream with the master",
+                    "The following camera(s) share no stream with the master ({} [{}]), and "
+                    "at least one camera in each pair has a single stream, so nothing "
+                    "would be measured between them:\n\n{}\n\nPick a test whose stream "
+                    "matches the master's in Stream Config, or make a different camera the "
+                    "master.".format(
+                        master["label"], master["config"]["device_serial"], "\n".join(unmatched)),
+                )
+                return
+        # With exactly ONE dual-panel camera, MultiCameraSessionController does
+        # not own the panels (it only does for 2+ sharing one wiring), so a
+        # single-stream camera's thread would drive single-panel commands at
+        # whatever panel the hub exposes while the dual-panel thread drives
+        # both.
+        dual_panel_count = sum(1 for c in cameras if c["config"].get("dual_panel_config") is not None)
+        if dual_panel_count == 1 and any(c["config"]["pick_b"] is None for c in cameras):
+            QMessageBox.critical(
+                self, "Dual-panel camera can't share a run with a single-stream camera",
+                "A single-stream camera can join a dual-panel run only when the panels are "
+                "shared by two or more dual-panel cameras. With exactly one dual-panel "
+                "camera, run the single-stream camera separately.",
+            )
+            return
         self.multi_camera_live_session_page.set_cameras(
             self.ctx, cameras, gmsl_tsc_sync=gmsl_tsc_sync, gmsl_free_run_cleanup=gmsl_free_run_cleanup)
         self.stack.setCurrentWidget(self.multi_camera_live_session_page)
+
+    def _reset_leftover_gmsl_sync_for_solo_camera(self, device_serial):
+        """A solo run never goes through the multi-camera page's
+        GmslFreeRunGuard, and the SDK inter_cam_sync_mode reset above does
+        nothing to the kernel camera_sync_mode on this D585 firmware - so a
+        killed earlier GMSL-synced run would leave this camera in external
+        sync with no trigger, delivering no frames. On the Orin, for a GMSL
+        D585, clear that (and stop the TSC) first. Returns False - Start
+        blocked, operator told - if the cleanup fails."""
+        if not detect_gmsl_camera(self.settings.get("panel_connection"), device_serial,
+                                  lambda serial: find_device_by_serial(self.ctx, serial)):
+            return True
+        gmsl_settings = {**DEFAULT_GMSL_TSC_SYNC,
+                         **((self.settings.get("camera_sync") or {}).get("gmsl_tsc_sync") or {})}
+        try:
+            reset_leftover_sync(gmsl_settings["control"])
+        except Exception as exc:
+            QMessageBox.critical(self, "Could not clear leftover GMSL sync", str(exc))
+            return False
+        return True
+
+    def closeEvent(self, event):
+        # Closing the window mid-run must wait for every camera thread's own
+        # hardware cleanup BEFORE main.py's disengage_all_engaged() stops the
+        # TSC and rewrites camera_sync_mode - doing that under a still-open
+        # pipeline is exactly what MultiCameraSessionController defers to
+        # _on_thread_finished for. Also avoids "QThread: Destroyed while
+        # thread is still running" on exit.
+        self.live_session_page.stop_session()
+        self.multi_camera_live_session_page.stop_all_sessions()
+        threads = list(self.multi_camera_live_session_page.session_threads())
+        if self.live_session_page.engine_thread is not None:
+            threads.append(self.live_session_page.engine_thread)
+        for thread in threads:
+            thread.wait()
+        super().closeEvent(event)
 
     def _apply_single_panel_target(self, camera_configs):
         """On a two-panel hub rig, single-panel mode must drive the panel the

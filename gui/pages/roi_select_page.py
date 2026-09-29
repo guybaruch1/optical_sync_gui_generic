@@ -20,6 +20,9 @@ source of bugs in practice. cv2.selectROI sidesteps the whole problem -
 it returns coordinates in the same array passed to it, regardless of how
 its own window is sized/zoomed on screen, exactly like the original
 standalone script relied on.
+
+A single-stream camera (pick_b is None) gets one popup and emits
+(roi_a, None).
 """
 
 import time
@@ -181,7 +184,10 @@ class RoiSelectPage(QWidget):
             # streams). Simpler and more robust: capture each stream's own
             # on-frame independently, one panel (and one sensor) at a time.
             image_a = self._capture_one_stream_on_frame(groups, pick_a, "stream_a", dual_panel_config, settle_frames)
-            image_b = self._capture_one_stream_on_frame(groups, pick_b, "stream_b", dual_panel_config, settle_frames)
+            image_b = (
+                self._capture_one_stream_on_frame(groups, pick_b, "stream_b", dual_panel_config, settle_frames)
+                if pick_b is not None else None
+            )
         else:
             def turn_on_all_leds():
                 turn_all_leds_on(dual_panel_config)
@@ -216,16 +222,22 @@ class RoiSelectPage(QWidget):
             image_b = decode_frame(
                 frames[(pick_b["stream_type"], pick_b["stream_index"])],
                 pick_b["format"], pick_b["width"], pick_b["height"],
-            )
+            ) if pick_b is not None else None
 
         label_a = stream_label(pick_a)
-        label_b = stream_label(pick_b)
 
         roi_a = _select_roi(image_a, "{} - drag ROI, Enter=OK, C=Cancel".format(label_a))
         if roi_a is None:
             self.status_label.setText("{} ROI selection cancelled - try again.".format(label_a))
             return
 
+        if pick_b is None:
+            # Single-stream camera - one stream, one ROI.
+            self.status_label.setText("ROI selected: {}={}".format(label_a, roi_a))
+            self.roi_chosen.emit((roi_a, None))
+            return
+
+        label_b = stream_label(pick_b)
         roi_b = _select_roi(image_b, "{} - drag ROI, Enter=OK, C=Cancel".format(label_b))
         if roi_b is None:
             self.status_label.setText("{} ROI selection cancelled - try again.".format(label_b))

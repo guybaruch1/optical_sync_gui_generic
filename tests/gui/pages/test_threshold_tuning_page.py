@@ -591,3 +591,256 @@ def test_back_button_stops_a_running_preview_first(qapp):
 
     assert page.preview_thread is None
     assert emitted == [True]  # still navigates away, same as Continue does
+
+
+def _single_stream_context(**overrides):
+    ctx = _minimal_context(
+        pick_b=None, stream_b_xy=None, stream_b_on=None, stream_b_off=None, stream_b_roi=None,
+        stream_b_label=None, image_b_on=None, image_b_off=None, stream_b_otsu_threshold=None,
+        stream_b_positions=None,
+    )
+    ctx.update(overrides)
+    return ctx
+
+
+def _single_stream_page():
+    page = ThresholdTuningPage()
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        page.set_context(**_single_stream_context())
+    return page
+
+
+def test_single_stream_set_context_hides_stream_b_column(qapp):
+    page = _single_stream_page()
+    assert page.stream_b_column_widget.isHidden()
+    assert page.stream_b_threshold is None
+    assert page.stream_b_xy is None
+    assert page.stream_a_threshold is not None
+
+
+def test_two_stream_set_context_shows_stream_b_column_again(qapp):
+    page = _single_stream_page()
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        page.set_context(**_minimal_context())
+    assert not page.stream_b_column_widget.isHidden()
+
+
+def test_single_stream_start_passes_none_for_stream_b(qapp):
+    page = _single_stream_page()
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        page._on_start_clicked()
+    assert _FakePreviewThread.last_args[3] is None  # pick_b
+    assert _FakePreviewThread.last_kwargs["stream_b_xy"] is None
+
+
+def test_single_stream_continue_persists_only_stream_a(qapp):
+    page = _single_stream_page()
+    with patch("gui.pages.threshold_tuning_page.update_config_leds") as mock_update, \
+         patch("gui.pages.threshold_tuning_page.stream_slug", return_value="infrared1"), \
+         patch("gui.pages.threshold_tuning_page.QMessageBox.warning") as mock_warning:
+        page._on_continue_clicked()
+    args = mock_update.call_args[0]
+    assert len(args) == 5  # config_path, camera_name, slug_a, positions_a, res_a
+    mock_warning.assert_not_called()  # 2 LEDs detected == num_leds 2
+
+
+def test_single_stream_continue_warns_when_stream_a_count_differs_from_num_leds(qapp):
+    page = _single_stream_page()
+    page._context["num_leds"] = 5
+    with patch("gui.pages.threshold_tuning_page.update_config_leds"), \
+         patch("gui.pages.threshold_tuning_page.stream_slug", return_value="infrared1"), \
+         patch("gui.pages.threshold_tuning_page.QMessageBox.warning") as mock_warning:
+        page._on_continue_clicked()
+    mock_warning.assert_called_once()
+
+
+# --- Manual LED position editor: add / move / delete circles by hand when no
+# detection threshold finds every LED. ---
+
+class _FakeEditor:
+    """Stands in for LedPositionEditorDialog: records what it was opened
+    with and "returns" the points a test chose."""
+    opened_with = None
+
+    def __init__(self, result_points, accepted=True):
+        self._result_points = result_points
+        self._accepted = accepted
+
+    def __call__(self, image, points, num_leds, row_gap_px, title, parent):
+        _FakeEditor.opened_with = dict(image=image, points=points, num_leds=num_leds,
+                                       row_gap_px=row_gap_px, title=title)
+        return self
+
+    def exec(self):
+        from PySide6.QtWidgets import QDialog
+        return QDialog.Accepted if self._accepted else QDialog.Rejected
+
+    def points(self):
+        return self._result_points
+
+
+def _roi_offset_page():
+    # Blobs at full-frame (10,10) and (30,30); ROI starts at (5,5), so the
+    # editor works in cropped coordinates (5,5) and (25,25).
+    page = ThresholdTuningPage()
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        page.set_context(**_minimal_context(
+            image_a_on=_two_blob_image(), image_a_off=np.full((40, 40), 20, dtype=np.uint8),
+            stream_a_roi=(5, 5, 30, 30), stream_a_otsu_threshold=100, min_blob_area=10))
+    page._commit_detection_threshold("stream_a")
+    return page
+
+
+def test_editor_opens_on_the_cropped_all_on_frame_with_current_detection(qapp):
+    page = _roi_offset_page()
+    page._led_editor_factory = _FakeEditor([(5.0, 5.0)], accepted=False)
+
+    page.stream_a_edit_positions_button.click()
+
+    opened = _FakeEditor.opened_with
+    assert opened["image"].shape == (30, 30)
+    assert sorted((round(x), round(y)) for x, y in opened["points"]) == [(5, 5), (25, 25)]
+    assert opened["num_leds"] == 2 and opened["row_gap_px"] == 15
+    assert "Infrared 1" in opened["title"]
+
+
+def test_editor_ok_commits_positions_in_grid_order_and_resamples_brightness(qapp):
+    page = _roi_offset_page()
+    # Keep both blobs, add a missing LED on a dark spot between them.
+    page._led_editor_factory = _FakeEditor([(5.0, 5.0), (25.0, 25.0), (15.0, 15.0)])
+
+    page.stream_a_edit_positions_button.click()
+
+    ctx = page._context
+    assert ctx["stream_a_xy"].tolist() == [[10.0, 10.0], [20.0, 20.0], [30.0, 30.0]]  # full frame, scan order
+    assert list(ctx["stream_a_positions"]) == ["0", "1", "2"]
+    assert ctx["stream_a_on"][0] > 150 and ctx["stream_a_on"][2] > 150  # on a lit blob
+    assert ctx["stream_a_on"][1] < 50  # the added LED sits on a dark spot in this fake frame
+    assert page.stream_a_detected_count_label.text() == "Detected: 3 / 2"
+    assert page._stream_a_manual_edits is True
+
+
+def test_editor_cancel_changes_nothing(qapp):
+    page = _roi_offset_page()
+    before = page._context["stream_a_xy"].copy()
+    page._led_editor_factory = _FakeEditor([(1.0, 1.0)], accepted=False)
+
+    page.stream_a_edit_positions_button.click()
+
+    assert page._context["stream_a_xy"].tolist() == before.tolist()
+    assert page._stream_a_manual_edits is False
+
+
+def test_editor_flushes_a_pending_slider_commit_before_opening(qapp):
+    page = _roi_offset_page()
+    page.stream_a_detection_slider.setValue(101)  # starts the 150ms debounce
+    assert page._stream_a_detection_commit_timer.isActive()
+    page._led_editor_factory = _FakeEditor([], accepted=False)
+
+    page.stream_a_edit_positions_button.click()
+
+    assert not page._stream_a_detection_commit_timer.isActive()
+
+
+def _edited_page():
+    page = _roi_offset_page()
+    page._led_editor_factory = _FakeEditor([(5.0, 5.0), (25.0, 25.0), (15.0, 15.0)])
+    page.stream_a_edit_positions_button.click()
+    return page
+
+
+def test_slider_after_manual_edits_asks_and_no_keeps_them(qapp):
+    page = _edited_page()
+    before = page.stream_a_detection_slider.value()
+
+    with patch("gui.pages.threshold_tuning_page.QMessageBox.question",
+               return_value=page_module_messagebox().No) as ask:
+        page.stream_a_detection_slider.setValue(before + 20)
+
+    ask.assert_called_once()
+    assert page.stream_a_detection_slider.value() == before
+    assert page.stream_a_detection_spinbox.value() == before
+    assert len(page._context["stream_a_xy"]) == 3
+    assert page._stream_a_manual_edits is True
+    assert not page._stream_a_detection_commit_timer.isActive()
+
+
+def test_slider_after_manual_edits_yes_redetects(qapp):
+    page = _edited_page()
+
+    with patch("gui.pages.threshold_tuning_page.QMessageBox.question",
+               return_value=page_module_messagebox().Yes):
+        page.stream_a_detection_slider.setValue(page.stream_a_detection_slider.value() + 1)
+    page._commit_detection_threshold("stream_a")
+
+    assert page._stream_a_manual_edits is False
+    assert len(page._context["stream_a_xy"]) == 2
+    assert page.stream_a_detected_count_label.text() == "Detected: 2 / 2"
+
+
+def test_reset_to_auto_after_manual_edits_redetects_even_at_the_same_value(qapp):
+    page = _edited_page()
+    assert page.stream_a_detection_slider.value() == page._context["stream_a_otsu_threshold"]
+
+    with patch("gui.pages.threshold_tuning_page.QMessageBox.question",
+               return_value=page_module_messagebox().Yes):
+        page.stream_a_reset_to_auto_button.click()
+    page._commit_detection_threshold("stream_a")
+
+    assert len(page._context["stream_a_xy"]) == 2
+
+
+def test_reset_to_auto_after_manual_edits_no_keeps_them(qapp):
+    page = _edited_page()
+
+    with patch("gui.pages.threshold_tuning_page.QMessageBox.question",
+               return_value=page_module_messagebox().No):
+        page.stream_a_reset_to_auto_button.click()
+
+    assert len(page._context["stream_a_xy"]) == 3
+
+
+def test_edits_on_one_stream_never_prompt_for_the_other(qapp):
+    page = _edited_page()
+
+    with patch("gui.pages.threshold_tuning_page.QMessageBox.question") as ask:
+        page.stream_b_detection_slider.setValue(page.stream_b_detection_slider.value() + 1)
+
+    ask.assert_not_called()
+
+
+def test_set_context_clears_manual_edits(qapp):
+    page = _edited_page()
+
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread), \
+         patch("gui.pages.threshold_tuning_page.QMessageBox.question") as ask:
+        page.set_context(**_detection_tuning_context())
+
+    ask.assert_not_called()
+    assert page._stream_a_manual_edits is False
+
+
+def test_edit_button_disabled_while_preview_running(qapp):
+    page = _started_page()
+    assert not page.stream_a_edit_positions_button.isEnabled()
+
+    page.preview_thread.finished.emit()
+
+    assert page.stream_a_edit_positions_button.isEnabled()
+
+
+def test_continue_persists_hand_edited_positions(qapp):
+    page = _edited_page()
+
+    with patch("gui.pages.threshold_tuning_page.update_config_leds") as mock_update, \
+         patch("gui.pages.threshold_tuning_page.stream_slug", side_effect=["infrared1", "color"]), \
+         patch("gui.pages.threshold_tuning_page.QMessageBox.warning"):
+        page._on_continue_clicked()
+
+    saved = mock_update.call_args.args[3]
+    assert [saved[k][:2] for k in ("0", "1", "2")] == [[10.0, 10.0], [20.0, 20.0], [30.0, 30.0]]
+
+
+def page_module_messagebox():
+    from PySide6.QtWidgets import QMessageBox
+    return QMessageBox

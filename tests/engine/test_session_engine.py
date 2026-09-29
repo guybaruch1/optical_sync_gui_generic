@@ -5,8 +5,12 @@ Everything else about this class is hardware/Qt-facing and untested by
 design (see CLAUDE.md) - constructing a SessionEngineThread with dummy
 args is safe (no hardware/Qt event loop is touched until .start()/.run()
 actually runs), so this file is scoped ONLY to the ring buffer, never
-calling those."""
+calling those. Also covers _emit_frames (pure signal-emission logic, no
+hardware)."""
 
+import numpy as np
+
+from engine.metrics import LedDetectionMetric
 from engine.session_engine import SessionEngineThread, _RECENT_FRAMES_MAXLEN
 
 
@@ -77,3 +81,30 @@ def test_recent_frames_maxlen_matches_or_exceeds_the_reconcilers_own_buffer_dept
     params = inspect.signature(CrossCameraReconciler.__init__).parameters
     reconciler_buffer_len = max(1, int(params["fps_hint"].default * params["buffer_seconds"].default))
     assert _RECENT_FRAMES_MAXLEN >= reconciler_buffer_len
+
+
+def test_emit_frames_single_stream_emits_only_stream_a_with_its_mask(qapp):
+    metric = LedDetectionMetric(stream_a_threshold=np.full(2, 100.0), warmup_pairs_to_skip=0)
+    metric.last_stream_a_on_mask = np.array([True, False])
+    thread = SessionEngineThread(
+        ctx=None, device_serial="SN1", pick_a={}, pick_b=None, camera_controls={}, test_session=None,
+        position_gap_metric=metric,
+    )
+    emitted = []
+    thread.frame_ready.connect(lambda name, image, pair_index, mask: emitted.append((name, pair_index, mask)))
+
+    thread._emit_frames("image_a", None, 7)
+
+    assert [(name, pair_index) for name, pair_index, _ in emitted] == [("stream_a", 7)]
+    assert list(emitted[0][2]) == [True, False]
+    assert emitted[0][2] is not metric.last_stream_a_on_mask  # a copy, not the live array
+
+
+def test_emit_frames_two_stream_emits_both(qapp):
+    thread = _make_thread(qapp)
+    emitted = []
+    thread.frame_ready.connect(lambda name, image, pair_index, mask: emitted.append(name))
+
+    thread._emit_frames("image_a", "image_b", 0)
+
+    assert emitted == ["stream_a", "stream_b"]

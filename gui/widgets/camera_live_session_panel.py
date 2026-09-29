@@ -20,6 +20,10 @@ own logic - see that file's module docstring for the full rationale behind
 each piece (row_ready-vs-stats_ready cadence split, NaN-for-excluded
 convention, combined side-by-side periodic snapshots, etc.), unchanged here.
 
+A single-stream camera's panel (single_stream=True) shows one video panel,
+frame drops and the detected LED only - no intra-camera HW TS Latency/
+Optical Sync, since it has no second stream to compare against.
+
 prepare_for_run() takes an already-decided output_dir rather than minting
 its own (unlike LiveSessionPage's single-camera _begin_new_run_output(),
 which built a fresh output/live_session_<timestamp>/ folder itself) - the
@@ -92,9 +96,10 @@ def _camera_display_name(camera_name, device_serial):
 
 
 class CameraLiveSessionPanel(QWidget):
-    def __init__(self, camera_id, parent=None):
+    def __init__(self, camera_id, single_stream=False, parent=None):
         super().__init__(parent)
         self.camera_id = camera_id
+        self._single_stream = single_stream
         self._context = None
         self._stream_a_drop_count = 0
         self._stream_b_drop_count = 0
@@ -122,12 +127,19 @@ class CameraLiveSessionPanel(QWidget):
 
         video_row = QHBoxLayout()
         self.stream_a_panel = VideoPanel(force_square=True)
-        self.stream_b_panel = VideoPanel(force_square=True)
-        for panel in (self.stream_a_panel, self.stream_b_panel):
-            panel.setStyleSheet("background-color: #3a3a3a; border-radius: 4px;")
         self.stream_a_title_label = QLabel("Stream A")
-        self.stream_b_title_label = QLabel("Stream B")
-        for title_label in (self.stream_a_title_label, self.stream_b_title_label):
+        if single_stream:
+            # No second stream - no panel/title to build at all.
+            self.stream_b_panel = None
+            self.stream_b_title_label = None
+        else:
+            self.stream_b_panel = VideoPanel(force_square=True)
+            self.stream_b_title_label = QLabel("Stream B")
+        video_panels = [p for p in (self.stream_a_panel, self.stream_b_panel) if p is not None]
+        for panel in video_panels:
+            panel.setStyleSheet("background-color: #3a3a3a; border-radius: 4px;")
+        title_labels = [t for t in (self.stream_a_title_label, self.stream_b_title_label) if t is not None]
+        for title_label in title_labels:
             title_label.setStyleSheet(
                 "color: #555555; font-weight: 600; font-size: 9pt;"
                 "text-transform: uppercase; letter-spacing: 1px; border: none; background: transparent;"
@@ -135,69 +147,81 @@ class CameraLiveSessionPanel(QWidget):
         stream_a_column = QVBoxLayout()
         stream_a_column.addWidget(self.stream_a_title_label)
         stream_a_column.addWidget(self.stream_a_panel)
-        stream_b_column = QVBoxLayout()
-        stream_b_column.addWidget(self.stream_b_title_label)
-        stream_b_column.addWidget(self.stream_b_panel)
         video_row.addLayout(stream_a_column)
-        video_row.addLayout(stream_b_column)
+        if not single_stream:
+            stream_b_column = QVBoxLayout()
+            stream_b_column.addWidget(self.stream_b_title_label)
+            stream_b_column.addWidget(self.stream_b_panel)
+            video_row.addLayout(stream_b_column)
         video_row.addStretch(1)
         layout.addLayout(video_row)
 
-        self.pairing_gap_checkbox = QCheckBox("HW TS Latency (us)")
-        self.pairing_gap_checkbox.setChecked(True)
-        self.pairing_gap_checkbox.toggled.connect(
-            lambda checked: self.pairing_plot.set_series_visible("pairing_gap_us", checked)
-        )
-        self.position_gap_checkbox = QCheckBox("Optical Sync (ms)")
-        self.position_gap_checkbox.setChecked(True)
-        self.position_gap_checkbox.toggled.connect(
-            lambda checked: self.position_plot.set_series_visible("position_gap_ms", checked)
-        )
-        self.frame_drops_checkbox = QCheckBox("Frame drops (A/B)")
+        if single_stream:
+            self.pairing_plot = self.position_plot = None
+        else:
+            self.pairing_gap_checkbox = QCheckBox("HW TS Latency (us)")
+            self.pairing_gap_checkbox.setChecked(True)
+            self.pairing_gap_checkbox.toggled.connect(
+                lambda checked: self.pairing_plot.set_series_visible("pairing_gap_us", checked)
+            )
+            self.position_gap_checkbox = QCheckBox("Optical Sync (ms)")
+            self.position_gap_checkbox.setChecked(True)
+            self.position_gap_checkbox.toggled.connect(
+                lambda checked: self.position_plot.set_series_visible("position_gap_ms", checked)
+            )
+        self.frame_drops_checkbox = QCheckBox("Frame drops" if single_stream else "Frame drops (A/B)")
         self.frame_drops_checkbox.setChecked(True)
         self.frame_drops_checkbox.toggled.connect(self._set_frame_drops_visible)
 
-        self.pairing_plot = LivePlot()
-        self.pairing_plot.setLabel("left", "HW TS Latency (us)")
-        self.pairing_plot.setLabel("bottom", "Pair Index")
-        self.pairing_plot.add_series("pairing_gap_us", color="#4a7fe0", display_name="HW TS Latency (us)")
+        if not single_stream:
+            self.pairing_plot = LivePlot()
+            self.pairing_plot.setLabel("left", "HW TS Latency (us)")
+            self.pairing_plot.setLabel("bottom", "Pair Index")
+            self.pairing_plot.add_series("pairing_gap_us", color="#4a7fe0", display_name="HW TS Latency (us)")
 
-        self.position_plot = LivePlot()
-        self.position_plot.setLabel("left", "Optical Sync (ms)")
-        self.position_plot.setLabel("bottom", "Pair Index")
-        self.position_plot.add_series("position_gap_ms", color="#3fbf9e", display_name="Optical Sync (ms)")
+            self.position_plot = LivePlot()
+            self.position_plot.setLabel("left", "Optical Sync (ms)")
+            self.position_plot.setLabel("bottom", "Pair Index")
+            self.position_plot.add_series("position_gap_ms", color="#3fbf9e", display_name="Optical Sync (ms)")
 
         self.drop_plot = LivePlot()
-        self.drop_plot.setLabel("left", "Frame Drops (A up / B down)")
+        self.drop_plot.setLabel("left", "Frame Drops" if single_stream else "Frame Drops (A up / B down)")
         self.drop_plot.setLabel("bottom", "Pair Index")
         self.drop_plot.add_series("stream_a_frame_drops", color="#e08a3f")
-        self.drop_plot.add_series("stream_b_frame_drops", color="#c0587a")
+        if not single_stream:
+            self.drop_plot.add_series("stream_b_frame_drops", color="#c0587a")
 
         graphs_column = QVBoxLayout()
-        graphs_column.addLayout(self._make_chart_header(self.pairing_gap_checkbox, self.pairing_plot,
-                                                          ["pairing_gap_us"]))
-        graphs_column.addWidget(self.pairing_plot, stretch=2)
-        graphs_column.addLayout(self._make_chart_header(self.position_gap_checkbox, self.position_plot,
-                                                          ["position_gap_ms"]))
-        graphs_column.addWidget(self.position_plot, stretch=2)
-        graphs_column.addLayout(self._make_chart_header(self.frame_drops_checkbox, self.drop_plot,
-                                                          ["stream_a_frame_drops", "stream_b_frame_drops"]))
+        if not single_stream:
+            graphs_column.addLayout(self._make_chart_header(self.pairing_gap_checkbox, self.pairing_plot,
+                                                              ["pairing_gap_us"]))
+            graphs_column.addWidget(self.pairing_plot, stretch=2)
+            graphs_column.addLayout(self._make_chart_header(self.position_gap_checkbox, self.position_plot,
+                                                              ["position_gap_ms"]))
+            graphs_column.addWidget(self.position_plot, stretch=2)
+        drop_series = ["stream_a_frame_drops"] if single_stream else ["stream_a_frame_drops", "stream_b_frame_drops"]
+        graphs_column.addLayout(self._make_chart_header(self.frame_drops_checkbox, self.drop_plot, drop_series))
         graphs_column.addWidget(self.drop_plot, stretch=1)
 
         self.stats_panel = StatsPanel()
         self.stats_panel.setFixedWidth(220)
         self.stats_panel.add_section_header("Live Data")
         self.stats_panel.add_field("frame_index", "Frame Index")
-        self.stats_panel.add_field("pairing_gap_us", "HW TS Latency (us)")
-        self.stats_panel.add_field("position_gap_ms", "Optical Sync (ms)")
-        self.stats_panel.add_field("switch_time_ms", "LED Switch Time (ms)")
-        self.stats_panel.add_field("stream_a_frame_drops", "Stream A Frame Drops")
-        self.stats_panel.add_field("stream_b_frame_drops", "Stream B Frame Drops")
-        self.stats_panel.add_section_header("Stats")
-        self.stats_panel.add_stats_table([
-            ("hw_ts_latency", "HW TS Latency"),
-            ("optical_sync", "Optical Sync"),
-        ])
+        if single_stream:
+            self.stats_panel.add_field("stream_a_last_led", "Detected LED")
+            self.stats_panel.add_field("switch_time_ms", "LED Switch Time (ms)")
+            self.stats_panel.add_field("stream_a_frame_drops", "Stream A Frame Drops")
+        else:
+            self.stats_panel.add_field("pairing_gap_us", "HW TS Latency (us)")
+            self.stats_panel.add_field("position_gap_ms", "Optical Sync (ms)")
+            self.stats_panel.add_field("switch_time_ms", "LED Switch Time (ms)")
+            self.stats_panel.add_field("stream_a_frame_drops", "Stream A Frame Drops")
+            self.stats_panel.add_field("stream_b_frame_drops", "Stream B Frame Drops")
+            self.stats_panel.add_section_header("Stats")
+            self.stats_panel.add_stats_table([
+                ("hw_ts_latency", "HW TS Latency"),
+                ("optical_sync", "Optical Sync"),
+            ])
 
         middle_row = QHBoxLayout()
         middle_row.addLayout(graphs_column, stretch=1)
@@ -225,7 +249,8 @@ class CameraLiveSessionPanel(QWidget):
     def set_camera_labels(self, camera_name, device_serial, stream_a_label, stream_b_label):
         display_name = _camera_display_name(camera_name, device_serial)
         self.stream_a_title_label.setText("{} - {}".format(display_name, stream_a_label))
-        self.stream_b_title_label.setText("{} - {}".format(display_name, stream_b_label))
+        if self.stream_b_title_label is not None:
+            self.stream_b_title_label.setText("{} - {}".format(display_name, stream_b_label))
 
     def _make_chart_header(self, checkbox, plot_widget, series_names):
         row = QHBoxLayout()
@@ -248,11 +273,10 @@ class CameraLiveSessionPanel(QWidget):
         self.status_label.setText("Chart copied to clipboard as an image.")
 
     def _save_chart_images(self, output_dir):
-        chart_files = {
-            self.pairing_plot: "hw_ts_latency_chart.png",
-            self.position_plot: "optical_sync_chart.png",
-            self.drop_plot: "frame_drops_chart.png",
-        }
+        chart_files = {self.drop_plot: "frame_drops_chart.png"}
+        if not self._single_stream:
+            chart_files[self.pairing_plot] = "hw_ts_latency_chart.png"
+            chart_files[self.position_plot] = "optical_sync_chart.png"
         for plot_widget, filename in chart_files.items():
             plot_widget.grab().save(os.path.join(output_dir, filename), "PNG")
 
@@ -282,7 +306,8 @@ class CameraLiveSessionPanel(QWidget):
 
     def _set_frame_drops_visible(self, checked):
         self.drop_plot.set_series_visible("stream_a_frame_drops", checked)
-        self.drop_plot.set_series_visible("stream_b_frame_drops", checked)
+        if not self._single_stream:
+            self.drop_plot.set_series_visible("stream_b_frame_drops", checked)
 
     def prepare_for_run(self, output_dir, kept_csv_filename, dropped_csv_filename,
                          stream_a_xy, stream_b_xy, stream_a_roi, stream_b_roi,
@@ -312,8 +337,9 @@ class CameraLiveSessionPanel(QWidget):
         self._context["kept_csv_path"] = os.path.join(output_dir, kept_csv_filename)
         self._context["dropped_csv_path"] = os.path.join(output_dir, dropped_csv_filename)
 
-        self.pairing_plot.clear_data()
-        self.position_plot.clear_data()
+        for plot in (self.pairing_plot, self.position_plot):
+            if plot is not None:
+                plot.clear_data()
         self.drop_plot.clear_data()
         self._stream_a_drop_count = 0
         self._stream_b_drop_count = 0
@@ -344,6 +370,8 @@ class CameraLiveSessionPanel(QWidget):
         display_image = self._crop_to_roi_if_available(display_image, stream_name)
         if stream_name == "stream_a":
             self.stream_a_panel.set_frame(display_image)
+            if self._single_stream:
+                self._maybe_save_periodic_snapshot(pair_index)
         else:
             self.stream_b_panel.set_frame(display_image)
             self._maybe_save_periodic_snapshot(pair_index)
@@ -368,9 +396,9 @@ class CameraLiveSessionPanel(QWidget):
             return
         if self._periodic_snapshot_count >= max_snapshots:
             return
-        if self._last_stream_a_on_mask is None or self._last_stream_b_on_mask is None:
+        if self._last_stream_a_on_mask is None or self._last_stream_a_image is None:
             return
-        if self._last_stream_a_image is None or self._last_stream_b_image is None:
+        if not self._single_stream and (self._last_stream_b_on_mask is None or self._last_stream_b_image is None):
             return
 
         output_dir = self._context["output_dir"]
@@ -378,6 +406,10 @@ class CameraLiveSessionPanel(QWidget):
         stream_a_debug = draw_led_state_overlay(
             self._last_stream_a_image, self._context["stream_a_xy"], self._last_stream_a_on_mask
         )
+        if self._single_stream:
+            cv2.imwrite(combined_path, stream_a_debug)
+            self._periodic_snapshot_count += 1
+            return
         stream_b_debug = draw_led_state_overlay(
             self._last_stream_b_image, self._context["stream_b_xy"], self._last_stream_b_on_mask
         )
@@ -406,28 +438,36 @@ class CameraLiveSessionPanel(QWidget):
         pair_index = stats["pair_index"]
         self.stats_panel.set_value("frame_index", pair_index)
 
-        if stats.get("pairing_gap_us") is not None:
+        if stats.get("stream_a_last_led") is not None:
+            self.stats_panel.set_value("stream_a_last_led", stats["stream_a_last_led"])
+        elif self._single_stream:
+            # No LED detected this stats tick - don't leave the previous
+            # tick's LED number on screen as if it were current.
+            self.stats_panel.set_value("stream_a_last_led", "-")
+
+        if self.pairing_plot is not None and stats.get("pairing_gap_us") is not None:
             self.stats_panel.set_value("pairing_gap_us", stats["pairing_gap_us"])
             pairing_value = stats["pairing_gap_us"] if not stats.get("pairing_gap_us_excluded") else float("nan")
             self.pairing_plot.add_point("pairing_gap_us", pair_index, pairing_value)
-        if stats.get("position_gap_ms") is not None:
+        if self.position_plot is not None and stats.get("position_gap_ms") is not None:
             self.stats_panel.set_value("position_gap_ms", stats["position_gap_ms"])
             position_value = stats["position_gap_ms"] if not stats.get("position_gap_ms_excluded") else float("nan")
             self.position_plot.add_point("position_gap_ms", pair_index, position_value)
 
         self.stats_panel.set_value("stream_a_frame_drops", self._stream_a_drop_count)
-        self.stats_panel.set_value("stream_b_frame_drops", self._stream_b_drop_count)
         self.drop_plot.add_point(
             "stream_a_frame_drops", pair_index, 1 if self._stream_a_drop_since_last_plot else 0
         )
-        self.drop_plot.add_point(
-            "stream_b_frame_drops", pair_index, -1 if self._stream_b_drop_since_last_plot else 0
-        )
         self._stream_a_drop_since_last_plot = False
-        self._stream_b_drop_since_last_plot = False
+        if not self._single_stream:
+            self.stats_panel.set_value("stream_b_frame_drops", self._stream_b_drop_count)
+            self.drop_plot.add_point(
+                "stream_b_frame_drops", pair_index, -1 if self._stream_b_drop_since_last_plot else 0
+            )
+            self._stream_b_drop_since_last_plot = False
 
-        self._push_running_stats("hw_ts_latency", self._hw_ts_latency_stats)
-        self._push_running_stats("optical_sync", self._optical_sync_stats)
+            self._push_running_stats("hw_ts_latency", self._hw_ts_latency_stats)
+            self._push_running_stats("optical_sync", self._optical_sync_stats)
 
     def _push_running_stats(self, key, stats):
         if stats.count == 0:
@@ -440,7 +480,8 @@ class CameraLiveSessionPanel(QWidget):
     def on_session_finished(self, rows):
         self._last_session_rows = rows
         export_session_csvs(rows, self._context["kept_csv_path"], self._context["dropped_csv_path"])
-        export_session_plot(rows, os.path.join(self._context["output_dir"], "pipeline_sync_plot.png"))
+        export_session_plot(rows, os.path.join(self._context["output_dir"], "pipeline_sync_plot.png"),
+                            single_stream=self._single_stream)
         self._save_chart_images(self._context["output_dir"])
         self._save_led_state_debug_images()
 
@@ -448,14 +489,31 @@ class CameraLiveSessionPanel(QWidget):
         if self._context is None:
             self.status_label.setText("No active session - click Start first.")
             return
-        if self._last_stream_a_on_mask is None or self._last_stream_b_on_mask is None:
-            self.status_label.setText("No frame data yet - wait a moment after Start and try again.")
-            return
-        if self._last_stream_a_image is None or self._last_stream_b_image is None:
+        if self._single_stream:
+            missing = self._last_stream_a_on_mask is None or self._last_stream_a_image is None
+        else:
+            missing = (self._last_stream_a_on_mask is None or self._last_stream_b_on_mask is None
+                       or self._last_stream_a_image is None or self._last_stream_b_image is None)
+        if missing:
             self.status_label.setText("No frame data yet - wait a moment after Start and try again.")
             return
 
         output_dir = self._context["output_dir"]
+        if self._single_stream:
+            stream_a_path = os.path.join(output_dir, "live_led_state_stream_a.png")
+            try:
+                stream_a_ok = cv2.imwrite(stream_a_path, draw_led_state_overlay(
+                    self._last_stream_a_image, self._context["stream_a_xy"], self._last_stream_a_on_mask
+                ))
+            except Exception as exc:
+                self.status_label.setText("Failed to save debug snapshot: {}".format(exc))
+                return
+            if stream_a_ok:
+                self.status_label.setText("Saved debug snapshot: {}".format(stream_a_path))
+            else:
+                self.status_label.setText("Failed to write debug snapshot file to {}".format(output_dir))
+            return
+
         stream_a_path = os.path.join(output_dir, "live_led_state_stream_a.png")
         stream_b_path = os.path.join(output_dir, "live_led_state_stream_b.png")
         try:

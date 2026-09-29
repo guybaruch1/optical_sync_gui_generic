@@ -324,3 +324,40 @@ def test_set_context_clears_last_calibration_result_and_disables_continue(qapp, 
 
     assert page.last_calibration_result is None
     assert not page.continue_button.isEnabled()
+
+
+def test_single_stream_calibration_saves_only_stream_a(qapp, tmp_path):
+    import yaml
+    config_path = str(tmp_path / "config.yaml")
+    with open(config_path, "w") as f:
+        f.write("leds: {}\n")
+    ctx = _real_hardware_context(str(tmp_path), config_path)
+    ctx["pick_b"] = None
+    ctx["stream_b_roi"] = None
+    pick_a = ctx["pick_a"]
+    key_a = (pick_a["stream_type"], pick_a["stream_index"])
+    on_frame = _make_2x2_grid_frame(60, 60, blob_value=220, background_value=20)
+    off_frame = np.full((60, 60), 20, dtype=np.uint8)
+    frames_on, frames_off = {key_a: on_frame.tobytes()}, {key_a: off_frame.tobytes()}
+
+    page = CalibrationPage()
+    page.set_context(**ctx)
+    with patch.multiple(
+        "gui.pages.calibration_page",
+        find_device_by_serial=lambda ctx, serial: object(),
+        resolve_and_group=lambda device, a, b: [],
+        _apply_camera_controls=lambda groups, camera_controls, a, b: [],
+        turn_all_leds_on=lambda config: None,
+        turn_all_leds_off=lambda config: None,
+        capture_synced_frame_pair=lambda groups, on_both_streaming=None, settle_frames=15: (
+            on_both_streaming() if on_both_streaming else None, frames_on if on_both_streaming else frames_off
+        )[1],
+    ), patch("time.sleep"):
+        page._on_run_clicked()
+
+    result = page.last_calibration_result
+    assert result is not None
+    assert result["image_b_on"] is None and result["image_b_off"] is None
+    assert result["stream_b_otsu_threshold"] is None
+    with open(config_path) as f:
+        assert set(yaml.safe_load(f)["leds"]["Intel RealSense D455"]) == {"infrared1"}

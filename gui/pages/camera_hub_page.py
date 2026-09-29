@@ -30,6 +30,9 @@ class CameraSummary:
     label: str
     is_master: bool
     configured: bool
+    # A single-stream camera (a single-stream settings.yaml test) has
+    # nothing to measure on its own - see CameraHubPage._can_start.
+    single_stream: bool = False
 
 
 class _CameraCard(QGroupBox):
@@ -65,6 +68,8 @@ class CameraHubPage(QWidget):
 
     # "up to 3 cameras (up to 6 sensors)" per the multi-camera design doc.
     MAX_CAMERAS = 3
+
+    SOLO_SINGLE_STREAM_MESSAGE = "A single-stream camera needs at least one other camera to compare against."
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -136,6 +141,7 @@ class CameraHubPage(QWidget):
 
         self.add_camera_button.setEnabled(len(self._summaries) < self.MAX_CAMERAS)
         self.start_button.setEnabled(self._can_start())
+        self.start_button.setToolTip(self.SOLO_SINGLE_STREAM_MESSAGE if self._is_solo_single_stream() else "")
 
     def set_gmsl_tsc_available(self, available):
         """Pre-ticks only on the unavailable->available transition, so an
@@ -159,10 +165,15 @@ class CameraHubPage(QWidget):
     def gmsl_tsc_checked(self):
         return self._gmsl_tsc_available and self.gmsl_tsc_checkbox.isChecked()
 
+    def _is_solo_single_stream(self):
+        return len(self._summaries) == 1 and self._summaries[0].single_stream
+
     def _can_start(self):
         if not self._summaries:
             return False
         if not all(summary.configured for summary in self._summaries):
+            return False
+        if self._is_solo_single_stream():
             return False
         return sum(1 for summary in self._summaries if summary.is_master) == 1
 

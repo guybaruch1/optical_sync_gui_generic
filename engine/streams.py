@@ -121,7 +121,10 @@ def parse_camera_tests_config(raw_tests):
     "stream_b_identity": {...}, "sensor_options": [{"stream_a": {width,
     height, fps, format}, "stream_b": {...}}, ...]}, ...] - still missing
     sensor_index, which only a live device query can resolve (see
-    resolve_camera_tests)."""
+    resolve_camera_tests). A test with no stream_b_identity is a single-stream
+    test: stream_b_identity is None and every sensor_options entry must have
+    only a stream_a side (its "stream_b" is None) - used by multi-camera runs
+    that compare one stream per camera across cameras."""
     def parse_identity(raw_identity):
         return {
             "stream_type": _parse_stream_type(raw_identity["stream_type"]),
@@ -138,14 +141,30 @@ def parse_camera_tests_config(raw_tests):
 
     parsed = []
     for test in raw_tests:
+        single_stream = test.get("stream_b_identity") is None
+        sensor_options = []
+        for entry in test["sensor_options"]:
+            has_b = entry.get("stream_b") is not None
+            if single_stream and has_b:
+                raise ValueError(
+                    "settings.yaml camera.stream_options: test {!r} has no stream_b_identity "
+                    "(a single-stream test) but one of its sensor_options entries has a "
+                    "stream_b side.".format(test["test_name"])
+                )
+            if not single_stream and not has_b:
+                raise ValueError(
+                    "settings.yaml camera.stream_options: test {!r} has a stream_b_identity but "
+                    "one of its sensor_options entries has no stream_b side.".format(test["test_name"])
+                )
+            sensor_options.append({
+                "stream_a": parse_side(entry["stream_a"]),
+                "stream_b": parse_side(entry["stream_b"]) if has_b else None,
+            })
         parsed.append({
             "test_name": test["test_name"],
             "stream_a_identity": parse_identity(test["stream_a_identity"]),
-            "stream_b_identity": parse_identity(test["stream_b_identity"]),
-            "sensor_options": [
-                {"stream_a": parse_side(entry["stream_a"]), "stream_b": parse_side(entry["stream_b"])}
-                for entry in test["sensor_options"]
-            ],
+            "stream_b_identity": None if single_stream else parse_identity(test["stream_b_identity"]),
+            "sensor_options": sensor_options,
         })
     return parsed
 
@@ -182,12 +201,18 @@ def resolve_camera_tests(device_options, parsed_tests):
     included, even with an empty "options" list, so the caller can tell
     "test exists but nothing on this rig matches it" apart from "test
     doesn't exist at all" and decide how to handle that (this project's
-    convention: omit it from the picker rather than show it disabled)."""
+    convention: omit it from the picker rather than show it disabled).
+    "pick_b" is None for a single-stream test (see parse_camera_tests_config)."""
     resolved_tests = []
     for test in parsed_tests:
         resolved_options = []
         for entry in test["sensor_options"]:
             pick_a = _find_matching_option(device_options, {**test["stream_a_identity"], **entry["stream_a"]})
+            if test.get("stream_b_identity") is None:
+                # Single-stream test - only stream A has to exist on this device.
+                if pick_a is not None:
+                    resolved_options.append({"pick_a": pick_a, "pick_b": None})
+                continue
             pick_b = _find_matching_option(device_options, {**test["stream_b_identity"], **entry["stream_b"]})
             if pick_a is not None and pick_b is not None:
                 resolved_options.append({"pick_a": pick_a, "pick_b": pick_b})
@@ -220,7 +245,7 @@ def _pick_matches(profile, pick):
     return vp.width() == pick["width"] and vp.height() == pick["height"]
 
 
-def resolve_and_group(device, pick_a, pick_b):
+def resolve_and_group(device, pick_a, pick_b=None):
     """Group two picked stream profiles by which physical sensor object they
     live on. This is the key insight that unifies two different camera
     topologies: some devices have IR and RGB on two separate sensor objects
@@ -228,8 +253,11 @@ def resolve_and_group(device, pick_a, pick_b):
     ONE sensor object at different stream indices (one group, two profiles) -
     which matters because sensor.open()/.start() must be called once per
     distinct sensor object, with all of that sensor's wanted profiles passed
-    together, not once per stream."""
-    if pick_a["stream_type"] == pick_b["stream_type"] and pick_a["stream_index"] == pick_b["stream_index"]:
+    together, not once per stream.
+
+    pick_b may be None (single-stream camera) - then only pick_a's own
+    sensor/profile is returned."""
+    if pick_b is not None and pick_a["stream_type"] == pick_b["stream_type"] and pick_a["stream_index"] == pick_b["stream_index"]:
         raise RuntimeError(
             "resolve_and_group: pick_a and pick_b are the same stream ({!r} index {}) - Stream "
             "Select must choose two distinct streams.".format(pick_a["stream_type"], pick_a["stream_index"])
@@ -250,6 +278,10 @@ def resolve_and_group(device, pick_a, pick_b):
         return sensor, profile
 
     sensor_a, profile_a = sensor_and_profile_for(pick_a)
+    if pick_b is None:
+        # Single-stream camera (a single-stream settings.yaml test) - one
+        # sensor, one profile.
+        return [(sensor_a, [profile_a])]
     sensor_b, profile_b = sensor_and_profile_for(pick_b)
 
     if sensor_a is sensor_b:
@@ -296,7 +328,7 @@ def exposure_for_group(profiles, pick_a, pick_b, exposure_a, exposure_b):
     engine/session_engine.py/engine/threshold_preview_thread.py) call this
     once per group to resolve which value to actually write."""
     has_a = any(_pick_matches(p, pick_a) for p in profiles)
-    has_b = any(_pick_matches(p, pick_b) for p in profiles)
+    has_b = pick_b is not None and any(_pick_matches(p, pick_b) for p in profiles)
     if has_a:
         return exposure_a
     if has_b:
@@ -645,7 +677,7 @@ def set_manual_exposure(sensor, exposure):
     return True
 
 
-def _read_global_ts_us(frame_a, frame_b):
+def _read_global_ts_us(frame_a, frame_b=None):
     """Reads and validates both frames' RealSense global timestamp
     (frame.get_timestamp(), converted from its native ms to this project's
     _ts_us microsecond convention) - the join key
@@ -658,9 +690,13 @@ def _read_global_ts_us(frame_a, frame_b):
     wrong value here would be worse than an obvious failure (same "fail
     loudly" convention as the frame_timestamp metadata check in
     ContinuousCapture.frames_with_diagnostics, the only caller of this
-    function)."""
+    function).
+
+    frame_b is None for a single-stream capture - its returned value is then
+    None too."""
     domain = rs.timestamp_domain.global_time
-    if frame_a.get_frame_timestamp_domain() != domain or frame_b.get_frame_timestamp_domain() != domain:
+    frames = [frame for frame in (frame_a, frame_b) if frame is not None]
+    if any(frame.get_frame_timestamp_domain() != domain for frame in frames):
         raise RuntimeError(
             "This camera is not reporting frames in the RealSense GLOBAL_TIME "
             "timestamp domain (global_time_enabled may be disabled or unsupported "
@@ -668,11 +704,30 @@ def _read_global_ts_us(frame_a, frame_b):
             "metric requires. Reconnect the camera or disable "
             "camera_sync.capture_global_ts and retry."
         )
-    return frame_a.get_timestamp() * 1000.0, frame_b.get_timestamp() * 1000.0
+    global_ts_b = frame_b.get_timestamp() * 1000.0 if frame_b is not None else None
+    return frame_a.get_timestamp() * 1000.0, global_ts_b
+
+
+def enable_global_time(device):
+    """Sets global_time_enabled=1 on every sensor of `device` that supports
+    it - what the reference check_d585_sync_v4l2.py does before AND right
+    after each pipeline.start() on the GMSL D585 rig. Best-effort: returns
+    one message per sensor that refused; _read_global_ts_us still fails
+    loudly later if frames don't actually arrive in the global domain."""
+    problems = []
+    for sensor in device.query_sensors():
+        if not sensor.supports(rs.option.global_time_enabled):
+            continue
+        try:
+            sensor.set_option(rs.option.global_time_enabled, 1)
+        except Exception as exc:
+            problems.append("{}: {}".format(sensor.get_info(rs.camera_info.name), exc))
+    return problems
 
 
 class ContinuousCapture:
-    def __init__(self, device_serial, pick_a, pick_b, enable_depth_for_ir_sync=True, capture_global_ts=False):
+    def __init__(self, device_serial, pick_a, pick_b, enable_depth_for_ir_sync=True, capture_global_ts=False,
+                 enable_global_time=False):
         self.device_serial = device_serial
         self.pick_a = pick_a
         self.pick_b = pick_b
@@ -685,11 +740,21 @@ class ContinuousCapture:
         # Global TS Latency metric), so single-camera runs never need or
         # request it.
         self.capture_global_ts = capture_global_ts
+        # GMSL TSC sync runs only: explicitly enable global time on every
+        # sensor before and after pipeline.start(), like the reference
+        # script (see enable_global_time). Off = today's behavior (rely on
+        # the SDK default).
+        self.enable_global_time = enable_global_time
         # Set on start() to whether a depth stream was actually requested
         # (self._depth_sync_stream() is not None) - not a resolve/success
         # check, just what start() attempted, for callers that want to report.
         self.depth_sync_active = False
         self._pipeline = None
+
+    def _active_picks(self):
+        # pick_b is None for a single-stream camera (a single-stream
+        # settings.yaml test) - only stream A is enabled then.
+        return [pick for pick in (self.pick_a, self.pick_b) if pick is not None]
 
     def _depth_sync_stream(self):
         """Returns (width, height, fps) for the DEPTH stream to co-enable, or
@@ -722,7 +787,7 @@ class ContinuousCapture:
         all."""
         if not self.enable_depth_for_ir_sync:
             return None
-        for pick in (self.pick_a, self.pick_b):
+        for pick in self._active_picks():
             if pick["stream_type"] == rs.stream.infrared:
                 return pick["width"], pick["height"], pick["fps"]
         return None
@@ -736,7 +801,7 @@ class ContinuousCapture:
         # which resolves via find_device_by_serial, correctly uses for
         # ROI/calibration), producing a wrong-camera bug with no error.
         config.enable_device(self.device_serial)
-        for pick in (self.pick_a, self.pick_b):
+        for pick in self._active_picks():
             config.enable_stream(pick["stream_type"], pick["stream_index"], pick["width"], pick["height"], pick["format"], pick["fps"])
         depth_stream = self._depth_sync_stream()
         if depth_stream is not None:
@@ -767,9 +832,15 @@ class ContinuousCapture:
         # stoppable, and pyrealsense2 itself raises "stop() cannot be called
         # before start()" for that. If start(config) raises, self._pipeline
         # stays None (its __init__ default), so stop() correctly no-ops.
+        if self.enable_global_time:
+            enable_global_time(find_device_by_serial(rs.context(), self.device_serial))
         pipeline = rs.pipeline()
-        pipeline.start(config)
+        profile = pipeline.start(config)
         self._pipeline = pipeline
+        if self.enable_global_time:
+            # Again on the device the pipeline actually opened - the
+            # reference re-applies it here too.
+            enable_global_time(profile.get_device())
 
     def _get_frame(self, frameset, pick):
         if pick["stream_type"] == rs.stream.infrared:
@@ -781,15 +852,17 @@ class ContinuousCapture:
             yield stream_a_image, stream_b_image, stream_a_ts_us, stream_b_ts_us
 
     def frames_with_diagnostics(self):
+        single_stream = self.pick_b is None
         while True:
             frameset = self._pipeline.wait_for_frames()
             frame_a = self._get_frame(frameset, self.pick_a)
-            frame_b = self._get_frame(frameset, self.pick_b)
-            if not frame_a or not frame_b:
+            frame_b = None if single_stream else self._get_frame(frameset, self.pick_b)
+            if not frame_a or (not single_stream and not frame_b):
                 continue
 
             metadata = rs.frame_metadata_value.frame_timestamp
-            if not (frame_a.supports_frame_metadata(metadata) and frame_b.supports_frame_metadata(metadata)):
+            frames = [frame for frame in (frame_a, frame_b) if frame is not None]
+            if not all(frame.supports_frame_metadata(metadata) for frame in frames):
                 raise RuntimeError(
                     "This camera/driver does not expose per-frame HW timestamp metadata "
                     "(frame_metadata_value.frame_timestamp), which the sync metrics require. "
@@ -800,11 +873,14 @@ class ContinuousCapture:
                 )
 
             image_a = decode_frame(bytes(frame_a.get_data()), self.pick_a["format"], self.pick_a["width"], self.pick_a["height"])
-            image_b = decode_frame(bytes(frame_b.get_data()), self.pick_b["format"], self.pick_b["width"], self.pick_b["height"])
             ts_a = frame_a.get_frame_metadata(metadata)
-            ts_b = frame_b.get_frame_metadata(metadata)
             num_a = frame_a.get_frame_number()
-            num_b = frame_b.get_frame_number()
+            if single_stream:
+                image_b = ts_b = num_b = None
+            else:
+                image_b = decode_frame(bytes(frame_b.get_data()), self.pick_b["format"], self.pick_b["width"], self.pick_b["height"])
+                ts_b = frame_b.get_frame_metadata(metadata)
+                num_b = frame_b.get_frame_number()
 
             if self.capture_global_ts:
                 global_ts_a, global_ts_b = _read_global_ts_us(frame_a, frame_b)

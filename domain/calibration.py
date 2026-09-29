@@ -11,11 +11,18 @@ import yaml
 from domain.realsense_utils import sample_neighborhood_brightness, safe_neighborhood_size, safe_row_gap_px
 
 
-def assign_grid_ids(centroids, row_gap_px=15):
+def grid_rows(centroids, row_gap_px=15):
+    """The row-major grid order assign_grid_ids numbers LEDs by, as rows of
+    INDEXES into `centroids` (top row first, each row left to right) - so a
+    caller that keeps its own per-point objects (Threshold Tuning's manual
+    LED position editor) can label each one with the exact led_id
+    assign_grid_ids would give it. Raises the same RuntimeError as
+    assign_grid_ids on an empty list."""
     if not centroids:
         raise RuntimeError("No LEDs detected at all - check threshold/min_area/framing.")
 
-    sorted_pts = sorted(centroids, key=lambda p: p[1])
+    order = sorted(range(len(centroids)), key=lambda i: centroids[i][1])
+    sorted_pts = [centroids[i] for i in order]
     # Caps row_gap_px at what's actually safe for THIS stream's real
     # measured centroid spacing (see safe_row_gap_px's docstring) - a fixed
     # configured gap can otherwise end up larger than the real row-to-row
@@ -23,17 +30,22 @@ def assign_grid_ids(centroids, row_gap_px=15):
     # merging rows and scrambling led_id numbering. See
     # docs/algorithm_review_log.md's Issue 4.
     safe_gap_px = safe_row_gap_px(sorted_pts, row_gap_px)
-    rows = [[sorted_pts[0]]]
-    for prev, curr in zip(sorted_pts, sorted_pts[1:]):
-        if curr[1] - prev[1] > safe_gap_px:
+    rows = [[order[0]]]
+    for prev, curr in zip(order, order[1:]):
+        if centroids[curr][1] - centroids[prev][1] > safe_gap_px:
             rows.append([])
         rows[-1].append(curr)
-    rows = [sorted(row, key=lambda p: p[0]) for row in rows]
+    return [sorted(row, key=lambda i: centroids[i][0]) for row in rows]
+
+
+def assign_grid_ids(centroids, row_gap_px=15):
+    rows = grid_rows(centroids, row_gap_px)
 
     positions = {}
     led_id = 0
     for row in rows:
-        for (x, y) in row:
+        for index in row:
+            x, y = centroids[index]
             positions[str(led_id)] = [round(float(x), 2), round(float(y), 2)]
             led_id += 1
 
@@ -129,7 +141,9 @@ def compute_threshold(on_values, off_values, fraction):
 
 
 def update_config_leds(config_path, camera_name, stream_a_slug, stream_a_positions, stream_a_res,
-                        stream_b_slug, stream_b_positions, stream_b_res):
+                        stream_b_slug=None, stream_b_positions=None, stream_b_res=None):
+    """stream_b_* are None for a single-stream camera - only stream A's own
+    slug block is written then."""
     with open(config_path, "r") as f:
         cfg = yaml.safe_load(f) or {}
     cfg.setdefault("leds", {})
@@ -137,31 +151,37 @@ def update_config_leds(config_path, camera_name, stream_a_slug, stream_a_positio
     cfg["leds"][camera_name][stream_a_slug] = {
         "frame_width": stream_a_res[0], "frame_height": stream_a_res[1], "positions": stream_a_positions,
     }
-    cfg["leds"][camera_name][stream_b_slug] = {
-        "frame_width": stream_b_res[0], "frame_height": stream_b_res[1], "positions": stream_b_positions,
-    }
+    if stream_b_slug is not None:
+        cfg["leds"][camera_name][stream_b_slug] = {
+            "frame_width": stream_b_res[0], "frame_height": stream_b_res[1], "positions": stream_b_positions,
+        }
     with open(config_path, "w") as f:
         yaml.safe_dump(cfg, f, sort_keys=False)
 
 
-def load_led_positions(config_path, camera_name, stream_a_slug, stream_a_res, stream_b_slug, stream_b_res):
+def load_led_positions(config_path, camera_name, stream_a_slug, stream_a_res, stream_b_slug=None, stream_b_res=None):
     """stream_a_res/stream_b_res are (width, height) tuples for the
     CURRENTLY-picked stream resolution - checked against what
     update_config_leds stored at calibration time, since Stream Select lets
     an operator freely pick any resolution and silently sampling calibrated
     pixel coordinates against a differently-sized live frame produces
-    garbage position_gap_ms results with no warning otherwise."""
+    garbage position_gap_ms results with no warning otherwise.
+    stream_b_slug/stream_b_res are None for a
+    single-stream camera - the returned stream B positions are then None."""
     with open(config_path, "r") as f:
         cfg = yaml.safe_load(f)
     leds_by_camera = cfg.get("leds", {})
     camera_entry = leds_by_camera.get(camera_name, {})
-    if stream_a_slug not in camera_entry or stream_b_slug not in camera_entry:
+    wanted = [(stream_a_slug, stream_a_res)]
+    if stream_b_slug is not None:
+        wanted.append((stream_b_slug, stream_b_res))
+    if any(slug not in camera_entry for slug, _ in wanted):
         raise KeyError(
-            "No LED calibration yet for camera {!r} streams {!r}/{!r} - run calibration with "
-            "this exact stream pair first.".format(camera_name, stream_a_slug, stream_b_slug)
+            "No LED calibration yet for camera {!r} stream(s) {} - run calibration with "
+            "this exact stream selection first.".format(camera_name, "/".join(repr(slug) for slug, _ in wanted))
         )
 
-    for slug, current_res in ((stream_a_slug, stream_a_res), (stream_b_slug, stream_b_res)):
+    for slug, current_res in wanted:
         entry = camera_entry[slug]
         stored_res = (entry["frame_width"], entry["frame_height"])
         if stored_res != tuple(current_res):
@@ -173,4 +193,5 @@ def load_led_positions(config_path, camera_name, stream_a_slug, stream_a_res, st
                 )
             )
 
-    return camera_entry[stream_a_slug]["positions"], camera_entry[stream_b_slug]["positions"]
+    stream_b_positions = camera_entry[stream_b_slug]["positions"] if stream_b_slug is not None else None
+    return camera_entry[stream_a_slug]["positions"], stream_b_positions

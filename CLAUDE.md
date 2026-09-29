@@ -467,6 +467,8 @@ Unlike `engine/session_engine.py`'s `SessionEngineThread`, `engine/threshold_pre
 
 "Continue to Live Test" emits a bare `tuning_done` signal (matching `CalibrationPage.calibration_done`'s convention); `gui/main_window.py`'s `_on_tuning_done` reads the final tuned arrays off `ThresholdTuningPage.stream_a_threshold`/`stream_b_threshold` properties (each a `compute_threshold(...)` call using that stream's own calibrated on/off values and its own live spinbox fraction) and passes them into `LiveSessionPage.set_context()`'s `stream_a_threshold`/`stream_b_threshold` params - Live Session itself no longer has any threshold-fraction control or on/off-to-threshold math of its own; tuning already happened, with visual confirmation, on the page before it. `MainWindow._on_calibration_done` stashes everything Live Session still needs but Threshold Tuning has no use for (CSV paths, `output_dir`, frame-drop/pairing-gap tuning, etc.) in `self._pending_ctx`, merged back in by `_on_tuning_done`.
 
+**Manual LED position editor.** When no detection threshold finds every LED, each stream's "Edit LED positions..." button (disabled while the preview runs, like the other retune controls - the preview thread bakes positions in at Start) opens `gui/widgets/led_position_editor.py`'s `LedPositionEditorDialog` on that stream's cropped Calibration all-on frame: left-click adds, drag moves, right-click deletes, wheel zooms, middle-drag pans. It is a `QGraphicsView` with circles in image-pixel scene coordinates, so clicks stay exact at any zoom - not the stretched-`QLabel` mapping ROI Select's docstring warns about. Labels show each circle's led_id live via `domain.calibration.grid_rows` (the same row-major rule `assign_grid_ids` numbers by - it's now built on `grid_rows`), so an added LED lands in scan order with no typed number, and the status line flags a wrong count or unequal row lengths. OK feeds the edited cropped-coordinate points into `_{stream}_pending_centroids` and the SAME `_commit_detection_threshold` the slider uses (grid order, per-LED on/off resampling, then Continue's `config.yaml` write) - nothing downstream changes. Once a stream has hand edits (`_{stream}_manual_edits`), moving its slider or Reset to Auto asks before discarding them (No restores the slider silently); `set_context` clears the flag.
+
 ### `_is_frame_drop` treats a repeated timestamp as a drop too, not just backwards/too-slow
 
 `engine/metrics.py`'s `_is_frame_drop(prev_ts, curr_ts, fps, threshold_factor)` flags a pair as dropped when `delta <= 0` (backwards OR **exactly zero**) or `delta > expected_delta * threshold_factor` (too slow). The `<= 0` (not `< 0`) is deliberate: real-hardware session data showed a stream occasionally handing back its own previous frame's HW timestamp unchanged for one pair - `delta == 0` - while the other stream advanced normally, then self-correcting the very next pair. That's a stale/duplicate frame, not "right on schedule" - real hardware never produces two distinct captures with a byte-identical timestamp - but a plain `delta < 0` check let it through uncaught (0 is neither negative nor over threshold), which showed up as an unexcluded, unexplained one-frame-period spike in `pairing_gap_us` at a rate of roughly 3% of pairs, riding on top of the much larger (~20% on one 60fps/HD run) rate of genuine 2x-interval drops the threshold check already caught correctly. Don't narrow this back to `delta < 0` without re-confirming a repeated timestamp can't happen on real hardware.
@@ -614,9 +616,84 @@ a recovery file: an UNTICKED Start on the detected rig runs
 any thread) - any node not at the driver's `default=` is reset and
 read back, and the TSC is always stopped; failure blocks Start, since a
 "free-running" baseline that is secretly still synced is worse than no
-run. A TICKED Start that finds a node already in the sync value restores
-it to the driver default at the end rather than "as found" (which would
-keep it stuck at 2 forever).
+run. A TICKED Start that finds a node already in the sync value (or whose
+as-found value can't be read) restores it to the driver default at the end
+rather than "as found" (which would keep it stuck at 2 forever). The
+free-run cleanup covers EVERY node carrying the control, not just two
+(`resolve_sync_nodes(..., expected=None)`), and also runs before a
+SINGLE-camera run of a GMSL D585 (`detect_gmsl_camera` +
+`MainWindow._reset_leftover_gmsl_sync_for_solo_camera`) - the SDK
+`inter_cam_sync_mode` reset on that path never touches the kernel mode.
+The same reset also runs once at app launch on the Orin (`main.py`'s
+`_clear_leftover_gmsl_sync` -> `clear_leftover_sync_at_startup`: remote
+mode and `/dev/cdi_tsc` present; no GMSL camera attached is fine), since
+Stream Config's preview, ROI Select, Calibration and Threshold Tuning are
+free-running and never check the mode - a camera left in mode 2 would give
+them no frames. It also stops a trigger started by hand: on this rig the
+app owns the TSC. A failure is a warning pop-up, never a blocked launch.
+`restore_sync_mode`/`disengage()` still never raise, but now read back and
+return what could not be undone; the controller reports it via
+`camera_error("GMSL sync", ...)`. `MainWindow.closeEvent` waits for every
+camera thread before `main.py`'s exit disengage, so the mode is never
+rewritten under an open stream.
+
+**Post-Start sync check (ticked runs only).** `engage()`'s readback happens
+before any stream opens, so it can't catch a stream start knocking the mode
+back. `MultiCameraSessionController._begin_gmsl_verification` waits for
+every camera's FIRST row (under external sync a camera only delivers frames
+on trigger pulses, so this is the hardware evidence the TSC reaches it),
+then calls `GmslTscSync.verify()`, which re-reads `camera_sync_mode` on
+every engaged node. A wrong/unreadable mode, a camera thread ending before
+its first frame, or no frames within `gmsl_verify_timeout_s` (20 s) ->
+`gmsl_sync_failed` (the page shows a `QMessageBox.critical`) and every
+camera is stopped; success -> `gmsl_sync_verified` (status line). An
+operator Stop before streaming cancels the check silently. The TSC has no
+GET ioctl, so "trigger running" is what this process started, not a
+readback. Frame RATE is not checked against the trigger rate.
+
+**Parity with the reference `check_d585_sync_v4l2.py` (ticked runs only).**
+Three things the reference does are applied in ticked GMSL TSC runs, never
+otherwise: (1) `global_time_enabled=1` on every sensor before AND after each
+`pipeline.start()` (`engine/streams.py`'s `enable_global_time`, via
+`ContinuousCapture(enable_global_time=True)` / `SessionEngineThread`); (2)
+Global TS Latency samples from the first `global_ts_skip_s` (10 s) of
+matched pairs are excluded as `global_ts_warmup`
+(`CrossCameraReconciler(global_ts_warmup_s=...)`, fed by the controller from
+`GmslTscSync.global_ts_skip_s`) while librealsense's clock fit converges -
+matching and HW TS Latency are untouched; (3) `laser_off`: projector off via
+V4L2 `laser_power_on_off=0` on the sync nodes at engage, re-checked (and
+re-applied) in `verify()` since the driver can re-enable it at stream
+start, restored at disengage. Projector problems are `GmslTscSync.warnings`
+(shown with the verified status), never a failed run. In these runs the SDK
+emitter setting is left alone (`camera_controls["emitter_enabled"] = None`)
+so it can't turn the projector back on after the V4L2 write.
+
+**The reference's start sequence (ticked runs, each a `gmsl_tsc_sync`
+switch).** Real-hardware finding (2026-09-29): 24 ticked app runs never
+locked - each Start left the two cameras a random, FIXED 0.3-23.5 ms apart
+(the reference's own no-TSC signature), with the LED-based cross Optical
+Sync agreeing with Global TS to ~1 ms, while `check_d585_sync_v4l2.py` on
+the same rig locked to ~0.1 ms on all 9 starts. The app now follows the
+reference by default: `tsc_before_mode` (TSC -> `settle_s` -> mode 2 ->
+streams; `False` = the old mode -> TSC -> settle), `enable_depth` (IR +
+color only in ticked runs; overrides `enable_depth_for_ir_sync` for them),
+and `start_cameras_back_to_back` (the controller opens each camera right
+after the previous one's `SessionEngineThread.capture_started` - emitted
+right after `pipeline.start()` returns - instead of the 2 s USB stagger;
+still one capture thread per camera, since reading frames doesn't decide
+exposure timing, only when each stream opens does). Which of the three
+matters is not yet known. Every ticked run writes `gmsl_tsc_sync.json`
+(settings + sync-check result) to its run folder so runs can be told apart.
+Still different from the reference: the TSC/mode are stopped and restored
+after every run (the reference keeps both between repeated starts).
+
+**Cross-camera match window is half a frame** when every stream shares one
+fps (50 ms otherwise). The matcher pairs each row with the nearest row that
+has ALREADY arrived; with 50 ms, cameras offset by e.g. +12 ms at 30 fps
+were paired one frame off (-21 ms) whenever the right partner hadn't
+arrived yet - up to 100% of a run's pairs (e.g. -47 ms reported for a
++19.6 ms offset at 15 fps). It exaggerated real offsets, never created
+them.
 
 `tools/tsc_trigger/ext_sync_gen.py` is the user's script vendored
 unchanged; `engine/gmsl_sync.KernelTscIO` imports its ioctl helpers
@@ -659,6 +736,35 @@ every thread has finished (a stop failure goes to `camera_error` as
 "LED panels", never blocking `all_sessions_finished`). Differing wiring is
 still rejected at Start. Not handled: mixing one dual-panel camera with a
 single-panel camera - both would still drive panels independently.
+
+### Single-stream cameras (one stream per camera, cross-camera only)
+
+A settings.yaml test with no `stream_b_identity` (and only a `stream_a` side
+per `sensor_options` entry, e.g. "IR1 only") makes that camera
+SINGLE-STREAM: `pick_b is None` everywhere downstream - the one signal every
+layer checks, no separate flag. `resolve_and_group`/`ContinuousCapture` open
+only stream A (depth still co-enabled for an IR pick per
+`camera_sync.enable_depth_for_ir_sync`); ROI Select/Calibration/Threshold
+Tuning handle only stream A and `update_config_leds` writes only its slug.
+In a multi-camera run such a camera runs `engine/metrics.py`'s
+`LedDetectionMetric` instead of `PairingGapMetric`+`PositionGapMetric`: it
+emits the same `stream_a_last_led` key the cross-camera reconciler reads,
+and its `led_detection_excluded`/`_exclude_reason` replace the intra-camera
+`position_gap_ms_*` exclusion the reconciler otherwise reuses
+(`_own_led_exclusion`). Its per-camera tab (`CameraLiveSessionPanel(single_stream=True)`)
+is slim - one video panel, frame drops, detected LED, single-image
+snapshots; the Cross-Camera Sync tab is the result. Mixing single- and
+two-stream cameras is allowed (pairs match on shared slugs as always).
+Single-stream cameras never use dual-panel mode (Stream Config disables the
+checkbox); the single-panel hub target picks the IR panel for an IR pick,
+the color panel for a color pick. A run of one single-stream camera can't
+start (Camera Hub disables Start, and `_on_start_multi_camera_session_requested`
+refuses defensively) - `LiveSessionPage` never sees `pick_b=None`. Start also
+refuses a single-stream camera that shares no stream identity with its
+master/slave partner, and a single-stream camera mixed with exactly ONE
+dual-panel camera (the controller only owns the panels when 2+ dual-panel
+cameras share them, so a single-stream camera can join a dual-panel run only
+then; otherwise run them separately).
 
 ### Single-panel mode on a two-panel hub rig
 

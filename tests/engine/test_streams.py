@@ -1152,3 +1152,232 @@ def test_continuous_capture_capture_global_ts_defaults_to_false():
 def test_continuous_capture_capture_global_ts_can_be_enabled():
     capture = ContinuousCapture("SN1", _ir_pick(), _color_pick(), capture_global_ts=True)
     assert capture.capture_global_ts is True
+
+
+def test_parse_camera_tests_config_accepts_a_single_stream_test():
+    raw = [{
+        "test_name": "IR1 only",
+        "stream_a_identity": {"stream_type": "infrared", "stream_index": 1},
+        "sensor_options": [{"stream_a": {"width": 1280, "height": 720, "fps": 30, "format": "y8"}}],
+    }]
+
+    parsed = parse_camera_tests_config(raw)
+
+    assert parsed == [{
+        "test_name": "IR1 only",
+        "stream_a_identity": {"stream_type": rs.stream.infrared, "stream_index": 1},
+        "stream_b_identity": None,
+        "sensor_options": [{
+            "stream_a": {"width": 1280, "height": 720, "fps": 30, "format": rs.format.y8},
+            "stream_b": None,
+        }],
+    }]
+
+
+def test_parse_camera_tests_config_rejects_stream_b_side_in_a_single_stream_test():
+    raw = [{
+        "test_name": "IR1 only",
+        "stream_a_identity": {"stream_type": "infrared", "stream_index": 1},
+        "sensor_options": [{"stream_a": {"width": 1280, "height": 720, "fps": 30, "format": "y8"},
+                            "stream_b": {"width": 1280, "height": 720, "fps": 30, "format": "y8"}}],
+    }]
+    with pytest.raises(ValueError, match="IR1 only"):
+        parse_camera_tests_config(raw)
+
+
+def test_parse_camera_tests_config_rejects_missing_stream_b_side_in_a_two_stream_test():
+    raw = [_raw_test(
+        "IR vs RGB", {"stream_type": "infrared", "stream_index": 1}, {"stream_type": "color", "stream_index": 0},
+        [{"stream_a": {"width": 1280, "height": 720, "fps": 30, "format": "y8"}}],
+    )]
+    with pytest.raises(ValueError, match="IR vs RGB"):
+        parse_camera_tests_config(raw)
+
+
+def test_resolve_camera_tests_single_stream_test_yields_pick_b_none():
+    device_options = [_device_option(rs.stream.infrared, 1, 1280, 720, 30, rs.format.y8)]
+    parsed_tests = [{
+        "test_name": "IR1 only",
+        "stream_a_identity": {"stream_type": rs.stream.infrared, "stream_index": 1},
+        "stream_b_identity": None,
+        "sensor_options": [
+            {"stream_a": {"width": 1280, "height": 720, "fps": 30, "format": rs.format.y8}, "stream_b": None},
+            {"stream_a": {"width": 640, "height": 480, "fps": 30, "format": rs.format.y8}, "stream_b": None},
+        ],
+    }]
+
+    resolved = resolve_camera_tests(device_options, parsed_tests)
+
+    assert resolved == [{"test_name": "IR1 only", "options": [{"pick_a": device_options[0], "pick_b": None}]}]
+
+
+def test_resolve_and_group_single_pick_returns_one_group_with_one_profile():
+    ir_profile = FakeProfile2(rs.stream.infrared, 1, rs.format.y8, 1280, 720, 30)
+    ir_sensor = FakeSensor2(profiles=[ir_profile])
+    device = FakeDevice([ir_sensor])
+    pick_a = {"sensor_index": 0, "stream_type": rs.stream.infrared, "stream_index": 1,
+              "format": rs.format.y8, "width": 1280, "height": 720, "fps": 30}
+
+    groups = resolve_and_group(device, pick_a, None)
+
+    assert groups == [(ir_sensor, [ir_profile])]
+
+
+def test_exposure_for_group_with_no_pick_b_returns_exposure_a():
+    ir_profile = FakeProfile2(rs.stream.infrared, 1, rs.format.y8, 1280, 720, 30)
+    pick_a = {"stream_type": rs.stream.infrared, "stream_index": 1,
+              "format": rs.format.y8, "width": 1280, "height": 720, "fps": 30}
+    assert exposure_for_group([ir_profile], pick_a, None, exposure_a=1111, exposure_b=None) == 1111
+
+
+def test_read_global_ts_us_with_only_frame_a():
+    frame_a = _FakeGlobalTsFrame(1000.5, rs.timestamp_domain.global_time)
+    assert _read_global_ts_us(frame_a, None) == (1_000_500.0, None)
+
+
+def test_depth_sync_stream_for_a_single_infrared_pick():
+    capture = ContinuousCapture("SN1", _ir_pick(width=848, height=480, fps=60), None, enable_depth_for_ir_sync=True)
+    assert capture._depth_sync_stream() == (848, 480, 60)
+
+
+def test_depth_sync_stream_is_none_for_a_single_color_pick():
+    capture = ContinuousCapture("SN1", _color_pick(), None, enable_depth_for_ir_sync=True)
+    assert capture._depth_sync_stream() is None
+
+
+class _RecordingConfig:
+    def __init__(self):
+        self.enabled = []
+    def enable_device(self, serial):
+        pass
+    def enable_stream(self, *args):
+        self.enabled.append(args)
+
+
+def test_build_config_single_pick_enables_only_stream_a_and_depth():
+    capture = ContinuousCapture("SN1", _ir_pick(), None, enable_depth_for_ir_sync=True)
+    with patch("engine.streams.rs.config", _RecordingConfig):
+        config = capture._build_config()
+    stream_types = [args[0] for args in config.enabled]
+    assert stream_types == [rs.stream.infrared, rs.stream.depth]
+
+
+class _FakeStreamFrame:
+    def __init__(self, width, height, ts_us, frame_number, global_ts_ms):
+        self._data = bytes(width * height)
+        self._ts_us = ts_us
+        self._frame_number = frame_number
+        self._global_ts_ms = global_ts_ms
+    def __bool__(self):
+        return True
+    def get_data(self):
+        return self._data
+    def supports_frame_metadata(self, metadata):
+        return True
+    def get_frame_metadata(self, metadata):
+        return self._ts_us
+    def get_frame_number(self):
+        return self._frame_number
+    def get_timestamp(self):
+        return self._global_ts_ms
+    def get_frame_timestamp_domain(self):
+        return rs.timestamp_domain.global_time
+
+
+class _FakeFrameset:
+    def __init__(self, ir_frame):
+        self._ir_frame = ir_frame
+    def get_infrared_frame(self, index):
+        return self._ir_frame
+    def get_color_frame(self, index):
+        raise AssertionError("single-stream capture must never ask for a second stream")
+
+
+class _FakeRunningPipeline:
+    def __init__(self, frameset):
+        self._frameset = frameset
+    def wait_for_frames(self):
+        return self._frameset
+
+
+def test_frames_with_diagnostics_single_pick_yields_none_for_stream_b():
+    pick_a = _ir_pick(width=4, height=2)
+    capture = ContinuousCapture("SN1", pick_a, None, capture_global_ts=True)
+    capture._pipeline = _FakeRunningPipeline(_FakeFrameset(_FakeStreamFrame(4, 2, 1234.0, 7, 5.0)))
+
+    image_a, image_b, ts_a, ts_b, num_a, num_b, global_a, global_b = next(capture.frames_with_diagnostics())
+
+    assert image_a.shape == (2, 4)
+    assert (image_b, ts_b, num_b, global_b) == (None, None, None, None)
+    assert (ts_a, num_a, global_a) == (1234.0, 7, 5000.0)
+
+
+# --- GMSL TSC sync runs: global time explicitly enabled around every
+# pipeline.start(), like the reference check_d585_sync_v4l2.py. ---
+
+class _FakeGlobalTimeSensor:
+    def __init__(self, name, supported=True, fails=False):
+        self._name, self._supported, self._fails = name, supported, fails
+        self.set_calls = []
+
+    def supports(self, option):
+        return self._supported and option == rs.option.global_time_enabled
+
+    def set_option(self, option, value):
+        if self._fails:
+            raise RuntimeError("option not settable")
+        self.set_calls.append((option, value))
+
+    def get_info(self, info):
+        return self._name
+
+
+class _FakeGlobalTimeDevice:
+    def __init__(self, sensors):
+        self._sensors = sensors
+
+    def query_sensors(self):
+        return self._sensors
+
+
+def test_enable_global_time_sets_every_supporting_sensor_and_reports_refusals():
+    from engine.streams import enable_global_time
+    stereo, rgb = _FakeGlobalTimeSensor("Stereo Module"), _FakeGlobalTimeSensor("RGB Camera", fails=True)
+    motion = _FakeGlobalTimeSensor("Motion Module", supported=False)
+
+    problems = enable_global_time(_FakeGlobalTimeDevice([stereo, rgb, motion]))
+
+    assert stereo.set_calls == [(rs.option.global_time_enabled, 1)]
+    assert motion.set_calls == []
+    assert problems == ["RGB Camera: option not settable"]
+
+
+class _FakeStartedPipeline:
+    def __init__(self, device):
+        self._device = device
+
+    def start(self, config):
+        device = self._device
+
+        class _Profile:
+            def get_device(self):
+                return device
+        return _Profile()
+
+    def stop(self):
+        pass
+
+
+def test_continuous_capture_enables_global_time_before_and_after_start_only_when_asked():
+    for flag, expected_calls in ((True, 1), (False, 0)):
+        before_device = _FakeGlobalTimeDevice([_FakeGlobalTimeSensor("Stereo Module")])
+        after_device = _FakeGlobalTimeDevice([_FakeGlobalTimeSensor("Stereo Module")])
+        capture = ContinuousCapture("SN1", _ir_pick(), _color_pick(), enable_depth_for_ir_sync=False,
+                                    enable_global_time=flag)
+        with patch("engine.streams.rs.pipeline", return_value=_FakeStartedPipeline(after_device)), \
+             patch("engine.streams.find_device_by_serial", return_value=before_device), \
+             patch("engine.streams.rs.context"):
+            capture.start()
+
+        assert len(before_device._sensors[0].set_calls) == expected_calls
+        assert len(after_device._sensors[0].set_calls) == expected_calls

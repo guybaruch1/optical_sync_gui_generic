@@ -715,6 +715,23 @@ def test_gmsl_disengaged_only_after_every_thread_finished():
     gmsl.disengage.assert_called_once()
 
 
+def test_gmsl_restore_failure_is_reported_and_run_still_finishes():
+    gmsl = MagicMock()
+    gmsl.disengage.return_value = ["/dev/video2: camera_sync_mode reads back 2, not 0"]
+    controller, fake_threads = _controller(_gmsl_specs(), gmsl_sync=gmsl)
+    errors, finished = [], []
+    controller.camera_error.connect(lambda cid, message: errors.append((cid, message)))
+    controller.all_sessions_finished.connect(finished.append)
+    controller.start_all(ctx=object())
+
+    fake_threads["s1"].finished.emit()
+    fake_threads["s2"].finished.emit()
+
+    assert errors == [("GMSL sync", "Could not fully undo GMSL sync: "
+                                    "/dev/video2: camera_sync_mode reads back 2, not 0")]
+    assert len(finished) == 1
+
+
 def test_stop_all_never_disengages_gmsl_by_itself():
     gmsl = MagicMock()
     controller, _ = _controller(_gmsl_specs(), gmsl_sync=gmsl)
@@ -762,3 +779,271 @@ def test_shared_panel_stop_failure_is_reported_and_never_blocks_finishing():
 
     assert len(finished) == 1
     assert errors == [("LED panels", "Failed to stop the shared LED panels: relay COM port gone")]
+
+
+# --- Post-Start GMSL sync check: once every camera streams, re-read the
+# V4L2 mode; no frames / early stop / wrong mode -> gmsl_sync_failed + stop. ---
+
+def _verifying_controller(verify_result=None):
+    gmsl = MagicMock()
+    gmsl.verify.return_value = verify_result or []
+    gmsl.nodes = ["/dev/video2", "/dev/video10"]
+    controller, fake_threads = _controller(_gmsl_specs(), gmsl_sync=gmsl)
+    verified, failed = [], []
+    controller.gmsl_sync_verified.connect(verified.append)
+    controller.gmsl_sync_failed.connect(failed.append)
+    controller.start_all(ctx=object())
+    return controller, fake_threads, gmsl, verified, failed
+
+
+def test_gmsl_sync_verified_only_once_every_camera_streams():
+    controller, fake_threads, gmsl, verified, failed = _verifying_controller()
+
+    fake_threads["s1"].row_ready.emit({"pair_index": 0})
+    gmsl.verify.assert_not_called()
+    fake_threads["s2"].row_ready.emit({"pair_index": 0})
+    fake_threads["s2"].row_ready.emit({"pair_index": 1})
+
+    gmsl.verify.assert_called_once()
+    assert verified == [["/dev/video2", "/dev/video10"]]
+    assert failed == []
+    assert not any(thread.stop_requested for thread in fake_threads.values())
+
+
+def test_gmsl_sync_mode_wrong_after_streams_open_fails_and_stops_run():
+    controller, fake_threads, gmsl, verified, failed = _verifying_controller(
+        verify_result=["camera_sync_mode on /dev/video2 reads 0 after the streams opened, expected 2"])
+
+    fake_threads["s1"].row_ready.emit({"pair_index": 0})
+    fake_threads["s2"].row_ready.emit({"pair_index": 0})
+
+    assert verified == []
+    assert len(failed) == 1 and "/dev/video2 reads 0" in failed[0]
+    assert all(thread.stop_requested for thread in fake_threads.values())
+
+
+def test_gmsl_camera_stopping_before_first_frame_fails_with_its_error():
+    controller, fake_threads, gmsl, verified, failed = _verifying_controller()
+    fake_threads["s1"].row_ready.emit({"pair_index": 0})
+
+    fake_threads["s2"].error.emit("Frame didn't arrive within 5000")
+    fake_threads["s2"].finished.emit()
+
+    assert len(failed) == 1
+    assert "cam2" in failed[0] and "Frame didn't arrive within 5000" in failed[0]
+    assert fake_threads["s1"].stop_requested
+    gmsl.verify.assert_not_called()
+
+
+def test_gmsl_no_frames_within_timeout_fails():
+    controller, fake_threads, gmsl, verified, failed = _verifying_controller()
+    fake_threads["s1"].row_ready.emit({"pair_index": 0})
+
+    controller._on_gmsl_verify_timeout()
+
+    assert len(failed) == 1 and "cam2" in failed[0] and "cam1" not in failed[0]
+    assert all(thread.stop_requested for thread in fake_threads.values())
+
+
+def test_operator_stop_before_streaming_is_not_a_sync_failure():
+    controller, fake_threads, gmsl, verified, failed = _verifying_controller()
+
+    controller.stop_all()
+    controller._on_gmsl_verify_timeout()
+    for thread in fake_threads.values():
+        thread.finished.emit()
+
+    assert failed == [] and verified == []
+
+
+def test_free_run_guard_run_has_no_sync_check():
+    class _Guard:
+        def engage(self):
+            pass
+
+        def disengage(self):
+            return []
+
+    controller, fake_threads = _controller(_gmsl_specs(), gmsl_sync=_Guard())
+    failed = []
+    controller.gmsl_sync_failed.connect(failed.append)
+    controller.start_all(ctx=object())
+
+    for thread in fake_threads.values():
+        thread.finished.emit()
+
+    assert failed == []
+
+
+def test_gmsl_run_hands_the_global_ts_warmup_to_the_reconciler():
+    class _Sync:
+        global_ts_skip_s = 10.0
+
+        def engage(self):
+            pass
+
+        def disengage(self):
+            return []
+
+    controller, _ = _controller(_gmsl_specs(), gmsl_sync=_Sync())
+    assert controller._reconciler._global_ts_warmup_us == 10_000_000
+
+    controller, _ = _controller(_gmsl_specs(), gmsl_sync=MagicMock())
+    assert controller._reconciler._global_ts_warmup_us == 0
+
+    controller, _ = _controller(_gmsl_specs())
+    assert controller._reconciler._global_ts_warmup_us == 0
+
+
+# --- GMSL TSC sync runs: open cameras back to back (each right after the
+# previous camera's pipeline.start() returned), like the reference script. ---
+
+class _FakeThreadWithCaptureStarted(_FakeSessionEngineThread):
+    capture_started = Signal()
+
+
+class _BackToBackSync:
+    start_cameras_back_to_back = True
+    global_ts_skip_s = 0.0
+
+    def __init__(self):
+        self.verified = 0
+
+    def engage(self):
+        pass
+
+    def verify(self):
+        self.verified += 1
+        return []
+
+    def disengage(self):
+        return []
+
+
+def _back_to_back_controller(specs=None, camera_start_stagger_s=0):
+    created = []
+
+    def factory(**kwargs):
+        thread = _FakeThreadWithCaptureStarted(**kwargs)
+        created.append(thread)
+        return thread
+
+    controller, _ = _controller(specs or _gmsl_specs(), gmsl_sync=_BackToBackSync(), thread_factory=factory,
+                                camera_start_stagger_s=camera_start_stagger_s)
+    return controller, created
+
+
+def test_back_to_back_opens_the_next_camera_only_once_the_previous_stream_is_open():
+    specs = _gmsl_specs() + [_spec("cam3", False, inter_cam_sync_value=None, device_serial="s3")]
+    controller, created = _back_to_back_controller(specs)
+
+    controller.start_all(ctx=object())
+    assert [t.kwargs["device_serial"] for t in created] == ["s1"]
+
+    created[0].capture_started.emit()
+    assert [t.kwargs["device_serial"] for t in created] == ["s1", "s2"]
+
+    created[1].capture_started.emit()
+    assert [t.kwargs["device_serial"] for t in created] == ["s1", "s2", "s3"]
+    assert all(t.started for t in created)
+
+
+def test_back_to_back_never_waits_the_usb_stagger():
+    controller, created = _back_to_back_controller(camera_start_stagger_s=100)
+
+    with patch("engine.multi_camera_session.time.sleep") as sleep:
+        controller.start_all(ctx=object())
+        created[0].capture_started.emit()
+
+    sleep.assert_not_called()
+    assert len(created) == 2
+
+
+def test_back_to_back_camera_that_ends_before_its_stream_opens_stops_the_chain():
+    controller, created = _back_to_back_controller()
+    finished, failed = [], []
+    controller.all_sessions_finished.connect(finished.append)
+    controller.gmsl_sync_failed.connect(failed.append)
+    controller.start_all(ctx=object())
+
+    created[0].error.emit("pipeline.start() failed")
+    created[0].finished.emit()
+
+    assert len(created) == 1  # the second camera is never opened
+    assert len(finished) == 1
+    assert len(failed) == 1 and "pipeline.start() failed" in failed[0]
+
+
+def test_back_to_back_stop_before_the_next_camera_opens_never_opens_it():
+    controller, created = _back_to_back_controller()
+    controller.start_all(ctx=object())
+
+    controller.stop_all()
+    created[0].capture_started.emit()
+
+    assert len(created) == 1
+    assert created[0].stop_requested
+
+
+def test_back_to_back_sync_check_waits_for_every_camera_not_just_the_first():
+    controller, created = _back_to_back_controller()
+    sync = controller._gmsl_sync
+    controller.start_all(ctx=object())
+
+    created[0].row_ready.emit({"pair_index": 0})
+    assert sync.verified == 0  # camera 2 isn't even open yet
+
+    created[0].capture_started.emit()
+    created[1].row_ready.emit({"pair_index": 0})
+    assert sync.verified == 1
+
+
+def test_back_to_back_falls_back_to_starting_all_when_threads_cannot_signal():
+    created = []
+
+    def factory(**kwargs):
+        thread = _FakeSessionEngineThread(**kwargs)  # no capture_started signal
+        created.append(thread)
+        return thread
+
+    controller, _ = _controller(_gmsl_specs(), gmsl_sync=_BackToBackSync(), thread_factory=factory)
+    controller.start_all(ctx=object())
+
+    assert len(created) == 2
+
+
+def test_without_back_to_back_every_thread_starts_at_once_as_before():
+    created = []
+
+    def factory(**kwargs):
+        thread = _FakeThreadWithCaptureStarted(**kwargs)
+        created.append(thread)
+        return thread
+
+    controller, _ = _controller(_gmsl_specs(), gmsl_sync=MagicMock(), thread_factory=factory)
+    controller.start_all(ctx=object())
+
+    assert len(created) == 2
+
+
+# --- Cross-camera matching window: half a frame when every stream shares one
+# fps, so an offset pair is never matched one frame off. ---
+
+def _spec_with_fps(camera_id, is_master, fps_a, fps_b=None):
+    spec = _spec(camera_id, is_master, inter_cam_sync_value=None, device_serial=camera_id + "_serial")
+    spec.thread_kwargs["pick_a"] = {"fps": fps_a}
+    spec.thread_kwargs["pick_b"] = {"fps": fps_b} if fps_b else None
+    return spec
+
+
+def test_match_window_is_half_a_frame_when_every_stream_shares_one_fps():
+    controller, _ = _controller([_spec_with_fps("cam1", True, 30, 30), _spec_with_fps("cam2", False, 30)])
+    assert controller._reconciler._max_match_gap_us == pytest.approx(1e6 / 60)
+
+    controller, _ = _controller([_spec_with_fps("cam1", True, 15, 15), _spec_with_fps("cam2", False, 15, 15)])
+    assert controller._reconciler._max_match_gap_us == pytest.approx(1e6 / 30)
+
+
+def test_match_window_keeps_50_ms_for_mixed_fps():
+    controller, _ = _controller([_spec_with_fps("cam1", True, 30, 15), _spec_with_fps("cam2", False, 30)])
+    assert controller._reconciler._max_match_gap_us == 50_000

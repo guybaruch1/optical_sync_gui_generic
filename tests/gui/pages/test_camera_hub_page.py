@@ -207,3 +207,25 @@ def test_gmsl_checkbox_operator_untick_survives_a_transient_unavailable_refresh(
     page.set_gmsl_tsc_available(True)
 
     assert page.gmsl_tsc_checked is False
+
+
+# --- Single-stream cameras: a solo one has nothing to compare against ---
+
+def test_start_disabled_for_a_solo_single_stream_camera(qapp):
+    page = CameraHubPage()
+    page.set_cameras([CameraSummary("cam1", "D455", is_master=True, configured=True, single_stream=True)])
+    assert not page.start_button.isEnabled()
+    assert page.start_button.toolTip() == CameraHubPage.SOLO_SINGLE_STREAM_MESSAGE
+    assert CameraHubPage.SOLO_SINGLE_STREAM_MESSAGE == (
+        "A single-stream camera needs at least one other camera to compare against."
+    )
+
+
+def test_start_enabled_for_two_single_stream_cameras(qapp):
+    page = CameraHubPage()
+    page.set_cameras([
+        CameraSummary("cam1", "D455", is_master=True, configured=True, single_stream=True),
+        CameraSummary("cam2", "D455", is_master=False, configured=True, single_stream=True),
+    ])
+    assert page.start_button.isEnabled()
+    assert page.start_button.toolTip() == ""

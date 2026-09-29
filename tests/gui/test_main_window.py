@@ -324,7 +324,10 @@ def test_mode_switch_requested_updates_current_mode_even_if_repopulate_fails(qap
 
 def test_on_config_chosen_persists_last_test_name(qapp, monkeypatch):
     settings = _minimal_settings({"Intel RealSense D455": [_ir_vs_rgb_test("IR vs RGB sync")]})
-    settings["calibration"] = {"settle_frames": 15}
+    settings["calibration"] = {
+        "settle_frames": 15, "min_blob_area": 5, "neighborhood_size": 5, "row_gap_px": 15,
+        "min_acceptable_contrast": 0,
+    }
     window = _make_window(qapp, settings)
     monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [IR1, COLOR0])
     monkeypatch.setattr(main_window_module, "save_gui_state", lambda state: None)
@@ -361,7 +364,10 @@ class _FakePreviewThread:
 
 def _full_settings(stream_options):
     settings = _minimal_settings(stream_options)
-    settings["calibration"] = {"settle_frames": 15}
+    settings["calibration"] = {
+        "settle_frames": 15, "min_blob_area": 5, "neighborhood_size": 5, "row_gap_px": 15,
+        "min_acceptable_contrast": 0,
+    }
     settings["paths"] = {
         "config_path": "config.yaml", "raw_csv_path": "raw.csv", "frame_drop_csv_path": "drops.csv",
     }
@@ -413,7 +419,8 @@ def _window_after_config_chosen(qapp, monkeypatch, tmp_path, dual_panel=False):
 
 
 def _configure_one_camera(window, serial, model_name="Intel RealSense D455",
-                           ir_pick=IR1, color_pick=COLOR0, camera_controls=None):
+                           ir_pick=IR1, color_pick=COLOR0, camera_controls=None,
+                           dual_panel=False):
     """Runs one camera's full sub-flow (Device Select -> Stream Config ->
     [ROI Select/Calibration skipped, same shorthand as _window_after_config_
     chosen above] -> Threshold Tuning) against an ALREADY-CONSTRUCTED
@@ -432,6 +439,8 @@ def _configure_one_camera(window, serial, model_name="Intel RealSense D455",
             "exposure_a": None, "exposure_b": None,
         }
     window._on_device_chosen(serial, model_name)
+    if dual_panel:
+        window.stream_config_page.dual_panel_checkbox.setChecked(True)
     window._on_config_chosen((ir_pick, color_pick, camera_controls))
     window.gui_state.stream_a_roi = [0, 0, 50, 50]
     window.gui_state.stream_b_roi = [0, 0, 50, 50]
@@ -1010,6 +1019,81 @@ def test_start_multi_camera_session_requested_survives_genlock_reset_failure_for
     assert window.stack.currentWidget() is window.live_session_page
 
 
+# --- Solo GMSL D585: a killed synced run leaves the kernel camera_sync_mode
+# at External Sync, which the SDK reset above never touches. ---
+
+def _solo_window(qapp, monkeypatch, tmp_path):
+    window = _window_after_config_chosen(qapp, monkeypatch, tmp_path)
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window._on_tuning_done()
+    return window
+
+
+def test_solo_gmsl_camera_clears_leftover_sync_before_routing(qapp, monkeypatch, tmp_path):
+    window = _solo_window(qapp, monkeypatch, tmp_path)
+    monkeypatch.setattr(main_window_module, "detect_gmsl_camera", lambda panel, serial, lookup: serial == "SN123")
+    resets = []
+    monkeypatch.setattr(main_window_module, "reset_leftover_sync", lambda control: resets.append(control) or [])
+
+    window._on_start_multi_camera_session_requested()
+
+    assert resets == ["camera_sync_mode"]
+    assert window.stack.currentWidget() is window.live_session_page
+
+
+def test_solo_gmsl_camera_blocks_start_when_leftover_sync_cannot_be_cleared(qapp, monkeypatch, tmp_path):
+    window = _solo_window(qapp, monkeypatch, tmp_path)
+    start_page = window.stack.currentWidget()
+    monkeypatch.setattr(main_window_module, "detect_gmsl_camera", lambda *a: True)
+
+    def failing_reset(control):
+        raise RuntimeError("camera_sync_mode on /dev/video2 could not be reset")
+    monkeypatch.setattr(main_window_module, "reset_leftover_sync", failing_reset)
+    critical = _capture_critical(monkeypatch)
+
+    window._on_start_multi_camera_session_requested()
+
+    assert len(critical) == 1
+    assert window.stack.currentWidget() is start_page
+
+
+def test_solo_non_gmsl_camera_never_touches_v4l2(qapp, monkeypatch, tmp_path):
+    window = _solo_window(qapp, monkeypatch, tmp_path)
+    monkeypatch.setattr(main_window_module, "detect_gmsl_camera", lambda *a: False)
+    monkeypatch.setattr(main_window_module, "reset_leftover_sync",
+                        lambda control: pytest.fail("must not reset V4L2 on a non-GMSL camera"))
+
+    window._on_start_multi_camera_session_requested()
+
+    assert window.stack.currentWidget() is window.live_session_page
+
+
+def test_close_event_waits_for_every_session_thread_before_closing(qapp, monkeypatch, tmp_path):
+    window = _solo_window(qapp, monkeypatch, tmp_path)
+    events = []
+
+    class _Thread:
+        def __init__(self, name):
+            self.name = name
+
+        def wait(self):
+            events.append(("wait", self.name))
+
+    window.live_session_page.engine_thread = _Thread("solo")
+    monkeypatch.setattr(window.live_session_page, "stop_session", lambda: events.append("stop solo"))
+    monkeypatch.setattr(window.multi_camera_live_session_page, "stop_all_sessions",
+                        lambda: events.append("stop multi"))
+    monkeypatch.setattr(window.multi_camera_live_session_page, "session_threads",
+                        lambda: [_Thread("cam1"), _Thread("cam2")])
+
+    window.close()
+
+    assert events[:2] == ["stop solo", "stop multi"]
+    assert sorted(events[2:]) == [("wait", "cam1"), ("wait", "cam2"), ("wait", "solo")]
+    window.live_session_page.engine_thread = None
+
+
 # --- Genlock (inter_cam_sync_mode) role resolution: MainWindow embeds the
 # raw per-camera-model value fresh at Start-time (using whichever camera is
 # CURRENTLY master), via engine.streams.resolve_inter_cam_sync_value against
@@ -1415,7 +1499,10 @@ def test_start_with_gmsl_ticked_skips_genlock_and_passes_config(qapp, monkeypatc
     assert critical == []
     assert all(c["config"]["inter_cam_sync_value"] is None for c in captured["cameras"])
     assert captured["gmsl_tsc_sync"] == {"control": "camera_sync_mode", "sync_mode_value": 2,
-                                         "duty_percent": 50, "settle_s": 5.0, "fps": 30}
+                                         "duty_percent": 50, "settle_s": 5.0,
+                                         "laser_off": True, "global_ts_skip_s": 10.0,
+                                         "tsc_before_mode": True, "enable_depth": False,
+                                         "start_cameras_back_to_back": True, "fps": 30}
 
 
 def test_start_with_gmsl_ticked_blocks_on_fps_mismatch(qapp, monkeypatch, tmp_path):
@@ -1563,3 +1650,156 @@ def test_start_with_one_ir_vs_ir_camera_re_applies_the_target(qapp, monkeypatch,
     window._on_start_multi_camera_session_requested()
 
     assert targets == [(window.settings["dual_panel"], "stream_a")]
+
+
+# --- Single-stream cameras (pick_b is None) through the main window ---
+
+def _ir1_only_test():
+    return {
+        "test_name": "IR1 only",
+        "stream_a_identity": {"stream_type": "infrared", "stream_index": 1},
+        "sensor_options": [{"stream_a": {"width": 1280, "height": 720, "fps": 30, "format": "y8"}}],
+    }
+
+
+def _color_only_test():
+    return {
+        "test_name": "Color only",
+        "stream_a_identity": {"stream_type": "color", "stream_index": 0},
+        "sensor_options": [{"stream_a": {"width": 1280, "height": 720, "fps": 30, "format": "bgr8"}}],
+    }
+
+
+def _single_stream_window(qapp, monkeypatch, tmp_path):
+    settings = _full_settings({"Intel RealSense D455": [_ir_vs_rgb_test(), _ir1_only_test(), _color_only_test()]})
+    window = _make_window(qapp, settings)
+    monkeypatch.setattr(main_window_module, "list_video_stream_options", lambda ctx, serial: [IR1, COLOR0])
+    monkeypatch.setattr(main_window_module, "save_gui_state", lambda state: None)
+    monkeypatch.setattr(window.roi_page, "set_context", lambda *a, **k: None)
+    monkeypatch.setattr(main_window_module, "ensure_output_dir", lambda settings: str(tmp_path))
+
+    def _fake_load(config_path, camera_name, slug_a, res_a, slug_b=None, res_b=None):
+        positions_a = {"0": [1.0, 1.0, 300.0, 100.0, 200.0]}
+        return positions_a, ({"0": [2.0, 2.0, 600.0, 200.0, 400.0]} if slug_b is not None else None)
+
+    monkeypatch.setattr(main_window_module, "load_led_positions", _fake_load)
+    return window
+
+
+def _configure_single_stream_camera(window, serial, test_name="IR1 only", pick=IR1):
+    window._on_device_chosen(serial, "Intel RealSense D455")
+    window.stream_config_page.combo_test.setCurrentIndex(
+        window.stream_config_page.combo_test.findData(test_name))
+    window._on_config_chosen((pick, None, {
+        "emitter_enabled": False, "auto_exposure": True, "exposure_a": None, "exposure_b": None,
+    }))
+    window._on_roi_chosen(([0, 0, 50, 50], None))
+    window.calibration_page.last_calibration_result = dict(
+        image_a_on=np.full((50, 50), 50, dtype=np.uint8), image_a_off=np.full((50, 50), 50, dtype=np.uint8),
+        image_b_on=None, image_b_off=None, stream_a_otsu_threshold=127, stream_b_otsu_threshold=None,
+        min_blob_area=5, row_gap_px=15, neighborhood_size=5,
+    )
+    camera_id = window._editing_camera_id
+    with patch("gui.pages.threshold_tuning_page.ThresholdPreviewThread", _FakePreviewThread):
+        window._on_calibration_done()
+        window._on_tuning_done()
+    return camera_id
+
+
+def test_single_stream_camera_commits_with_no_stream_b_values(qapp, monkeypatch, tmp_path):
+    window = _single_stream_window(qapp, monkeypatch, tmp_path)
+    # A previous two-stream camera leaves a stream_b ROI behind in GuiState -
+    # it must not leak into the single-stream camera's config.
+    window.gui_state.stream_b_roi = [9, 9, 9, 9]
+    monkeypatch.setattr(window.calibration_page, "set_context", lambda *a, **k: None)
+
+    camera_id = _configure_single_stream_camera(window, "SN1")
+
+    config = window._cameras[camera_id]["config"]
+    assert config["pick_b"] is None
+    for key in ("stream_b_threshold", "stream_b_xy", "stream_b_roi", "stream_b_label"):
+        assert config[key] is None, key
+    assert config["stream_a_threshold"] is not None
+    assert window._cameras[camera_id]["test_name"] == "IR1 only"
+
+
+def test_hub_blocks_a_solo_single_stream_camera_and_start_guard_refuses(qapp, monkeypatch, tmp_path):
+    window = _single_stream_window(qapp, monkeypatch, tmp_path)
+    monkeypatch.setattr(window.calibration_page, "set_context", lambda *a, **k: None)
+    _configure_single_stream_camera(window, "SN1")
+    calls = _capture_critical(monkeypatch)
+    live_session_calls = []
+    monkeypatch.setattr(window.live_session_page, "set_context", lambda **kwargs: live_session_calls.append(kwargs))
+
+    assert not window.camera_hub_page.start_button.isEnabled()
+    window._on_start_multi_camera_session_requested()
+
+    assert len(calls) == 1
+    assert live_session_calls == []
+
+
+def test_removing_the_other_camera_leaves_start_disabled_for_the_single_stream_one(qapp, monkeypatch, tmp_path):
+    window = _single_stream_window(qapp, monkeypatch, tmp_path)
+    monkeypatch.setattr(window.calibration_page, "set_context", lambda *a, **k: None)
+    _configure_single_stream_camera(window, "SN1")
+    window._on_add_camera_requested()
+    second_id = _configure_single_stream_camera(window, "SN2")
+    assert window.camera_hub_page.start_button.isEnabled()
+
+    window._on_remove_camera_requested(second_id)
+
+    assert not window.camera_hub_page.start_button.isEnabled()
+
+
+def test_two_single_stream_cameras_reach_the_multi_camera_page_with_gmsl_fps_check(qapp, monkeypatch, tmp_path):
+    window = _single_stream_window(qapp, monkeypatch, tmp_path)
+    monkeypatch.setattr(window.calibration_page, "set_context", lambda *a, **k: None)
+    _configure_single_stream_camera(window, "SN1")
+    window._on_add_camera_requested()
+    _configure_single_stream_camera(window, "SN2")
+    monkeypatch.setattr(type(window.camera_hub_page), "gmsl_tsc_checked", property(lambda self: True))
+    received = {}
+    monkeypatch.setattr(window.multi_camera_live_session_page, "set_cameras",
+                        lambda ctx, cameras, **kwargs: received.update(cameras=cameras, **kwargs))
+
+    window._on_start_multi_camera_session_requested()
+
+    assert received["gmsl_tsc_sync"]["fps"] == 30
+    assert [c["config"]["pick_b"] for c in received["cameras"]] == [None, None]
+
+
+def test_start_refuses_a_single_stream_slave_sharing_no_stream_with_the_master(qapp, monkeypatch, tmp_path):
+    window = _single_stream_window(qapp, monkeypatch, tmp_path)
+    monkeypatch.setattr(window.calibration_page, "set_context", lambda *a, **k: None)
+    _configure_single_stream_camera(window, "SN1")
+    window._on_add_camera_requested()
+    _configure_single_stream_camera(window, "SN2", test_name="Color only", pick=COLOR0)
+    calls = _capture_critical(monkeypatch)
+    set_cameras_calls = []
+    monkeypatch.setattr(window.multi_camera_live_session_page, "set_cameras",
+                        lambda *a, **k: set_cameras_calls.append((a, k)))
+
+    window._on_start_multi_camera_session_requested()
+
+    assert len(calls) == 1
+    assert calls[0][0][1] == "No shared stream with the master"
+    assert "D455 [SN2]" in calls[0][0][2]
+    assert set_cameras_calls == []
+
+
+def test_start_refuses_a_single_stream_camera_with_exactly_one_dual_panel_camera(qapp, monkeypatch, tmp_path):
+    window = _single_stream_window(qapp, monkeypatch, tmp_path)
+    monkeypatch.setattr(window.calibration_page, "set_context", lambda *a, **k: None)
+    _configure_one_camera(window, "SN1", dual_panel=True)
+    window._on_add_camera_requested()
+    _configure_single_stream_camera(window, "SN2")
+    calls = _capture_critical(monkeypatch)
+    set_cameras_calls = []
+    monkeypatch.setattr(window.multi_camera_live_session_page, "set_cameras",
+                        lambda *a, **k: set_cameras_calls.append((a, k)))
+
+    window._on_start_multi_camera_session_requested()
+
+    assert len(calls) == 1
+    assert calls[0][0][1] == "Dual-panel camera can't share a run with a single-stream camera"
+    assert set_cameras_calls == []

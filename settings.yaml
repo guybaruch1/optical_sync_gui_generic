@@ -33,6 +33,11 @@ camera:
   # offered. Connecting a camera model with no entry here at all shows an
   # error asking you to add one - copy the block below as a starting
   # template.
+  #
+  # A test with no stream_b_identity (and only a stream_a side in each
+  # sensor_options entry) is SINGLE-STREAM: the camera contributes one
+  # stream to a multi-camera run, compared only against the other cameras
+  # (Cross-Camera Sync). Needs at least one other camera to start.
   stream_options:
     "RealSense D455":
       - test_name: "IR1 vs IR2 sync"
@@ -47,6 +52,15 @@ camera:
         sensor_options:
           - stream_a: {width: 1280, height: 720, fps: 30, format: y8}
             stream_b: {width: 1280, height: 720, fps: 30, format: bgr8}
+      - test_name: "IR1 only"
+        stream_a_identity: {stream_type: infrared, stream_index: 1}
+        sensor_options:
+          - stream_a: {width: 1280, height: 720, fps: 30, format: y8}
+      - test_name: "Color only"
+        stream_a_identity: {stream_type: color, stream_index: 0}
+        sensor_options:
+          - stream_a: {width: 1280, height: 720, fps: 30, format: bgr8}
+          - stream_a: {width: 640, height: 480, fps: 30, format: bgr8}
     "RealSense D585 Prototype":
       - test_name: "IR1 vs IR2 sync"
         stream_a_identity: { stream_type: infrared, stream_index: 1 }
@@ -74,6 +88,15 @@ camera:
             stream_b: { width: 640, height: 480, fps: 15, format: bgr8 }
           - stream_a: { width: 640, height: 480, fps: 5, format: y8 }
             stream_b: { width: 640, height: 480, fps: 5, format: bgr8 }
+      - test_name: "IR1 only"
+        stream_a_identity: { stream_type: infrared, stream_index: 1 }
+        sensor_options:
+          - stream_a: { width: 1280, height: 720, fps: 30, format: y8 }
+      - test_name: "Color only"
+        stream_a_identity: { stream_type: color, stream_index: 0 }
+        sensor_options:
+          - stream_a: { width: 1280, height: 720, fps: 30, format: bgr8 }
+          - stream_a: { width: 640, height: 480, fps: 30, format: bgr8 }
   # Used as the PRE-SELECTED default in the Stream Config wizard page's
   # dropdowns, if the connected camera actually reports this exact combo -
   # you can still pick a different one there if this rig/camera doesn't
@@ -283,6 +306,35 @@ camera_sync:
     # Trigger runs this long before any stream opens, so the sensors lock
     # to a stable signal (matches the reference method that passes).
     settle_s: 5.0
+    # Both follow the reference check_d585_sync_v4l2.py, and apply to
+    # ticked GMSL TSC sync runs only. laser_off: projector switched off via
+    # V4L2 (laser_power_on_off=0) for the run and restored after - the SDK
+    # emitter setting from Stream Config is left alone in these runs so it
+    # can't turn it back on. global_ts_skip_s: Global TS Latency ignores
+    # this many seconds at the start while librealsense's device-to-host
+    # clock fit converges (the reference measured -2.1 ms in the first
+    # second, +61 us after ten).
+    laser_off: true
+    global_ts_skip_s: 10.0
+    # Real-hardware finding (2026-09-29): with the app's old start sequence
+    # the two cameras never locked to the TSC - 24 ticked runs each ended up
+    # a random, fixed 0.3-23.5 ms apart (like the reference's no-TSC phase),
+    # while check_d585_sync_v4l2.py locked to ~0.1 ms on every start. These
+    # three follow the reference's sequence; set one back to find which
+    # matters (each run folder's gmsl_tsc_sync.json records what was used).
+    # tsc_before_mode: start the TSC and wait settle_s, THEN switch the
+    # cameras to external sync and open the streams. false = old order
+    # (mode first, then TSC, then settle).
+    tsc_before_mode: true
+    # enable_depth: co-enable depth with IR in ticked runs (the reference
+    # runs IR + color only). Overrides enable_depth_for_ir_sync above for
+    # ticked runs only - watch each camera's own IR-vs-color Optical Sync
+    # if you turn it off.
+    enable_depth: false
+    # start_cameras_back_to_back: open each camera's stream right after the
+    # previous camera's stream is open, like the reference, instead of the
+    # fixed 2 s USB stagger. Still one capture thread per camera.
+    start_cameras_back_to_back: true
 
 # Only read when the operator checks Device Select's "Use dual LED panel"
 # box - two physically separate LED panels sharing one Acroname USB hub

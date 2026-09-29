@@ -14,7 +14,7 @@ import pytest
 from engine.cross_camera_reconciler import (
     CrossCameraPairSpec, CrossCameraReconciler, build_cross_camera_pair_specs,
 )
-from engine.metrics import FramePairSample, PairingGapMetric, PositionGapMetric
+from engine.metrics import FramePairSample, LedDetectionMetric, PairingGapMetric, PositionGapMetric
 from engine.test_session import TestSession, TestSessionConfig
 
 
@@ -576,3 +576,136 @@ def test_real_position_gap_metric_key_names_connect_end_to_end_through_test_sess
 
     assert len(cross_rows) == 1
     assert cross_rows[0]["position_gap_ms"] is not None
+
+
+def _single_stream_row(pair_index, ts_us, last_led, excluded=False, exclude_reason=None, frame_drop=False):
+    """A single-stream camera's row: LedDetectionMetric output, no
+    position_gap_ms_* keys at all (no intra-camera metric)."""
+    return {
+        "pair_index": pair_index,
+        "stream_a_ts_us": ts_us, "stream_a_global_ts_us": ts_us, "stream_a_frame_drop": frame_drop,
+        "stream_a_last_led": last_led,
+        "led_detection": last_led, "led_detection_excluded": excluded, "led_detection_exclude_reason": exclude_reason,
+    }
+
+
+def test_cross_position_gap_between_two_single_stream_cameras():
+    reconciler = CrossCameraReconciler([_spec(num_leds=10, switch_time_ms=1.0)])
+    reconciler.ingest_row("cam1", _single_stream_row(1, 1_000_000.0, last_led=5))
+    cross_rows = reconciler.ingest_row("cam2", _single_stream_row(1, 1_000_010.0, last_led=3))
+
+    assert cross_rows[0]["position_gap_ms"] == 2.0
+    assert cross_rows[0]["position_gap_ms_excluded"] is False
+
+
+def test_cross_position_gap_reuses_a_single_stream_cameras_warmup_exclusion():
+    reconciler = CrossCameraReconciler([_spec()])
+    reconciler.ingest_row("cam1", _single_stream_row(1, 1_000_000.0, last_led=5, excluded=True, exclude_reason="warmup"))
+    cross_rows = reconciler.ingest_row("cam2", _single_stream_row(1, 1_000_010.0, last_led=3))
+
+    assert cross_rows[0]["position_gap_ms"] is None
+    assert cross_rows[0]["position_gap_ms_exclude_reason"] == "warmup"
+
+
+def test_cross_position_gap_single_stream_master_vs_two_stream_slave_on_its_stream_b():
+    # Master runs "Color only" (its color is stream_a); the slave runs IR vs
+    # RGB (its color is stream_b) - roles resolve per camera.
+    specs = build_cross_camera_pair_specs(
+        [_CamSpec("cam1", True, {"stream_a": "color"}),
+         _CamSpec("cam2", False, {"stream_a": "infrared1", "stream_b": "color"})],
+        outlier_threshold_us=100_000,
+    )
+    assert [(s.stream_identity, s.master_row_role, s.slave_row_role) for s in specs] == [("color", "stream_a", "stream_b")]
+    reconciler = CrossCameraReconciler(specs)
+    reconciler.ingest_row("cam1", _single_stream_row(1, 1_000_000.0, last_led=4))
+    cross_rows = reconciler.ingest_row("cam2", _row(1, 1_000_010.0, role="stream_b", last_led=4))
+
+    assert cross_rows[0]["position_gap_ms"] == 0.0
+    assert cross_rows[0]["position_gap_ms_excluded"] is False
+
+
+def _single_stream_sample(pair_index, bright):
+    return FramePairSample(
+        pair_index=pair_index, stream_a_ts_us=1_000_000.0 + 50.0 * pair_index, stream_b_ts_us=None,
+        stream_a_global_ts_us=2_000_000.0 + 50.0 * pair_index, stream_b_global_ts_us=None,
+        stream_a_bright=np.array(bright), stream_b_bright=None,
+    )
+
+
+def test_real_led_detection_metric_key_names_connect_end_to_end_for_single_stream_cameras():
+    def make_session():
+        metric = LedDetectionMetric(stream_a_threshold=np.full(4, 150.0), warmup_pairs_to_skip=1)
+        session = TestSession(TestSessionConfig(metrics=[metric]))
+        session.start()
+        return session
+
+    master_session, slave_session = make_session(), make_session()
+    specs = build_cross_camera_pair_specs(
+        [_CamSpec("cam1", True, {"stream_a": "infrared1"}, num_leds=4),
+         _CamSpec("cam2", False, {"stream_a": "infrared1"}, num_leds=4)],
+        outlier_threshold_us=100_000,
+    )
+    reconciler = CrossCameraReconciler(specs)
+
+    on_leds = [[50.0, 200.0, 50.0, 50.0], [50.0, 50.0, 200.0, 50.0], [50.0, 50.0, 50.0, 200.0]]
+    all_dark = [50.0, 50.0, 50.0, 50.0]
+    cross_rows = []
+    for pair_index in range(3):
+        master_row = master_session.process_pair(_single_stream_sample(pair_index, on_leds[pair_index]))
+        # The slave's last pair sees no LED lit at all - a detection miss.
+        slave_bright = all_dark if pair_index == 2 else on_leds[pair_index]
+        slave_row = slave_session.process_pair(_single_stream_sample(pair_index, slave_bright))
+        reconciler.ingest_row("cam1", master_row)
+        cross_rows.extend(reconciler.ingest_row("cam2", slave_row))
+
+    assert len(cross_rows) == 3
+    assert cross_rows[0]["position_gap_ms_excluded"] is True
+    assert cross_rows[0]["position_gap_ms_exclude_reason"] == "warmup"
+    assert cross_rows[1]["position_gap_ms"] is not None
+    assert cross_rows[1]["position_gap_ms_excluded"] is False
+    # Slave-side exclusion: the slave's own "miss" carries through.
+    assert cross_rows[2]["position_gap_ms"] is None
+    assert cross_rows[2]["position_gap_ms_exclude_reason"] == "miss"
+
+
+# --- GMSL TSC sync runs: Global TS Latency ignores the first seconds while
+# librealsense's device-to-host clock fit converges (reference script). ---
+
+def _feed_synced(reconciler, n_frames, period_us=33_333, start_us=1_000_000):
+    rows = []
+    for n in range(n_frames):
+        ts = start_us + n * period_us
+        reconciler.ingest_row("cam1", _row(n, ts))
+        rows.extend(reconciler.ingest_row("cam2", _row(n, ts + 150)))
+    return rows
+
+
+def test_global_ts_warmup_excludes_only_the_first_seconds_of_global_ts_gap():
+    reconciler = CrossCameraReconciler([_spec()], global_ts_warmup_s=1.0)
+
+    rows = _feed_synced(reconciler, 60)  # 2 s at 30 fps
+
+    early = [row for row in rows if row["master_global_ts_us"] - 1_000_000 < 1_000_000]
+    late = [row for row in rows if row["master_global_ts_us"] - 1_000_000 >= 1_000_000]
+    assert early and late
+    assert all(row["global_ts_gap_us_excluded"] and row["global_ts_gap_us_exclude_reason"] == "global_ts_warmup"
+               for row in early)
+    assert not any(row["global_ts_gap_us_excluded"] for row in late)
+    # Matching and HW TS Latency are untouched by the warm-up.
+    assert len(rows) == 60
+    assert not any(row["pairing_gap_us_excluded"] for row in rows)
+
+
+def test_no_global_ts_warmup_by_default():
+    rows = _feed_synced(CrossCameraReconciler([_spec()]), 10)
+
+    assert not any(row["global_ts_gap_us_excluded"] for row in rows)
+
+
+def test_global_ts_warmup_keeps_a_real_exclusion_reason():
+    reconciler = CrossCameraReconciler([_spec(outlier_threshold_us=100)], global_ts_warmup_s=10.0)
+
+    reconciler.ingest_row("cam1", _row(0, 1_000_000))
+    [row] = reconciler.ingest_row("cam2", _row(0, 1_000_500))  # 500 us > 100 us outlier threshold
+
+    assert row["global_ts_gap_us_exclude_reason"] == "syncer_outlier"

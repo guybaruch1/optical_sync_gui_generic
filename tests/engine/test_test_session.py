@@ -126,3 +126,14 @@ def test_process_pair_defaults_global_ts_to_none_when_not_captured():
     row = session.process_pair(FramePairSample(pair_index=0, stream_a_ts_us=100.0, stream_b_ts_us=100.0))
     assert row["stream_a_global_ts_us"] is None
     assert row["stream_b_global_ts_us"] is None
+
+
+def test_process_pair_single_stream_never_flags_a_stream_b_drop():
+    session = TestSession(TestSessionConfig(metrics=[FakeMetric()], stream_a_fps=30, stream_b_fps=None,
+                                            frame_drop_threshold_factor=1.5))
+    session.start()
+    rows = [session.process_pair(FramePairSample(pair_index=i, stream_a_ts_us=i * 33_333.0, stream_b_ts_us=None))
+            for i in range(3)]
+    assert all(row["stream_b_frame_drop"] is False for row in rows)
+    assert all(row["stream_b_ts_us"] is None for row in rows)
+    assert all(row["stream_a_frame_drop"] is False for row in rows)

@@ -5,6 +5,7 @@ from engine.metrics import (
     compute_position_gap,
     PairingGapMetric,
     PositionGapMetric,
+    LedDetectionMetric,
     _is_frame_drop,
     is_position_gap_debug_outlier,
 )
@@ -288,3 +289,46 @@ def test_is_position_gap_debug_outlier_false_when_value_is_none():
     # no_led_data/miss rows carry value=None - nothing to threshold against.
     row = {"position_gap_ms": None, "position_gap_ms_excluded": True}
     assert is_position_gap_debug_outlier(row, threshold_ms=5.0) is False
+
+
+def _single_sample(pair_index=0, bright=None, frame_drop=False):
+    sample = FramePairSample(pair_index=pair_index, stream_a_ts_us=0.0, stream_b_ts_us=None,
+                             stream_a_bright=bright, stream_b_bright=None)
+    sample.stream_a_frame_drop = frame_drop
+    return sample
+
+
+def test_led_detection_metric_reports_detected_led_index():
+    metric = LedDetectionMetric(stream_a_threshold=np.full(4, 100.0), warmup_pairs_to_skip=0)
+    result = metric.update(_single_sample(bright=np.array([0.0, 200.0, 200.0, 0.0])))
+    assert result.name == "led_detection"
+    assert result.value == 2
+    assert result.excluded is False
+    assert result.extra == {"stream_a_last_led": 2}
+    assert list(metric.last_stream_a_on_mask) == [False, True, True, False]
+    assert metric.last_stream_b_on_mask is None
+
+
+def test_led_detection_metric_no_led_data_has_no_extra():
+    metric = LedDetectionMetric(stream_a_threshold=np.full(4, 100.0), warmup_pairs_to_skip=0)
+    result = metric.update(_single_sample(bright=None))
+    assert (result.value, result.excluded, result.exclude_reason, result.extra) == (None, True, "no_led_data", None)
+
+
+def test_led_detection_metric_miss_when_nothing_on():
+    metric = LedDetectionMetric(stream_a_threshold=np.full(3, 100.0), warmup_pairs_to_skip=0)
+    result = metric.update(_single_sample(bright=np.zeros(3)))
+    assert (result.value, result.exclude_reason, result.extra) == (None, "miss", {"stream_a_last_led": None})
+
+
+def test_led_detection_metric_frame_drop_keeps_value_and_wins_over_warmup():
+    metric = LedDetectionMetric(stream_a_threshold=np.full(3, 100.0), warmup_pairs_to_skip=5)
+    result = metric.update(_single_sample(bright=np.array([200.0, 0.0, 0.0]), frame_drop=True))
+    assert (result.value, result.excluded, result.exclude_reason) == (0, True, "frame_drop")
+
+
+def test_led_detection_metric_flags_warmup_pairs():
+    metric = LedDetectionMetric(stream_a_threshold=np.full(3, 100.0), warmup_pairs_to_skip=1)
+    bright = np.array([200.0, 0.0, 0.0])
+    assert metric.update(_single_sample(0, bright)).exclude_reason == "warmup"
+    assert metric.update(_single_sample(1, bright)).excluded is False

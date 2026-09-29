@@ -170,7 +170,7 @@ class CalibrationPage(QWidget):
             image_a_on, image_a_off = self._capture_on_off_for_stream(
                 groups, pick_a, "stream_a", dual_panel_config, settle_frames)
             image_b_on, image_b_off = self._capture_on_off_for_stream(
-                groups, pick_b, "stream_b", dual_panel_config, settle_frames)
+                groups, pick_b, "stream_b", dual_panel_config, settle_frames) if pick_b is not None else (None, None)
         else:
             def turn_on_all_leds():
                 self._log("Turning on all LEDs...")
@@ -217,14 +217,70 @@ class CalibrationPage(QWidget):
                 )
 
             image_a_on = decode(frames_on, pick_a)
-            image_b_on = decode(frames_on, pick_b)
+            image_b_on = decode(frames_on, pick_b) if pick_b is not None else None
             image_a_off = decode(frames_off, pick_a)
-            image_b_off = decode(frames_off, pick_b)
+            image_b_off = decode(frames_off, pick_b) if pick_b is not None else None
 
-        label_a, label_b = stream_label(pick_a), stream_label(pick_b)
-        slug_a, slug_b = stream_slug(pick_a), stream_slug(pick_b)
-        res_a, res_b = (pick_a["width"], pick_a["height"]), (pick_b["width"], pick_b["height"])
+        single_stream = pick_b is None
+        label_a, slug_a, res_a = stream_label(pick_a), stream_slug(pick_a), (pick_a["width"], pick_a["height"])
+        positions_a, row_layout_a, otsu_a = self._detect_stream(
+            label_a, slug_a, image_a_on, image_a_off, stream_a_roi, output_dir,
+            min_blob_area, row_gap_px, neighborhood_size,
+        )
+        streams = [(label_a, positions_a)]
+        otsu_b = None
+        if not single_stream:
+            label_b, slug_b, res_b = stream_label(pick_b), stream_slug(pick_b), (pick_b["width"], pick_b["height"])
+            positions_b, row_layout_b, otsu_b = self._detect_stream(
+                label_b, slug_b, image_b_on, image_b_off, stream_b_roi, output_dir,
+                min_blob_area, row_gap_px, neighborhood_size,
+            )
+            streams.append((label_b, positions_b))
+            if row_layout_a != row_layout_b:
+                self._log(
+                    "WARNING: {} row layout {} != {} row layout {} - led_id may not match the same "
+                    "physical LED in both dicts.".format(label_a, row_layout_a, label_b, row_layout_b)
+                )
 
+        for label, positions in streams:
+            weakest_id, weakest_contrast = min(
+                ((led_id, vals[2] - vals[3]) for led_id, vals in positions.items()),
+                key=lambda pair: pair[1],
+            )
+            self._log("{} weakest LED contrast: led_id={} on-off={:.2f}".format(label, weakest_id, weakest_contrast))
+            if weakest_contrast < min_acceptable_contrast:
+                self._log("  WARNING: this LED's on/off gap is small - its threshold may be unreliable.")
+
+        if single_stream:
+            update_config_leds(config_path, camera_name, slug_a, positions_a, res_a)
+            self._log("Saved {} LED positions ({}={}) to {}".format(len(positions_a), label_a, slug_a, config_path))
+        else:
+            update_config_leds(config_path, camera_name, slug_a, positions_a, res_a, slug_b, positions_b, res_b)
+            self._log("Saved {} LED positions per stream ({}={}, {}={}) to {}".format(
+                len(positions_a), label_a, slug_a, label_b, slug_b, config_path
+            ))
+        # Retained for ThresholdTuningPage's LED Detection Threshold Tuning
+        # section - lets it offer a manual detection-threshold override
+        # using these SAME already-captured frames, with no new camera
+        # capture of its own. Set as the very last statement before
+        # calibration_done fires - see __init__'s comment on this attribute.
+        self.last_calibration_result = dict(
+            image_a_on=image_a_on, image_a_off=image_a_off,
+            image_b_on=image_b_on, image_b_off=image_b_off,
+            stream_a_otsu_threshold=int(round(otsu_a)), stream_b_otsu_threshold=int(round(otsu_b)) if otsu_b is not None else None,
+            min_blob_area=min_blob_area, row_gap_px=row_gap_px, neighborhood_size=neighborhood_size,
+        )
+        # Lets a later Back-from-Threshold-Tuning visit click Continue
+        # straight through instead of re-running a real capture - see
+        # continue_button's own comment in __init__.
+        self.continue_button.setEnabled(True)
+        self.calibration_done.emit()
+
+    def _detect_stream(self, label, slug, image_on, image_off, roi, output_dir,
+                       min_blob_area, row_gap_px, neighborhood_size):
+        """One stream's LED detection + grid assignment + debug image -
+        shared by stream A and (when present) stream B. Returns
+        (positions, row_layout, otsu_threshold)."""
         # Cropped, not just masked - detect_led_centroids' Otsu threshold
         # needs a histogram dominated by the LEDs and their own gaps, not
         # diluted by a huge sea of masked-out zero pixels from the rest of
@@ -232,14 +288,12 @@ class CalibrationPage(QWidget):
         # "everything inside the ROI" as the two classes, merging the
         # entire LED grid into one blob instead of separating individual
         # LEDs from the gaps between them).
-        cropped_a = crop_to_roi(image_a_on, stream_a_roi)
-        cropped_b = crop_to_roi(image_b_on, stream_b_roi)
-
-        self._log("Detecting LEDs in {} frame...".format(label_a))
-        centroids_a, otsu_a = detect_led_centroids(cropped_a, None, min_blob_area)
-        centroids_a = merge_close_centroids(centroids_a)
-        self._log("Detected {} LED(s) in {} (Otsu threshold {}).".format(len(centroids_a), label_a, otsu_a))
-        debug_path_a = os.path.join(output_dir, "debug_{}_detection.png".format(slug_a))
+        cropped = crop_to_roi(image_on, roi)
+        self._log("Detecting LEDs in {} frame...".format(label))
+        centroids, otsu = detect_led_centroids(cropped, None, min_blob_area)
+        centroids = merge_close_centroids(centroids)
+        self._log("Detected {} LED(s) in {} (Otsu threshold {}).".format(len(centroids), label, otsu))
+        debug_path = os.path.join(output_dir, "debug_{}_detection.png".format(slug))
         try:
             # build_grid_positions numbers the debug image in the SAME
             # row-major order assign_grid_ids itself assigns as led_id -
@@ -249,69 +303,19 @@ class CalibrationPage(QWidget):
             # Tuning/Live Session use for that same LED, while still
             # happening to look grid-like enough to read as "wrong" rather
             # than obviously arbitrary).
-            positions_a, row_layout_a, debug_centroids_a = build_grid_positions(
-                centroids_a, stream_a_roi, image_a_on, image_a_off, row_gap_px, neighborhood_size,
+            positions, row_layout, debug_centroids = build_grid_positions(
+                centroids, roi, image_on, image_off, row_gap_px, neighborhood_size,
             )
         except RuntimeError:
             # No LEDs detected at all - there's no real grid order to
             # show yet, but a debug image (in raw, arbitrary detection
             # order) still needs to exist for exactly this failure case,
             # where seeing the cropped ROI/threshold matters most.
-            save_debug_detection_image(cropped_a, centroids_a, debug_path_a)
+            save_debug_detection_image(cropped, centroids, debug_path)
             raise
-        save_debug_detection_image(cropped_a, debug_centroids_a, debug_path_a)
-        self._log("Saved debug image (cropped ROI + detected LEDs circled, numbered by grid ID): {}".format(debug_path_a))
-
-        self._log("Detecting LEDs in {} frame...".format(label_b))
-        centroids_b, otsu_b = detect_led_centroids(cropped_b, None, min_blob_area)
-        centroids_b = merge_close_centroids(centroids_b)
-        self._log("Detected {} LED(s) in {} (Otsu threshold {}).".format(len(centroids_b), label_b, otsu_b))
-        debug_path_b = os.path.join(output_dir, "debug_{}_detection.png".format(slug_b))
-        try:
-            positions_b, row_layout_b, debug_centroids_b = build_grid_positions(
-                centroids_b, stream_b_roi, image_b_on, image_b_off, row_gap_px, neighborhood_size,
-            )
-        except RuntimeError:
-            save_debug_detection_image(cropped_b, centroids_b, debug_path_b)
-            raise
-        save_debug_detection_image(cropped_b, debug_centroids_b, debug_path_b)
-        self._log("Saved debug image (cropped ROI + detected LEDs circled, numbered by grid ID): {}".format(debug_path_b))
-
-        if row_layout_a != row_layout_b:
-            self._log(
-                "WARNING: {} row layout {} != {} row layout {} - led_id may not match the same "
-                "physical LED in both dicts.".format(label_a, row_layout_a, label_b, row_layout_b)
-            )
-
-        for label, positions in ((label_a, positions_a), (label_b, positions_b)):
-            weakest_id, weakest_contrast = min(
-                ((led_id, vals[2] - vals[3]) for led_id, vals in positions.items()),
-                key=lambda pair: pair[1],
-            )
-            self._log("{} weakest LED contrast: led_id={} on-off={:.2f}".format(label, weakest_id, weakest_contrast))
-            if weakest_contrast < min_acceptable_contrast:
-                self._log("  WARNING: this LED's on/off gap is small - its threshold may be unreliable.")
-
-        update_config_leds(config_path, camera_name, slug_a, positions_a, res_a, slug_b, positions_b, res_b)
-        self._log("Saved {} LED positions per stream ({}={}, {}={}) to {}".format(
-            len(positions_a), label_a, slug_a, label_b, slug_b, config_path
-        ))
-        # Retained for ThresholdTuningPage's LED Detection Threshold Tuning
-        # section - lets it offer a manual detection-threshold override
-        # using these SAME already-captured frames, with no new camera
-        # capture of its own. Set as the very last statement before
-        # calibration_done fires - see __init__'s comment on this attribute.
-        self.last_calibration_result = dict(
-            image_a_on=image_a_on, image_a_off=image_a_off,
-            image_b_on=image_b_on, image_b_off=image_b_off,
-            stream_a_otsu_threshold=int(round(otsu_a)), stream_b_otsu_threshold=int(round(otsu_b)),
-            min_blob_area=min_blob_area, row_gap_px=row_gap_px, neighborhood_size=neighborhood_size,
-        )
-        # Lets a later Back-from-Threshold-Tuning visit click Continue
-        # straight through instead of re-running a real capture - see
-        # continue_button's own comment in __init__.
-        self.continue_button.setEnabled(True)
-        self.calibration_done.emit()
+        save_debug_detection_image(cropped, debug_centroids, debug_path)
+        self._log("Saved debug image (cropped ROI + detected LEDs circled, numbered by grid ID): {}".format(debug_path))
+        return positions, row_layout, otsu
 
     def _capture_on_off_for_stream(self, groups, pick, stream_name, dual_panel_config, settle_frames):
         # Only this stream's own sensor needs to be opened/started - no

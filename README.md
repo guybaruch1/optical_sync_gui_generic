@@ -103,6 +103,13 @@ panels once, before any camera starts, and stops them once, after every
 camera has finished. Cameras set up with different panel wiring are
 rejected at Start.
 
+A camera can also contribute just **one** stream: add a `settings.yaml` test
+with no `stream_b_identity` and a single-stream `sensor_options` entry (copy
+the "IR1 only" example). Such a camera runs LED detection only and needs at
+least one partner camera in the run - a lone single-stream camera can't
+start. Its result is the **Cross-Camera Sync** tab; its own tab is a slim
+single-video view.
+
 On an NVIDIA Orin with **two D585 cameras on the GMSL deserializer** (not
 USB), the app can hardware-sync both cameras instead: it puts each camera
 into kernel external-sync mode (`camera_sync_mode=2` via `v4l2-ctl`) and

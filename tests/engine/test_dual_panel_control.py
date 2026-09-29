@@ -862,6 +862,12 @@ def test_single_panel_stream_for_picks():
     assert dual_panel_control.single_panel_stream_for_picks(_pick(ir), _pick(color)) is None
 
 
+def test_single_panel_stream_for_a_single_pick():
+    ir, color = rs.stream.infrared, rs.stream.color
+    assert dual_panel_control.single_panel_stream_for_picks(_pick(ir), None) == "stream_a"
+    assert dual_panel_control.single_panel_stream_for_picks(_pick(color), None) == "stream_b"
+
+
 def test_single_panel_commands_switch_hub_to_target_panel_first():
     dual_panel_control.set_single_panel_target(DUAL_PANEL_CONFIG, "stream_a")
     order = []

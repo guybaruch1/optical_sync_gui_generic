@@ -1,3 +1,5 @@
+import gc
+import os
 from unittest.mock import MagicMock
 
 import cv2
@@ -9,6 +11,18 @@ from PySide6.QtWidgets import QMessageBox
 
 from gui.pages.multi_camera_live_session_page import MultiCameraLiveSessionPage
 
+
+
+@pytest.fixture(autouse=True)
+def _collect_finished_pages():
+    # This page holds pyqtgraph plots and controller signal connections in
+    # reference cycles, so a finished test's page is freed by Python's
+    # garbage collector at a random later moment - once that was halfway
+    # through the NEXT test's page construction, crashing pyqtgraph there
+    # ("Internal C++ object (LabelItem) already deleted"). Free it at this
+    # test's own teardown instead.
+    yield
+    gc.collect()
 
 class _FakeSessionEngineThread(QObject):
     """Same fake used by tests/engine/test_multi_camera_session.py - a real
@@ -1234,7 +1248,7 @@ def test_start_all_sessions_surfaces_gmsl_engage_failure_and_unlocks_ui(qapp, tm
     # a console-only traceback, leaving the page stuck "running".
     from PySide6.QtWidgets import QMessageBox
     shown = []
-    monkeypatch.setattr(QMessageBox, "critical", staticmethod(lambda *a, **k: shown.append(a) or QMessageBox.Ok))
+    monkeypatch.setattr(QMessageBox, "critical", staticmethod(lambda parent, *a, **k: shown.append(a) or QMessageBox.Ok))
     page, fake_threads, created = _page_with_fake_gmsl()
 
     def failing_factory(**kwargs):
@@ -1295,3 +1309,171 @@ def test_start_all_sessions_runs_free_run_guard_and_reports_reset(qapp, tmp_path
     assert page._controller._gmsl_sync is guards[0]
     guards[0].engage.assert_called_once()
     assert "left over" in page.status_label.text()
+
+
+def _single_stream_config(tmp_path, **overrides):
+    return _camera_config(
+        tmp_path, pick_b=None, stream_b_threshold=None, stream_b_xy=None, stream_b_roi=None,
+        stream_b_label=None, **overrides,
+    )
+
+
+def _two_single_stream_cameras(tmp_path):
+    return [
+        {"camera_id": "cam1", "label": "D455 A", "is_master": True,
+         "config": _single_stream_config(tmp_path, device_serial="SN1")},
+        {"camera_id": "cam2", "label": "D455 B", "is_master": False,
+         "config": _single_stream_config(tmp_path, device_serial="SN2")},
+    ]
+
+
+def test_stream_identities_omit_stream_b_for_a_single_stream_camera(tmp_path):
+    from gui.pages.multi_camera_live_session_page import _stream_identities
+    assert _stream_identities(_single_stream_config(tmp_path)) == {"stream_a": "infrared1"}
+
+
+def test_single_stream_cameras_get_slim_panels_and_one_cross_series(qapp, tmp_path):
+    page, _ = _page_with_fake_threads()
+    page.set_cameras(object(), _two_single_stream_cameras(tmp_path))
+    assert all(panel.stream_b_panel is None for panel in page._panels.values())
+    assert page._cross_pair_series_keys == {("cam2", "infrared1"): "infrared1"}
+
+
+def test_start_all_sessions_uses_led_detection_metric_for_single_stream_cameras(qapp, tmp_path):
+    from engine.metrics import LedDetectionMetric
+    page, fake_threads = _page_with_fake_threads()
+    page.set_cameras(object(), _two_single_stream_cameras(tmp_path))
+
+    page.start_all_sessions()
+
+    kwargs = fake_threads["SN1"].kwargs
+    assert kwargs["pick_b"] is None
+    assert kwargs["stream_b_xy"] is None
+    assert isinstance(kwargs["position_gap_metric"], LedDetectionMetric)
+    metric_names = [m.name for m in kwargs["test_session"].config.metrics]
+    assert metric_names == ["led_detection"]
+    assert kwargs["test_session"].config.stream_b_fps is None
+
+
+def test_mixed_run_keeps_intra_camera_metrics_for_the_two_stream_camera(qapp, tmp_path):
+    page, fake_threads = _page_with_fake_threads()
+    cameras = [
+        {"camera_id": "cam1", "label": "D455 A", "is_master": True,
+         "config": _single_stream_config(tmp_path, device_serial="SN1")},
+        {"camera_id": "cam2", "label": "D455 B", "is_master": False,
+         "config": _camera_config(tmp_path, device_serial="SN2")},
+    ]
+    page.set_cameras(object(), cameras)
+
+    page.start_all_sessions()
+
+    assert [m.name for m in fake_threads["SN2"].kwargs["test_session"].config.metrics] == [
+        "pairing_gap_us", "position_gap_ms"]
+    assert page._panels["cam2"].stream_b_panel is not None
+
+
+def test_gmsl_sync_check_failure_pops_up_and_success_shows_status(qapp, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    shown = []
+    monkeypatch.setattr(QMessageBox, "critical", staticmethod(lambda parent, *a, **k: shown.append(a) or QMessageBox.Ok))
+    page, _, _ = _page_with_fake_gmsl()
+    page.set_cameras(object(), _two_cameras(tmp_path), gmsl_tsc_sync=GMSL_CONFIG)
+    page.start_all_sessions()
+    assert "confirming" in page.status_label.text()
+
+    page._controller.gmsl_sync_verified.emit(["/dev/video2", "/dev/video10"])
+    assert "verified" in page.status_label.text() and "/dev/video10" in page.status_label.text()
+    assert "30 Hz" in page.status_label.text()
+
+    page._controller.gmsl_sync_failed.emit("camera_sync_mode on /dev/video2 reads 0")
+    assert len(shown) == 1 and "reads 0" in shown[0][1]
+    assert "failed" in page.status_label.text()
+
+
+def test_gmsl_run_enables_global_time_and_leaves_the_sdk_emitter_alone(qapp, tmp_path):
+    page, fake_threads, _ = _page_with_fake_gmsl()
+    page.set_cameras(object(), _two_cameras(tmp_path), gmsl_tsc_sync={**GMSL_CONFIG, "laser_off": True})
+
+    page.start_all_sessions()
+
+    assert fake_threads
+    for thread in fake_threads.values():
+        assert thread.kwargs["enable_global_time"] is True
+        assert thread.kwargs["camera_controls"]["emitter_enabled"] is None
+
+
+def test_non_gmsl_run_keeps_capture_defaults(qapp, tmp_path):
+    page, fake_threads, _ = _page_with_fake_gmsl()
+    cameras = _two_cameras(tmp_path)
+    page.set_cameras(object(), cameras)
+
+    page.start_all_sessions()
+
+    assert fake_threads
+    for thread in fake_threads.values():
+        assert "enable_global_time" not in thread.kwargs
+        assert thread.kwargs["camera_controls"] == cameras[0]["config"]["camera_controls"]
+
+
+def test_verified_status_mentions_warmup_and_projector_warnings(qapp, tmp_path):
+    page, _, created = _page_with_fake_gmsl()
+    page.set_cameras(object(), _two_cameras(tmp_path), gmsl_tsc_sync={**GMSL_CONFIG, "global_ts_skip_s": 10.0})
+    page.start_all_sessions()
+    created[0].warnings = ["/dev/video2: could not switch the projector off (failed)"]
+
+    page._controller.gmsl_sync_verified.emit(["/dev/video2", "/dev/video10"])
+
+    text = page.status_label.text()
+    assert "first 10 s" in text and "projector" in text
+
+
+def test_gmsl_run_follows_the_depth_switch(qapp, tmp_path):
+    for enable_depth in (False, True):
+        page, fake_threads, _ = _page_with_fake_gmsl()
+        page.set_cameras(object(), _two_cameras(tmp_path), gmsl_tsc_sync={**GMSL_CONFIG, "enable_depth": enable_depth})
+
+        page.start_all_sessions()
+
+        assert fake_threads
+        assert all(t.kwargs["enable_depth_for_ir_sync"] is enable_depth for t in fake_threads.values())
+
+
+def test_gmsl_run_writes_its_settings_and_result_to_the_run_folder(qapp, tmp_path):
+    import json
+    page, _, _ = _page_with_fake_gmsl()
+    page.set_cameras(object(), _two_cameras(tmp_path), gmsl_tsc_sync=GMSL_CONFIG)
+    page.start_all_sessions()
+    record_path = os.path.join(page._run_dir, "gmsl_tsc_sync.json")
+
+    with open(record_path, encoding="utf-8") as handle:
+        record = json.load(handle)
+    assert record["settings"] == GMSL_CONFIG
+    assert record["result"].startswith("engaged")
+
+    page._controller.gmsl_sync_verified.emit(["/dev/video2", "/dev/video10"])
+    with open(record_path, encoding="utf-8") as handle:
+        record = json.load(handle)
+    assert record["result"] == "verified" and record["nodes"] == ["/dev/video2", "/dev/video10"]
+
+
+def test_gmsl_run_record_keeps_the_failure_message(qapp, tmp_path, monkeypatch):
+    import json
+    from PySide6.QtWidgets import QMessageBox
+    monkeypatch.setattr(QMessageBox, "critical", staticmethod(lambda *a, **k: QMessageBox.Ok))
+    page, _, _ = _page_with_fake_gmsl()
+    page.set_cameras(object(), _two_cameras(tmp_path), gmsl_tsc_sync=GMSL_CONFIG)
+    page.start_all_sessions()
+
+    page._controller.gmsl_sync_failed.emit("camera_sync_mode on /dev/video2 reads 0")
+
+    with open(os.path.join(page._run_dir, "gmsl_tsc_sync.json"), encoding="utf-8") as handle:
+        record = json.load(handle)
+    assert record["result"] == "failed" and "reads 0" in record["message"]
+
+
+def test_non_gmsl_run_writes_no_gmsl_record(qapp, tmp_path):
+    page, _, _ = _page_with_fake_gmsl()
+    page.set_cameras(object(), _two_cameras(tmp_path))
+    page.start_all_sessions()
+
+    assert not os.path.exists(os.path.join(page._run_dir, "gmsl_tsc_sync.json"))
