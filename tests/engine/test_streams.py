@@ -1209,3 +1209,104 @@ def test_resolve_camera_tests_single_stream_test_yields_pick_b_none():
     resolved = resolve_camera_tests(device_options, parsed_tests)
 
     assert resolved == [{"test_name": "IR1 only", "options": [{"pick_a": device_options[0], "pick_b": None}]}]
+
+
+def test_resolve_and_group_single_pick_returns_one_group_with_one_profile():
+    ir_profile = FakeProfile2(rs.stream.infrared, 1, rs.format.y8, 1280, 720, 30)
+    ir_sensor = FakeSensor2(profiles=[ir_profile])
+    device = FakeDevice([ir_sensor])
+    pick_a = {"sensor_index": 0, "stream_type": rs.stream.infrared, "stream_index": 1,
+              "format": rs.format.y8, "width": 1280, "height": 720, "fps": 30}
+
+    groups = resolve_and_group(device, pick_a, None)
+
+    assert groups == [(ir_sensor, [ir_profile])]
+
+
+def test_exposure_for_group_with_no_pick_b_returns_exposure_a():
+    ir_profile = FakeProfile2(rs.stream.infrared, 1, rs.format.y8, 1280, 720, 30)
+    pick_a = {"stream_type": rs.stream.infrared, "stream_index": 1,
+              "format": rs.format.y8, "width": 1280, "height": 720, "fps": 30}
+    assert exposure_for_group([ir_profile], pick_a, None, exposure_a=1111, exposure_b=None) == 1111
+
+
+def test_read_global_ts_us_with_only_frame_a():
+    frame_a = _FakeGlobalTsFrame(1000.5, rs.timestamp_domain.global_time)
+    assert _read_global_ts_us(frame_a, None) == (1_000_500.0, None)
+
+
+def test_depth_sync_stream_for_a_single_infrared_pick():
+    capture = ContinuousCapture("SN1", _ir_pick(width=848, height=480, fps=60), None, enable_depth_for_ir_sync=True)
+    assert capture._depth_sync_stream() == (848, 480, 60)
+
+
+def test_depth_sync_stream_is_none_for_a_single_color_pick():
+    capture = ContinuousCapture("SN1", _color_pick(), None, enable_depth_for_ir_sync=True)
+    assert capture._depth_sync_stream() is None
+
+
+class _RecordingConfig:
+    def __init__(self):
+        self.enabled = []
+    def enable_device(self, serial):
+        pass
+    def enable_stream(self, *args):
+        self.enabled.append(args)
+
+
+def test_build_config_single_pick_enables_only_stream_a_and_depth():
+    capture = ContinuousCapture("SN1", _ir_pick(), None, enable_depth_for_ir_sync=True)
+    with patch("engine.streams.rs.config", _RecordingConfig):
+        config = capture._build_config()
+    stream_types = [args[0] for args in config.enabled]
+    assert stream_types == [rs.stream.infrared, rs.stream.depth]
+
+
+class _FakeStreamFrame:
+    def __init__(self, width, height, ts_us, frame_number, global_ts_ms):
+        self._data = bytes(width * height)
+        self._ts_us = ts_us
+        self._frame_number = frame_number
+        self._global_ts_ms = global_ts_ms
+    def __bool__(self):
+        return True
+    def get_data(self):
+        return self._data
+    def supports_frame_metadata(self, metadata):
+        return True
+    def get_frame_metadata(self, metadata):
+        return self._ts_us
+    def get_frame_number(self):
+        return self._frame_number
+    def get_timestamp(self):
+        return self._global_ts_ms
+    def get_frame_timestamp_domain(self):
+        return rs.timestamp_domain.global_time
+
+
+class _FakeFrameset:
+    def __init__(self, ir_frame):
+        self._ir_frame = ir_frame
+    def get_infrared_frame(self, index):
+        return self._ir_frame
+    def get_color_frame(self, index):
+        raise AssertionError("single-stream capture must never ask for a second stream")
+
+
+class _FakeRunningPipeline:
+    def __init__(self, frameset):
+        self._frameset = frameset
+    def wait_for_frames(self):
+        return self._frameset
+
+
+def test_frames_with_diagnostics_single_pick_yields_none_for_stream_b():
+    pick_a = _ir_pick(width=4, height=2)
+    capture = ContinuousCapture("SN1", pick_a, None, capture_global_ts=True)
+    capture._pipeline = _FakeRunningPipeline(_FakeFrameset(_FakeStreamFrame(4, 2, 1234.0, 7, 5.0)))
+
+    image_a, image_b, ts_a, ts_b, num_a, num_b, global_a, global_b = next(capture.frames_with_diagnostics())
+
+    assert image_a.shape == (2, 4)
+    assert (image_b, ts_b, num_b, global_b) == (None, None, None, None)
+    assert (ts_a, num_a, global_a) == (1234.0, 7, 5000.0)
